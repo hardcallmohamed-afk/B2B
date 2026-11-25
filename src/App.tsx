@@ -35,11 +35,38 @@ import {
   Bot,
   KanbanSquare,
   Table2,
+  Cloud,
+  LogOut,
 } from 'lucide-react';
+import { onAuthStateChanged, type User } from 'firebase/auth';
+import { doc, onSnapshot, query, where } from 'firebase/firestore';
 import { KpiTrendChart } from './components/KpiTrendChart';
 import { KanbanBoard } from './components/KanbanBoard';
 import { AiCopilotDrawer } from './components/AiCopilotDrawer';
 import { moveFicheToStatut } from './utils/analytics';
+import {
+  auth,
+  db,
+  signInWithGoogle,
+  signOutUser,
+  ensureUserWorkspace,
+  syncWorkspaceToFirestore,
+  syncFichesDiffToFirestore,
+  syncSkillsDiffToFirestore,
+  getUserFichesCollection,
+  getUserSkillsCollection,
+  handleFirestoreError,
+  OperationType,
+} from './firebase';
+import {
+  sanitizeFichePayload,
+  sanitizeSkillPayload,
+  sanitizeWorkspacePayload,
+  serializeDocCanonical,
+  computeCollectionSyncDiff,
+  type SanitizedFicheDoc,
+  type SanitizedEmailSkillDoc,
+} from './utils/firestoreSanitize';
 
 // ============================================================================
 // 1. TYPES, SCHÉMA STRICT (9 COLONNES) & CODE COULEUR ORANGE PRO (6 SEGMENTS)
@@ -2346,13 +2373,13 @@ export function generatePersonalizedEmail(
 // ============================================================================
 
 export default function App() {
-  // 1. Portefeuille CRM persistant (orange-pro-mdm-v1)
+  // 1. Portefeuille CRM persistant (localStorage + synchronisation Cloud Firestore)
   const [fiches, setFiches] = useState<FicheEntreprise[]>(() => {
     try {
       const raw = window.localStorage.getItem(STORAGE_KEY_PORTFOLIO);
-      if (raw) {
+      if (raw !== null) {
         const parsed = JSON.parse(raw);
-        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+        if (Array.isArray(parsed)) return parsed;
       }
     } catch {
       // Fallback
@@ -2594,7 +2621,23 @@ export default function App() {
   const [emailModalFiche, setEmailModalFiche] = useState<FicheEntreprise | null>(null);
   const [emailCycle, setEmailCycle] = useState<CycleContrat>('premier_contact');
   const [emailTon, setEmailTon] = useState<TonEmail>('terrain');
-  const [emailSignature, setEmailSignature] = useState('Cordialement,\nConseiller Commercial Orange Pro');
+  const [emailSignature, setEmailSignature] = useState<string>(() => {
+    try {
+      const saved = window.localStorage.getItem('orange_pro_signature_v1');
+      if (saved !== null) return saved;
+    } catch {
+      // Fallback
+    }
+    return 'Cordialement,\nConseiller Commercial Orange Pro';
+  });
+  useEffect(() => {
+    try {
+      window.localStorage.setItem('orange_pro_signature_v1', emailSignature);
+    } catch {
+      // Ignore quota
+    }
+  }, [emailSignature]);
+
   const [emailCustomPrompt, setEmailCustomPrompt] = useState('');
   const [emailObjet, setEmailObjet] = useState('');
   const [emailCorps, setEmailCorps] = useState('');
@@ -2608,6 +2651,384 @@ export default function App() {
     setToast({ msg, type });
     if (toastTimerRef.current) window.clearTimeout(toastTimerRef.current);
     toastTimerRef.current = window.setTimeout(() => setToast(null), 4000);
+  };
+
+  // 11. Sauvegarde Cloud temps réel (Firebase Auth Google + Firestore)
+  const [cloudUser, setCloudUser] = useState<User | null>(null);
+  const [authReady, setAuthReady] = useState(false);
+  const [cloudSynced, setCloudSynced] = useState(false);
+  const [cloudBusy, setCloudBusy] = useState(false);
+
+  const knownCloudFichesRef = useRef<Map<string, { hash: string; doc: SanitizedFicheDoc }>>(new Map());
+  const knownCloudSkillsRef = useRef<Map<string, { hash: string; doc: SanitizedEmailSkillDoc }>>(new Map());
+  const knownCloudWorkspaceHashRef = useRef<string>('');
+  const latestLocalStateRef = useRef({ fiches, villesState, emailSignature, emailSkills });
+  latestLocalStateRef.current = { fiches, villesState, emailSignature, emailSkills };
+
+  useEffect(() => {
+    const unsub = onAuthStateChanged(auth, (u) => {
+      setCloudUser(u);
+      setAuthReady(true);
+      if (!u) {
+        setCloudSynced(false);
+        knownCloudFichesRef.current = new Map();
+        knownCloudSkillsRef.current = new Map();
+        knownCloudWorkspaceHashRef.current = '';
+      }
+    });
+    return () => unsub();
+  }, []);
+
+  useEffect(() => {
+    if (!authReady || !cloudUser) return;
+    let cancelled = false;
+    let unsubUser: (() => void) | null = null;
+    let unsubFiches: (() => void) | null = null;
+    let unsubSkills: (() => void) | null = null;
+
+    const uid = cloudUser.uid;
+    setCloudBusy(true);
+
+    (async () => {
+      try {
+        const snapshotLocal = latestLocalStateRef.current;
+        const { created } = await ensureUserWorkspace(
+          uid,
+          {
+            villesAll: snapshotLocal.villesState.all,
+            villesActive: snapshotLocal.villesState.active,
+            modeVille: snapshotLocal.villesState.mode,
+            defaultVille: snapshotLocal.villesState.defaultVille,
+            emailSignature: snapshotLocal.emailSignature,
+            seeded: true,
+          },
+          snapshotLocal.fiches,
+          snapshotLocal.emailSkills
+        );
+
+        if (cancelled) return;
+
+        if (created) {
+          const initialWorkspace = sanitizeWorkspacePayload(uid, {
+            villesAll: snapshotLocal.villesState.all,
+            villesActive: snapshotLocal.villesState.active,
+            modeVille: snapshotLocal.villesState.mode,
+            defaultVille: snapshotLocal.villesState.defaultVille,
+            emailSignature: snapshotLocal.emailSignature,
+            seeded: true,
+          });
+          knownCloudWorkspaceHashRef.current = serializeDocCanonical(
+            initialWorkspace as unknown as Record<string, unknown>
+          );
+
+          const fichesMap = new Map<string, { hash: string; doc: SanitizedFicheDoc }>();
+          for (const f of snapshotLocal.fiches) {
+            const clean = sanitizeFichePayload(uid, f);
+            fichesMap.set(clean.id, {
+              hash: serializeDocCanonical(clean as unknown as Record<string, unknown>),
+              doc: clean,
+            });
+          }
+          knownCloudFichesRef.current = fichesMap;
+
+          const skillsMap = new Map<string, { hash: string; doc: SanitizedEmailSkillDoc }>();
+          for (const s of snapshotLocal.emailSkills) {
+            const clean = sanitizeSkillPayload(uid, s);
+            skillsMap.set(clean.id, {
+              hash: serializeDocCanonical(clean as unknown as Record<string, unknown>),
+              doc: clean,
+            });
+          }
+          knownCloudSkillsRef.current = skillsMap;
+        }
+
+        unsubUser = onSnapshot(
+          doc(db, 'users', uid),
+          (snap) => {
+            if (!snap.exists()) return;
+            const data = snap.data();
+            const cleanWs = sanitizeWorkspacePayload(uid, {
+              villesAll: Array.isArray(data.villesAll) ? data.villesAll : DEFAULT_VILLES_MEKNES,
+              villesActive: Array.isArray(data.villesActive) ? data.villesActive : DEFAULT_VILLES_MEKNES,
+              modeVille: data.modeVille === 'filter' ? 'filter' : 'default',
+              defaultVille: typeof data.defaultVille === 'string' ? data.defaultVille : 'Meknès',
+              emailSignature: typeof data.emailSignature === 'string' ? data.emailSignature : '',
+              seeded: Boolean(data.seeded),
+            });
+            const nextHash = serializeDocCanonical(cleanWs as unknown as Record<string, unknown>);
+            if (nextHash === knownCloudWorkspaceHashRef.current) return;
+            knownCloudWorkspaceHashRef.current = nextHash;
+
+            setVillesState({
+              all: cleanWs.villesAll.length > 0 ? cleanWs.villesAll : DEFAULT_VILLES_MEKNES,
+              active: cleanWs.villesActive,
+              mode: cleanWs.modeVille,
+              defaultVille: cleanWs.defaultVille,
+            });
+            setEmailSignature(cleanWs.emailSignature);
+          },
+          (err) => {
+            try {
+              handleFirestoreError(err, OperationType.GET, `users/${uid}`);
+            } catch {
+              notify('Erreur de lecture de la configuration Cloud.', 'err');
+            }
+          }
+        );
+
+        unsubFiches = onSnapshot(
+          query(getUserFichesCollection(uid), where('ownerId', '==', uid)),
+          (snap) => {
+            const remoteFiches: FicheEntreprise[] = [];
+            const nextKnown = new Map<string, { hash: string; doc: SanitizedFicheDoc }>();
+
+            snap.forEach((docSnap) => {
+              const d = docSnap.data();
+              const clean = sanitizeFichePayload(uid, {
+                id: docSnap.id,
+                societe: typeof d.societe === 'string' ? d.societe : '',
+                secteur: typeof d.secteur === 'string' ? d.secteur : 'pme',
+                ville: typeof d.ville === 'string' ? d.ville : '',
+                telephone: typeof d.telephone === 'string' ? d.telephone : '',
+                email: typeof d.email === 'string' ? d.email : '',
+                contact: typeof d.contact === 'string' ? d.contact : '',
+                role: typeof d.role === 'string' ? d.role : '',
+                source: typeof d.source === 'string' ? d.source : '',
+                effectif: typeof d.effectif === 'string' ? d.effectif : '',
+                statut: typeof d.statut === 'string' ? d.statut : 'À contacter',
+                siteWeb: typeof d.siteWeb === 'string' ? d.siteWeb : undefined,
+                verifieWeb: typeof d.verifieWeb === 'boolean' ? d.verifieWeb : undefined,
+                pistesEnrichissement: Array.isArray(d.pistesEnrichissement) ? d.pistesEnrichissement : undefined,
+                dateAjout: typeof d.dateAjout === 'string' ? d.dateAjout : new Date().toISOString(),
+              });
+              nextKnown.set(clean.id, {
+                hash: serializeDocCanonical(clean as unknown as Record<string, unknown>),
+                doc: clean,
+              });
+              remoteFiches.push({
+                id: clean.id,
+                societe: clean.societe,
+                secteur: clean.secteur as SecteurCode,
+                ville: clean.ville,
+                telephone: clean.telephone,
+                email: clean.email,
+                contact: clean.contact,
+                role: clean.role,
+                source: clean.source,
+                effectif: clean.effectif,
+                statut: clean.statut as StatutCRM,
+                ...(clean.siteWeb !== undefined ? { siteWeb: clean.siteWeb } : {}),
+                ...(clean.verifieWeb !== undefined ? { verifieWeb: clean.verifieWeb } : {}),
+                ...(clean.pistesEnrichissement !== undefined
+                  ? { pistesEnrichissement: clean.pistesEnrichissement }
+                  : {}),
+                dateAjout: clean.dateAjout,
+              });
+            });
+
+            remoteFiches.sort((a, b) => (b.dateAjout || '').localeCompare(a.dateAjout || ''));
+
+            const prevKnown = knownCloudFichesRef.current;
+            let same = prevKnown.size === nextKnown.size;
+            if (same) {
+              for (const [k, v] of nextKnown.entries()) {
+                if (prevKnown.get(k)?.hash !== v.hash) {
+                  same = false;
+                  break;
+                }
+              }
+            }
+            knownCloudFichesRef.current = nextKnown;
+            if (!same) {
+              setFiches(remoteFiches);
+            }
+          },
+          (err) => {
+            try {
+              handleFirestoreError(err, OperationType.LIST, `users/${uid}/fiches`);
+            } catch {
+              notify('Erreur de synchronisation des fiches Cloud.', 'err');
+            }
+          }
+        );
+
+        unsubSkills = onSnapshot(
+          query(getUserSkillsCollection(uid), where('ownerId', '==', uid)),
+          (snap) => {
+            const remoteSkills: EmailSkill[] = [];
+            const nextKnown = new Map<string, { hash: string; doc: SanitizedEmailSkillDoc }>();
+
+            snap.forEach((docSnap) => {
+              const d = docSnap.data();
+              const clean = sanitizeSkillPayload(uid, {
+                id: docSnap.id,
+                nom: typeof d.nom === 'string' ? d.nom : '',
+                description: typeof d.description === 'string' ? d.description : '',
+                role: typeof d.role === 'string' ? d.role : '',
+                regles: typeof d.regles === 'string' ? d.regles : '',
+                ctaStyle: typeof d.ctaStyle === 'string' ? d.ctaStyle : '',
+                isBuiltin: typeof d.isBuiltin === 'boolean' ? d.isBuiltin : undefined,
+              });
+              nextKnown.set(clean.id, {
+                hash: serializeDocCanonical(clean as unknown as Record<string, unknown>),
+                doc: clean,
+              });
+              remoteSkills.push({
+                id: clean.id,
+                nom: clean.nom,
+                description: clean.description,
+                role: clean.role,
+                regles: clean.regles,
+                ctaStyle: clean.ctaStyle,
+                ...(clean.isBuiltin !== undefined ? { isBuiltin: clean.isBuiltin } : {}),
+              });
+            });
+
+            const prevKnown = knownCloudSkillsRef.current;
+            let same = prevKnown.size === nextKnown.size;
+            if (same) {
+              for (const [k, v] of nextKnown.entries()) {
+                if (prevKnown.get(k)?.hash !== v.hash) {
+                  same = false;
+                  break;
+                }
+              }
+            }
+            knownCloudSkillsRef.current = nextKnown;
+            if (!same && remoteSkills.length > 0) {
+              setEmailSkills(remoteSkills);
+            }
+          },
+          (err) => {
+            try {
+              handleFirestoreError(err, OperationType.LIST, `users/${uid}/skills`);
+            } catch {
+              notify('Erreur de synchronisation des skills Cloud.', 'err');
+            }
+          }
+        );
+
+        setCloudSynced(true);
+      } catch {
+        if (!cancelled) {
+          notify('Impossible d’initialiser la synchronisation Cloud Firestore.', 'err');
+        }
+      } finally {
+        if (!cancelled) setCloudBusy(false);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      unsubUser?.();
+      unsubFiches?.();
+      unsubSkills?.();
+    };
+  }, [authReady, cloudUser]);
+
+  // Synchroniser automatiquement toute modification de fiches vers Firestore
+  useEffect(() => {
+    if (!cloudUser || !cloudSynced) return;
+    const uid = cloudUser.uid;
+    const sanitized = fiches.map((f) => sanitizeFichePayload(uid, f));
+    const diff = computeCollectionSyncDiff(knownCloudFichesRef.current, sanitized);
+    if (diff.toCreate.length === 0 && diff.toUpdate.length === 0 && diff.toDelete.length === 0) {
+      return;
+    }
+
+    const nextKnown = new Map<string, { hash: string; doc: SanitizedFicheDoc }>();
+    for (const docItem of sanitized) {
+      if (!nextKnown.has(docItem.id)) {
+        nextKnown.set(docItem.id, {
+          hash: serializeDocCanonical(docItem as unknown as Record<string, unknown>),
+          doc: docItem,
+        });
+      }
+    }
+    knownCloudFichesRef.current = nextKnown;
+
+    syncFichesDiffToFirestore(uid, diff).catch(() => {
+      notify('Échec de sauvegarde Cloud sur certaines fiches (copie locale conservée).', 'err');
+    });
+  }, [fiches, cloudUser, cloudSynced]);
+
+  // Synchroniser automatiquement les skills Email IA vers Firestore
+  useEffect(() => {
+    if (!cloudUser || !cloudSynced) return;
+    const uid = cloudUser.uid;
+    const sanitized = emailSkills.map((s) => sanitizeSkillPayload(uid, s));
+    const diff = computeCollectionSyncDiff(knownCloudSkillsRef.current, sanitized);
+    if (diff.toCreate.length === 0 && diff.toUpdate.length === 0 && diff.toDelete.length === 0) {
+      return;
+    }
+
+    const nextKnown = new Map<string, { hash: string; doc: SanitizedEmailSkillDoc }>();
+    for (const docItem of sanitized) {
+      if (!nextKnown.has(docItem.id)) {
+        nextKnown.set(docItem.id, {
+          hash: serializeDocCanonical(docItem as unknown as Record<string, unknown>),
+          doc: docItem,
+        });
+      }
+    }
+    knownCloudSkillsRef.current = nextKnown;
+
+    syncSkillsDiffToFirestore(uid, diff).catch(() => {
+      notify('Échec de sauvegarde Cloud des skills Email.', 'err');
+    });
+  }, [emailSkills, cloudUser, cloudSynced]);
+
+  // Synchroniser automatiquement les villes cibles et la signature email vers Firestore (debounce 450ms)
+  useEffect(() => {
+    if (!cloudUser || !cloudSynced) return;
+    const uid = cloudUser.uid;
+    const payload = sanitizeWorkspacePayload(uid, {
+      villesAll: villesState.all,
+      villesActive: villesState.active,
+      modeVille: villesState.mode,
+      defaultVille: villesState.defaultVille,
+      emailSignature,
+      seeded: true,
+    });
+    const nextHash = serializeDocCanonical(payload as unknown as Record<string, unknown>);
+    if (nextHash === knownCloudWorkspaceHashRef.current) return;
+
+    const timer = window.setTimeout(() => {
+      knownCloudWorkspaceHashRef.current = nextHash;
+      syncWorkspaceToFirestore(uid, payload).catch(() => {
+        notify('Échec de sauvegarde Cloud de la configuration.', 'err');
+      });
+    }, 450);
+
+    return () => window.clearTimeout(timer);
+  }, [villesState, emailSignature, cloudUser, cloudSynced]);
+
+  const handleGoogleSignIn = async () => {
+    setCloudBusy(true);
+    try {
+      const signedInUser = await signInWithGoogle();
+      notify(`Connecté au Cloud (${signedInUser.email || signedInUser.displayName || 'Google'}). Vos données sont synchronisées.`);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : '';
+      if (msg.includes('popup-closed-by-user')) {
+        notify('Connexion Google annulée.', 'warn');
+      } else if (msg.includes('unauthorized-domain')) {
+        notify('Domaine non autorisé dans Firebase Auth — ajoutez votre domaine dans Firebase Console.', 'err');
+      } else {
+        notify('Impossible d’ouvrir la connexion Google. Vérifiez le bloqueur de pop-ups.', 'err');
+      }
+    } finally {
+      setCloudBusy(false);
+    }
+  };
+
+  const handleGoogleSignOut = async () => {
+    try {
+      await signOutUser();
+      notify('Déconnecté du Cloud — bascule en mode sauvegarde locale navigateur.');
+    } catch {
+      notify('Erreur lors de la déconnexion.', 'err');
+    }
   };
 
   // Helper mise à jour statut d'une clé dans le Hub API (rotation temps réel)
@@ -4149,6 +4570,37 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
+            {cloudUser ? (
+              <div className="flex items-center gap-1 rounded-lg border border-emerald-200 bg-emerald-50 px-2.5 py-1.5 text-xs text-emerald-900 shrink-0">
+                <Cloud className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                <span
+                  className="font-semibold max-w-[140px] truncate"
+                  title={`Synchronisé sur le Cloud (${cloudUser.email || cloudUser.displayName || 'Google'})`}
+                >
+                  {cloudBusy ? 'Synchro...' : cloudUser.displayName?.split(' ')[0] || cloudUser.email || 'Cloud actif'}
+                </span>
+                <button
+                  type="button"
+                  onClick={handleGoogleSignOut}
+                  aria-label="Se déconnecter du Cloud"
+                  title="Se déconnecter du Cloud"
+                  className="ml-1 p-0.5 rounded hover:bg-emerald-200/70 text-emerald-800 transition-colors"
+                >
+                  <LogOut className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            ) : (
+              <button
+                type="button"
+                disabled={cloudBusy}
+                onClick={handleGoogleSignIn}
+                title="Connectez votre compte Google pour sauvegarder et synchroniser vos fiches dans le Cloud"
+                className="px-3 py-2 rounded-lg border border-stone-300 bg-white hover:bg-stone-50 disabled:opacity-60 text-xs font-semibold text-stone-800 flex items-center gap-1.5 whitespace-nowrap shrink-0 transition-colors"
+              >
+                <Cloud className="w-3.5 h-3.5 text-orange-600" />
+                {cloudBusy ? 'Connexion...' : 'Sauvegarde Cloud'}
+              </button>
+            )}
             <button
               type="button"
               disabled={isAuditing}

@@ -1,0 +1,246 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // 1. Global Safety Net (Default Deny)
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // 2. Hardened Global Primitives
+    function incoming() { return request.resource.data; }
+    function existing() { return resource.data; }
+    function isSignedIn() { return request.auth != null; }
+    function isVerifiedUser() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+    function isOwner(userId) {
+      return isVerifiedUser() && request.auth.uid == userId;
+    }
+
+    function isValidSecteur(val) {
+      return val is string && val in [
+        'fiduciaire', 'clinique', 'notaire', 'immobilier', 'riad_hotellerie',
+        'auto_ecole', 'pme', 'industrie', 'btp', 'gros', 'enseignement',
+        'liberal', 'commerce'
+      ];
+    }
+
+    function isValidStatut(val) {
+      return val is string && val in [
+        'À contacter', 'Appel en cours', 'RDV pris',
+        'Devis envoyé', 'Signé Orange Pro', 'Pas intéressé'
+      ];
+    }
+
+    function isValidStringList(arr, maxItems, maxItemLen) {
+      return arr is list
+        && arr.size() <= maxItems
+        && (arr.size() == 0 || (arr[0] is string && arr[0].size() <= maxItemLen));
+    }
+
+    // 3. Entity Validation Blueprints (Anti-Update-Gap)
+    function isValidUserWorkspaceConfig(data, userId) {
+      return data.keys().hasAll([
+          'ownerId', 'villesAll', 'villesActive', 'modeVille',
+          'defaultVille', 'emailSignature', 'seeded', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'ownerId', 'villesAll', 'villesActive', 'modeVille',
+          'defaultVille', 'emailSignature', 'seeded', 'createdAt', 'updatedAt'
+        ])
+        && data.ownerId is string
+        && data.ownerId == userId
+        && data.ownerId == request.auth.uid
+        && isValidStringList(data.villesAll, 50, 100)
+        && isValidStringList(data.villesActive, 50, 100)
+        && data.modeVille is string
+        && data.modeVille in ['filter', 'default']
+        && data.defaultVille is string
+        && data.defaultVille.size() >= 1 && data.defaultVille.size() <= 80
+        && data.emailSignature is string
+        && data.emailSignature.size() <= 400
+        && data.seeded is bool
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidFicheEntreprise(data, userId, ficheId) {
+      return data.keys().hasAll([
+          'ownerId', 'id', 'societe', 'secteur', 'ville', 'telephone',
+          'email', 'contact', 'role', 'source', 'effectif', 'statut',
+          'dateAjout', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'ownerId', 'id', 'societe', 'secteur', 'ville', 'telephone',
+          'email', 'contact', 'role', 'source', 'effectif', 'statut',
+          'siteWeb', 'verifieWeb', 'pistesEnrichissement',
+          'dateAjout', 'createdAt', 'updatedAt'
+        ])
+        && data.ownerId is string
+        && data.ownerId == userId
+        && data.ownerId == request.auth.uid
+        && data.id is string
+        && data.id == ficheId
+        && isValidId(data.id)
+        && data.societe is string && data.societe.size() >= 1 && data.societe.size() <= 200
+        && isValidSecteur(data.secteur)
+        && data.ville is string && data.ville.size() <= 100
+        && data.telephone is string && data.telephone.size() <= 30
+        && data.email is string && data.email.size() <= 160
+        && data.contact is string && data.contact.size() <= 160
+        && data.role is string && data.role.size() <= 120
+        && data.source is string && data.source.size() <= 500
+        && data.effectif is string && data.effectif.size() <= 20
+        && isValidStatut(data.statut)
+        && (!('siteWeb' in data) || (data.siteWeb is string && data.siteWeb.size() <= 500))
+        && (!('verifieWeb' in data) || (data.verifieWeb is bool))
+        && (!('pistesEnrichissement' in data) || isValidStringList(data.pistesEnrichissement, 15, 250))
+        && data.dateAjout is string && data.dateAjout.size() <= 64
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidEmailSkill(data, userId, skillId) {
+      return data.keys().hasAll([
+          'ownerId', 'id', 'nom', 'description', 'role', 'regles', 'ctaStyle',
+          'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'ownerId', 'id', 'nom', 'description', 'role', 'regles', 'ctaStyle',
+          'isBuiltin', 'createdAt', 'updatedAt'
+        ])
+        && data.ownerId is string
+        && data.ownerId == userId
+        && data.ownerId == request.auth.uid
+        && data.id is string
+        && data.id == skillId
+        && isValidId(data.id)
+        && data.nom is string && data.nom.size() >= 1 && data.nom.size() <= 120
+        && data.description is string && data.description.size() <= 300
+        && data.role is string && data.role.size() <= 200
+        && data.regles is string && data.regles.size() <= 4000
+        && data.ctaStyle is string && data.ctaStyle.size() <= 300
+        && (!('isBuiltin' in data) || (data.isBuiltin is bool))
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    // 4. Collection: /users/{userId} (Workspace Settings)
+    match /users/{userId} {
+      allow get: if isOwner(userId) && isValidId(userId)
+        && (resource == null || existing().ownerId == request.auth.uid);
+      allow list: if false;
+
+      allow create: if isOwner(userId)
+        && isValidId(userId)
+        && isValidUserWorkspaceConfig(incoming(), userId)
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+
+      allow update: if isOwner(userId)
+        && isValidId(userId)
+        && isValidUserWorkspaceConfig(incoming(), userId)
+        && existing().ownerId == request.auth.uid
+        && incoming().ownerId == existing().ownerId
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          // Action: Update workspace settings (cities, signature, seeded flag)
+          incoming().diff(existing()).affectedKeys().hasOnly([
+            'villesAll', 'villesActive', 'modeVille', 'defaultVille',
+            'emailSignature', 'seeded', 'updatedAt'
+          ])
+        );
+
+      allow delete: if isOwner(userId) && isValidId(userId) && existing().ownerId == request.auth.uid;
+
+      // 5. Subcollection: /users/{userId}/fiches/{ficheId} (B2B CRM Prospects)
+      match /fiches/{ficheId} {
+        allow get: if isOwner(userId) && isValidId(userId) && isValidId(ficheId)
+          && (resource == null || existing().ownerId == request.auth.uid);
+
+        allow list: if isOwner(userId) && resource.data.ownerId == request.auth.uid;
+
+        allow create: if isOwner(userId)
+          && isValidId(userId)
+          && isValidId(ficheId)
+          && isValidFicheEntreprise(incoming(), userId, ficheId)
+          && incoming().createdAt == request.time
+          && incoming().updatedAt == request.time
+          && exists(/databases/$(database)/documents/users/$(userId));
+
+        allow update: if isOwner(userId)
+          && isValidId(userId)
+          && isValidId(ficheId)
+          && isValidFicheEntreprise(incoming(), userId, ficheId)
+          && existing().ownerId == request.auth.uid
+          && incoming().ownerId == existing().ownerId
+          && incoming().id == existing().id
+          && incoming().createdAt == existing().createdAt
+          && incoming().updatedAt == request.time
+          && exists(/databases/$(database)/documents/users/$(userId))
+          && (
+            // Action 1: Kanban pipeline status transition
+            incoming().diff(existing()).affectedKeys().hasOnly(['statut', 'updatedAt'])
+            ||
+            // Action 2: Full CRM edit, web enrichment, or MDM merge
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'societe', 'secteur', 'ville', 'telephone', 'email', 'contact',
+              'role', 'source', 'effectif', 'statut', 'siteWeb', 'verifieWeb',
+              'pistesEnrichissement', 'dateAjout', 'updatedAt'
+            ])
+          );
+
+        allow delete: if isOwner(userId)
+          && isValidId(userId)
+          && isValidId(ficheId)
+          && existing().ownerId == request.auth.uid
+          && exists(/databases/$(database)/documents/users/$(userId));
+      }
+
+      // 6. Subcollection: /users/{userId}/skills/{skillId} (Email Studio Skills)
+      match /skills/{skillId} {
+        allow get: if isOwner(userId) && isValidId(userId) && isValidId(skillId)
+          && (resource == null || existing().ownerId == request.auth.uid);
+
+        allow list: if isOwner(userId) && resource.data.ownerId == request.auth.uid;
+
+        allow create: if isOwner(userId)
+          && isValidId(userId)
+          && isValidId(skillId)
+          && isValidEmailSkill(incoming(), userId, skillId)
+          && incoming().createdAt == request.time
+          && incoming().updatedAt == request.time
+          && exists(/databases/$(database)/documents/users/$(userId));
+
+        allow update: if isOwner(userId)
+          && isValidId(userId)
+          && isValidId(skillId)
+          && isValidEmailSkill(incoming(), userId, skillId)
+          && existing().ownerId == request.auth.uid
+          && incoming().ownerId == existing().ownerId
+          && incoming().id == existing().id
+          && incoming().createdAt == existing().createdAt
+          && incoming().updatedAt == request.time
+          && exists(/databases/$(database)/documents/users/$(userId))
+          && (
+            // Action: Edit skill metadata and rules
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'nom', 'description', 'role', 'regles', 'ctaStyle', 'isBuiltin', 'updatedAt'
+            ])
+          );
+
+        allow delete: if isOwner(userId)
+          && isValidId(userId)
+          && isValidId(skillId)
+          && existing().ownerId == request.auth.uid
+          && exists(/databases/$(database)/documents/users/$(userId));
+      }
+    }
+  }
+}

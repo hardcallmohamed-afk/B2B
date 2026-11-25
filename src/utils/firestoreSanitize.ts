@@ -1,0 +1,267 @@
+// Pure Firestore payload sanitization & diff helpers aligned 1:1 with firebase-blueprint.json & firestore.rules.
+
+export const VALID_SECTEUR_CODES = new Set([
+  'fiduciaire',
+  'clinique',
+  'notaire',
+  'immobilier',
+  'riad_hotellerie',
+  'auto_ecole',
+  'pme',
+  'industrie',
+  'btp',
+  'gros',
+  'enseignement',
+  'liberal',
+  'commerce',
+] as const);
+
+export const VALID_STATUT_VALUES = new Set([
+  'À contacter',
+  'Appel en cours',
+  'RDV pris',
+  'Devis envoyé',
+  'Signé Orange Pro',
+  'Pas intéressé',
+] as const);
+
+export interface FicheLike {
+  id: string;
+  societe: string;
+  secteur: string;
+  ville: string;
+  telephone: string;
+  email: string;
+  contact: string;
+  role: string;
+  source: string;
+  effectif: string;
+  statut: string;
+  siteWeb?: string;
+  verifieWeb?: boolean;
+  pistesEnrichissement?: string[];
+  dateAjout: string;
+}
+
+export interface EmailSkillLike {
+  id: string;
+  nom: string;
+  description: string;
+  role: string;
+  regles: string;
+  ctaStyle: string;
+  isBuiltin?: boolean;
+}
+
+export interface WorkspaceLike {
+  villesAll: string[];
+  villesActive: string[];
+  modeVille: 'filter' | 'default';
+  defaultVille: string;
+  emailSignature: string;
+  seeded: boolean;
+}
+
+export interface SanitizedWorkspaceDoc {
+  ownerId: string;
+  villesAll: string[];
+  villesActive: string[];
+  modeVille: 'filter' | 'default';
+  defaultVille: string;
+  emailSignature: string;
+  seeded: boolean;
+}
+
+export interface SanitizedFicheDoc {
+  ownerId: string;
+  id: string;
+  societe: string;
+  secteur: string;
+  ville: string;
+  telephone: string;
+  email: string;
+  contact: string;
+  role: string;
+  source: string;
+  effectif: string;
+  statut: string;
+  siteWeb?: string;
+  verifieWeb?: boolean;
+  pistesEnrichissement?: string[];
+  dateAjout: string;
+}
+
+export interface SanitizedEmailSkillDoc {
+  ownerId: string;
+  id: string;
+  nom: string;
+  description: string;
+  role: string;
+  regles: string;
+  ctaStyle: string;
+  isBuiltin?: boolean;
+}
+
+function clampString(value: unknown, maxLen: number, fallback = ''): string {
+  const str = typeof value === 'string' ? value : fallback;
+  return str.slice(0, maxLen);
+}
+
+export function sanitizeDocId(rawId: unknown, fallbackPrefix = 'doc'): string {
+  const base = typeof rawId === 'string' ? rawId.trim() : '';
+  const cleaned = base.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 128);
+  if (cleaned.length >= 1) return cleaned;
+  return `${fallbackPrefix}_${Date.now().toString(36)}`;
+}
+
+function sanitizeStringArray(arr: unknown, maxItems: number, maxItemLen: number): string[] {
+  if (!Array.isArray(arr)) return [];
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const item of arr) {
+    if (typeof item !== 'string') continue;
+    const trimmed = item.trim().slice(0, maxItemLen);
+    if (!trimmed || seen.has(trimmed)) continue;
+    seen.add(trimmed);
+    out.push(trimmed);
+    if (out.length >= maxItems) break;
+  }
+  return out;
+}
+
+export function sanitizeWorkspacePayload(ownerId: string, input: WorkspaceLike): SanitizedWorkspaceDoc {
+  const cleanOwnerId = sanitizeDocId(ownerId, 'user');
+  const villesAll = sanitizeStringArray(input.villesAll, 50, 100);
+  const villesActive = sanitizeStringArray(input.villesActive, 50, 100);
+  const modeVille: 'filter' | 'default' = input.modeVille === 'filter' ? 'filter' : 'default';
+  const rawDefaultVille = clampString(input.defaultVille?.trim?.() ?? '', 80);
+  const defaultVille = clampString(rawDefaultVille.length >= 1 ? rawDefaultVille : villesAll[0] || 'Meknès', 80);
+
+  return {
+    ownerId: cleanOwnerId,
+    villesAll,
+    villesActive,
+    modeVille,
+    defaultVille,
+    emailSignature: clampString(input.emailSignature, 400),
+    seeded: Boolean(input.seeded),
+  };
+}
+
+export function sanitizeFichePayload(ownerId: string, fiche: FicheLike): SanitizedFicheDoc {
+  const cleanOwnerId = sanitizeDocId(ownerId, 'user');
+  const cleanId = sanitizeDocId(fiche.id, 'op');
+  const rawSociete = clampString(fiche.societe?.trim?.() ?? '', 200);
+  const societe = rawSociete.length >= 1 ? rawSociete : 'Entreprise sans nom';
+  const secteur = VALID_SECTEUR_CODES.has(fiche.secteur as never) ? fiche.secteur : 'pme';
+  const statut = VALID_STATUT_VALUES.has(fiche.statut as never) ? fiche.statut : 'À contacter';
+  const dateAjout = clampString(fiche.dateAjout, 64) || new Date().toISOString();
+
+  const doc: SanitizedFicheDoc = {
+    ownerId: cleanOwnerId,
+    id: cleanId,
+    societe,
+    secteur,
+    ville: clampString(fiche.ville, 100),
+    telephone: clampString(fiche.telephone, 30),
+    email: clampString(fiche.email, 160),
+    contact: clampString(fiche.contact, 160),
+    role: clampString(fiche.role, 120),
+    source: clampString(fiche.source, 500),
+    effectif: clampString(fiche.effectif, 20),
+    statut,
+    dateAjout,
+  };
+
+  if (typeof fiche.siteWeb === 'string') {
+    doc.siteWeb = clampString(fiche.siteWeb, 500);
+  }
+  if (typeof fiche.verifieWeb === 'boolean') {
+    doc.verifieWeb = fiche.verifieWeb;
+  }
+  if (Array.isArray(fiche.pistesEnrichissement)) {
+    doc.pistesEnrichissement = sanitizeStringArray(fiche.pistesEnrichissement, 15, 250);
+  }
+
+  return doc;
+}
+
+export function sanitizeSkillPayload(ownerId: string, skill: EmailSkillLike): SanitizedEmailSkillDoc {
+  const cleanOwnerId = sanitizeDocId(ownerId, 'user');
+  const cleanId = sanitizeDocId(skill.id, 'skill');
+  const rawNom = clampString(skill.nom?.trim?.() ?? '', 120);
+  const nom = rawNom.length >= 1 ? rawNom : 'Skill personnalisé';
+
+  const doc: SanitizedEmailSkillDoc = {
+    ownerId: cleanOwnerId,
+    id: cleanId,
+    nom,
+    description: clampString(skill.description, 300),
+    role: clampString(skill.role, 200),
+    regles: clampString(skill.regles, 4000),
+    ctaStyle: clampString(skill.ctaStyle, 300),
+  };
+
+  if (typeof skill.isBuiltin === 'boolean') {
+    doc.isBuiltin = skill.isBuiltin;
+  }
+
+  return doc;
+}
+
+export function serializeDocCanonical(doc: Record<string, unknown>): string {
+  const keys = Object.keys(doc).sort();
+  const normalized: Record<string, unknown> = {};
+  for (const key of keys) {
+    const val = doc[key];
+    if (val !== undefined) {
+      normalized[key] = val;
+    }
+  }
+  return JSON.stringify(normalized);
+}
+
+export interface SyncDiff<T extends { id: string }> {
+  toCreate: T[];
+  toUpdate: Array<{ id: string; next: T; statusOnly: boolean }>;
+  toDelete: string[];
+}
+
+export function computeCollectionSyncDiff<T extends { id: string; statut?: string }>(
+  knownById: Map<string, { hash: string; doc: T }>,
+  nextDocs: T[]
+): SyncDiff<T> {
+  const toCreate: T[] = [];
+  const toUpdate: Array<{ id: string; next: T; statusOnly: boolean }> = [];
+  const nextIds = new Set<string>();
+
+  for (const doc of nextDocs) {
+    if (nextIds.has(doc.id)) continue;
+    nextIds.add(doc.id);
+
+    const nextHash = serializeDocCanonical(doc as unknown as Record<string, unknown>);
+    const prev = knownById.get(doc.id);
+
+    if (!prev) {
+      toCreate.push(doc);
+    } else if (prev.hash !== nextHash) {
+      // Detect pure status transition (matches Action 1 in firestore.rules)
+      const prevWithoutStatus = { ...prev.doc, statut: doc.statut };
+      const statusOnly =
+        typeof doc.statut === 'string' &&
+        doc.statut !== prev.doc.statut &&
+        serializeDocCanonical(prevWithoutStatus as unknown as Record<string, unknown>) === nextHash;
+
+      toUpdate.push({ id: doc.id, next: doc, statusOnly });
+    }
+  }
+
+  const toDelete: string[] = [];
+  for (const existingId of knownById.keys()) {
+    if (!nextIds.has(existingId)) {
+      toDelete.push(existingId);
+    }
+  }
+
+  return { toCreate, toUpdate, toDelete };
+}

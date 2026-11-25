@@ -1,0 +1,258 @@
+{
+  "entities": {
+    "UserWorkspaceConfig": {
+      "title": "UserWorkspaceConfig",
+      "description": "Configuration persistante du portefeuille Orange Pro d'un utilisateur (villes cibles, signature email, état d'initialisation).",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "villesAll": {
+          "type": "array",
+          "description": "Liste bornée des villes configurées (max 50)."
+        },
+        "villesActive": {
+          "type": "array",
+          "description": "Liste bornée des villes cochées actives (max 50)."
+        },
+        "modeVille": {
+          "type": "string",
+          "enum": ["filter", "default"]
+        },
+        "defaultVille": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "emailSignature": {
+          "type": "string",
+          "maxLength": 400
+        },
+        "seeded": {
+          "type": "boolean"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "ownerId",
+        "villesAll",
+        "villesActive",
+        "modeVille",
+        "defaultVille",
+        "emailSignature",
+        "seeded",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "FicheEntreprise": {
+      "title": "FicheEntreprise",
+      "description": "Fiche prospect B2B Orange Pro Maroc (schéma strict 9 colonnes + métadonnées CRM et enrichissement).",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "id": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "societe": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "secteur": {
+          "type": "string",
+          "enum": [
+            "fiduciaire",
+            "clinique",
+            "notaire",
+            "immobilier",
+            "riad_hotellerie",
+            "auto_ecole",
+            "pme",
+            "industrie",
+            "btp",
+            "gros",
+            "enseignement",
+            "liberal",
+            "commerce"
+          ]
+        },
+        "ville": {
+          "type": "string",
+          "maxLength": 100
+        },
+        "telephone": {
+          "type": "string",
+          "maxLength": 30
+        },
+        "email": {
+          "type": "string",
+          "maxLength": 160
+        },
+        "contact": {
+          "type": "string",
+          "maxLength": 160
+        },
+        "role": {
+          "type": "string",
+          "maxLength": 120
+        },
+        "source": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "effectif": {
+          "type": "string",
+          "maxLength": 20
+        },
+        "statut": {
+          "type": "string",
+          "enum": [
+            "À contacter",
+            "Appel en cours",
+            "RDV pris",
+            "Devis envoyé",
+            "Signé Orange Pro",
+            "Pas intéressé"
+          ]
+        },
+        "siteWeb": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "verifieWeb": {
+          "type": "boolean"
+        },
+        "pistesEnrichissement": {
+          "type": "array",
+          "description": "Liste bornée des sources d'enrichissement (max 15)."
+        },
+        "dateAjout": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "ownerId",
+        "id",
+        "societe",
+        "secteur",
+        "ville",
+        "telephone",
+        "email",
+        "contact",
+        "role",
+        "source",
+        "effectif",
+        "statut",
+        "dateAjout",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "EmailSkill": {
+      "title": "EmailSkill",
+      "description": "Skill de rédaction commerciale B2B personnalisé pour le Studio Email IA.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "id": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "nom": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "description": {
+          "type": "string",
+          "maxLength": 300
+        },
+        "role": {
+          "type": "string",
+          "maxLength": 200
+        },
+        "regles": {
+          "type": "string",
+          "maxLength": 4000
+        },
+        "ctaStyle": {
+          "type": "string",
+          "maxLength": 300
+        },
+        "isBuiltin": {
+          "type": "boolean"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "ownerId",
+        "id",
+        "nom",
+        "description",
+        "role",
+        "regles",
+        "ctaStyle",
+        "createdAt",
+        "updatedAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": {
+        "$ref": "#/entities/UserWorkspaceConfig"
+      },
+      "description": "Configuration du workspace Orange Pro isolée par utilisateur authentifié."
+    },
+    "/users/{userId}/fiches/{ficheId}": {
+      "schema": {
+        "$ref": "#/entities/FicheEntreprise"
+      },
+      "description": "Fiches prospects CRM B2B appartenant exclusivement à l'utilisateur."
+    },
+    "/users/{userId}/skills/{skillId}": {
+      "schema": {
+        "$ref": "#/entities/EmailSkill"
+      },
+      "description": "Skills de rédaction Email IA appartenant exclusivement à l'utilisateur."
+    }
+  }
+}
