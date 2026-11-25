@@ -1,0 +1,8 @@
+{
+  "name": "Orange Pro B2B — Collecte, MDM, Hub API & Studio Email IA",
+  "description": "Workspace B2B autonome de collecte multi-sources, enrichissement web, routage multi-LLM, déduplication MDM, qualification Orange Pro Maroc et prospection email IA.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

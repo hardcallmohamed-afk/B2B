@@ -1,0 +1,182 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {
+  normalizeMoroccanPhone,
+  normalizeProEmail,
+  inferSecteur,
+  isValidCompanyName,
+  cleanExtractedCompanyName,
+  htmlToReadableText,
+  extractRelevantWindows,
+  extractPhonesFromReadableText,
+  extractDecideurFromText,
+  extractEffectifFromText,
+  getOrangeProRecommendation,
+  computeMaturityScore,
+  findDuplicateGroups,
+  mergeFicheGroup,
+  buildStrictCsv,
+  expandPaginationUrls,
+  getOrderedKeysForTask,
+  generatePersonalizedEmail,
+  createInitialPortfolio,
+  DEFAULT_EMAIL_SKILLS,
+  type ApiKeyEntry,
+  type FicheEntreprise,
+} from './App';
+
+test('normalizeMoroccanPhone converts all Moroccan formats strictly to 05/06/07XXXXXXXX', () => {
+  assert.equal(normalizeMoroccanPhone('+212 5 35 52 18 40'), '0535521840');
+  assert.equal(normalizeMoroccanPhone('00212 6 61 48 29 10'), '0661482910');
+  assert.equal(normalizeMoroccanPhone('+212 (0)5 35 52 18 40'), '0535521840');
+  assert.equal(normalizeMoroccanPhone('00212 (0)6 61 48 29 10'), '0661482910');
+  assert.equal(normalizeMoroccanPhone('07-00-11-22-33'), '0700112233');
+  assert.equal(normalizeMoroccanPhone('12345'), '');
+});
+
+test('normalizeProEmail lowercases valid emails and rejects technical/directory domains', () => {
+  assert.equal(normalizeProEmail('Contact@Fiduciaire-Meknes.MA'), 'contact@fiduciaire-meknes.ma');
+  assert.equal(normalizeProEmail('noreply@entreprise.ma'), '');
+  assert.equal(normalizeProEmail('no-reply@entreprise.ma'), '');
+  assert.equal(normalizeProEmail('postmaster@entreprise.ma'), '');
+  assert.equal(normalizeProEmail('webmaster@entreprise.ma'), '');
+  assert.equal(normalizeProEmail('privacy@entreprise.ma'), '');
+  assert.equal(normalizeProEmail('info@telecontact.ma'), '');
+  assert.equal(normalizeProEmail('contact@kerix.net'), '');
+  assert.equal(normalizeProEmail('team@pagesjaunes.ma'), '');
+  assert.equal(normalizeProEmail('bot@sentry.io'), '');
+  assert.equal(normalizeProEmail('test@wixpress.com'), '');
+});
+
+test('inferSecteur blocks substring false positives and enforces Moroccan business priorities', () => {
+  // No false positives by substring
+  assert.notEqual(inferSecteur('Société Information Systèmes', 'pme'), 'enseignement');
+  assert.equal(inferSecteur('Centrale Béton Atlas', 'pme'), 'btp'); // never 'liberal' (bet)
+  assert.notEqual(inferSecteur('Nouvelle Adresse Pro', 'pme'), 'liberal'); // never 'dr'
+  assert.notEqual(inferSecteur('Standard Services Plus', 'pme'), 'riad_hotellerie'); // never 'dar'
+
+  // Moroccan priorities
+  assert.equal(inferSecteur('Auto-École Al Mansour École de conduite', 'pme'), 'auto_ecole');
+  assert.equal(inferSecteur('Fiduciaire Consulting & Conseil Fiscal', 'pme'), 'fiduciaire');
+  assert.equal(inferSecteur('Clinique Privée Dr Tazi', 'pme'), 'clinique');
+});
+
+test('company name cleaner and validator reject UI noise and keep valid companies', () => {
+  assert.equal(cleanExtractedCompanyName('**Fiduciaire Atlas** - Telecontact'), 'Fiduciaire Atlas');
+  assert.equal(isValidCompanyName('Fiduciaire Atlas'), true);
+  assert.equal(isValidCompanyName('Voir le numéro'), false);
+  assert.equal(isValidCompanyName('Meknès'), false);
+  assert.equal(isValidCompanyName('Rue Mohammed V'), false);
+});
+
+test('htmlToReadableText preserves tel/mailto and decodes obfuscated emails', () => {
+  const html = '<div class="card"><a href="tel:+212535521840">Appeler</a><a href="mailto:dg@atlas.ma">Mail</a> info&#64;atlas.ma</div>';
+  const text = htmlToReadableText(html);
+  assert.ok(text.includes('+212535521840'));
+  assert.ok(text.includes('dg@atlas.ma'));
+  assert.ok(text.includes('info@atlas.ma'));
+  assert.deepEqual(extractPhonesFromReadableText(text), ['0535521840']);
+});
+
+test('extractRelevantWindows isolates target company snippet', () => {
+  const noiseBefore = 'Autre Entreprise 0535111111 '.repeat(40);
+  const target = 'Fiduciaire Ismailia Expertise Meknès 0535521840';
+  const noiseAfter = 'Autre Société 0535999999 '.repeat(40);
+  const win = extractRelevantWindows(`${noiseBefore}\n${target}\n${noiseAfter}`, 'Fiduciaire Ismailia Expertise');
+  assert.ok(win.includes('0535521840'));
+  assert.ok(!win.includes('0535999999') || win.length < (noiseBefore.length + noiseAfter.length));
+});
+
+test('extractDecideurFromText supports forward, inverted LinkedIn, and nominative email fallback', () => {
+  assert.deepEqual(extractDecideurFromText('Gérant : Karim Benali'), { contact: 'Karim Benali', role: 'Gérant' });
+  assert.deepEqual(extractDecideurFromText('Salma Idrissi - Directrice Générale'), {
+    contact: 'Salma Idrissi',
+    role: 'Directrice Générale',
+  });
+  assert.deepEqual(extractDecideurFromText('', 'ahmed.benali@entreprise.ma'), {
+    contact: 'Ahmed Benali',
+    role: 'Contact identifié',
+  });
+  assert.equal(extractEffectifFromText('Entreprise comptant 42 salariés à Meknès'), '42');
+});
+
+test('Orange Pro offer recommendation and maturity score compute accurately', () => {
+  const seed = createInitialPortfolio();
+  const clinique = seed.find((f) => f.id === 'mk-2')!;
+  const pme = seed.find((f) => f.id === 'mk-1')!;
+  const tpe = seed.find((f) => f.id === 'mk-6')!;
+
+  assert.equal(getOrangeProRecommendation(clinique).tier, 'Grand Compte');
+  assert.equal(getOrangeProRecommendation(pme).tier, 'PME');
+  assert.equal(getOrangeProRecommendation(tpe).tier, 'TPE / Libéral');
+  assert.equal(computeMaturityScore(clinique), 100);
+});
+
+test('MDM Entity Resolution detects duplicates and merges keeping max effectif and concatenated sources', () => {
+  const seed = createInitialPortfolio();
+  const groups = findDuplicateGroups(seed);
+  assert.equal(groups.length, 1);
+  assert.equal(groups[0].fiches.length, 2);
+
+  const merged = mergeFicheGroup(groups[0].fiches);
+  assert.equal(merged.effectif, '16');
+  assert.ok(merged.source.includes('Pages Jaunes'));
+  assert.ok(merged.source.includes('LinkedIn'));
+  assert.equal(merged.email, 'contact@fiduciaire-ismailia.ma');
+});
+
+test('buildStrictCsv produces UTF-8 BOM, semicolon delimiter, and exact 9 columns', () => {
+  const sample: FicheEntreprise[] = [createInitialPortfolio()[0]];
+  const csv = buildStrictCsv(sample);
+  assert.ok(csv.startsWith('\uFEFFsociete;secteur;ville;telephone;email;contact;role;source;effectif\n'));
+  const dataCols = csv.split('\n')[1].split(';');
+  assert.equal(dataCols.length, 9);
+  assert.equal(dataCols[0], 'Fiduciaire Ismailia Expertise');
+});
+
+test('expandPaginationUrls handles range and intermediate page generation', () => {
+  const urls = expandPaginationUrls(['https://example.ma/list?page=5'], 'range', 2, 4);
+  assert.deepEqual(urls, [
+    'https://example.ma/list?page=2',
+    'https://example.ma/list?page=3',
+    'https://example.ma/list?page=4',
+  ]);
+});
+
+test('getOrderedKeysForTask routes by priority, optimal task tie-break, and skips quota/disabled keys', () => {
+  const keys: ApiKeyEntry[] = [
+    { id: '1', provider: 'gemini', label: 'Gem 1', apiKey: 'AIza1', model: 'auto-flash', taskScope: 'all', priority: 1, enabled: true, status: 'idle' },
+    { id: '2', provider: 'tavily', label: 'Tav 1', apiKey: 'tvly-1', model: 'basic', taskScope: 'search', priority: 1, enabled: true, status: 'idle' },
+    { id: '3', provider: 'groq', label: 'Groq 1', apiKey: 'gsk_1', model: 'llama-3.3-70b-versatile', taskScope: 'all', priority: 1, enabled: true, status: 'idle' },
+    { id: '4', provider: 'mistral', label: 'Mistral 1', apiKey: 'mis_1', model: 'mistral-small-latest', taskScope: 'all', priority: 1, enabled: true, status: 'idle' },
+    { id: '5', provider: 'openrouter', label: 'OR 1', apiKey: 'sk-or-1', model: 'openrouter/free', taskScope: 'all', priority: 1, enabled: true, status: 'idle' },
+    { id: '6', provider: 'tavily', label: 'Tav Quota', apiKey: 'tvly-2', model: 'basic', taskScope: 'search', priority: 1, enabled: true, status: 'quota' },
+    { id: '7', provider: 'mistral', label: 'Mistral Off', apiKey: 'mis_2', model: 'mistral-small-latest', taskScope: 'email', priority: 1, enabled: false, status: 'idle' },
+  ];
+
+  // Search tie-break: tavily -> gemini (skips quota key #6)
+  assert.deepEqual(
+    getOrderedKeysForTask(keys, 'search').map((k) => k.id),
+    ['2', '1']
+  );
+
+  // Extract tie-break: groq -> openrouter -> mistral -> gemini
+  assert.deepEqual(
+    getOrderedKeysForTask(keys, 'extract').map((k) => k.id),
+    ['3', '5', '4', '1']
+  );
+
+  // Email tie-break: mistral -> openrouter -> gemini -> groq (skips disabled #7)
+  assert.deepEqual(
+    getOrderedKeysForTask(keys, 'email').map((k) => k.id),
+    ['4', '5', '1', '3']
+  );
+});
+
+test('generatePersonalizedEmail injects company data, offer, and selected skill', () => {
+  const fiche = createInitialPortfolio()[1]; // Clinique Privée Atlas Meknès
+  const email = generatePersonalizedEmail(fiche, 'fin_contrat', 'executif', 'Cordialement,\nEquipe Pro', DEFAULT_EMAIL_SKILLS[2]);
+  assert.ok(email.objet.includes('Clinique Privée Atlas Meknès'));
+  assert.ok(email.corps.includes('Dr Mohamed Tazi'));
+  assert.ok(email.corps.includes('Fibre Dédiée'));
+});
