@@ -99,6 +99,13 @@ import {
   ensureUniqueNumeroFiches,
 } from './utils/pasteExtractor';
 import {
+  detectClientDeviceInfo,
+  getLocalDateKey,
+  isDuringWorkHours,
+  shouldFlagAbruptClosure,
+  computeHeartbeatDeltaSeconds,
+} from './utils/attendance';
+import {
   auth,
   db,
   signOutUser,
@@ -114,13 +121,19 @@ import {
   getAdminApiKeysQuery,
   getTeamStatsQuery,
   getSignedContractsQuery,
+  getUserPresenceListQuery,
   syncMyTeamStat,
+  syncMyUserPresenceProfile,
+  startAttendanceSession,
+  heartbeatAttendanceSession,
+  closeAttendanceSession,
   adminUpdateUserManualBadges,
   createSignedContract,
   adminUpdateSignedContract,
   handleFirestoreError,
   OperationType,
   type CloudApiKeyRecord,
+  type UserPresenceRecord,
 } from './firebase';
 import {
   sanitizeFichePayload,
@@ -1166,11 +1179,28 @@ export function findDuplicateGroups(
   return findSmartDuplicateGroups(fiches, options);
 }
 
-export function mergeFicheGroup(group: FicheEntreprise[]): FicheEntreprise {
-  const sorted = [...group].sort((a, b) => computeMaturityScore(b) - computeMaturityScore(a));
+export function mergeFicheGroup(
+  group: FicheEntreprise[],
+  preferredPrimaryId?: string
+): FicheEntreprise {
+  if (group.length === 0) {
+    throw new Error('Cannot merge an empty group.');
+  }
+  const sorted = [...group].sort((a, b) => {
+    const aSigned = a.statut === 'Signé Orange Pro' ? 1 : 0;
+    const bSigned = b.statut === 'Signé Orange Pro' ? 1 : 0;
+    if (aSigned !== bSigned) return bSigned - aSigned;
+    if (preferredPrimaryId) {
+      const aPref = a.id === preferredPrimaryId ? 1 : 0;
+      const bPref = b.id === preferredPrimaryId ? 1 : 0;
+      if (aPref !== bPref) return bPref - aPref;
+    }
+    return computeMaturityScore(b) - computeMaturityScore(a);
+  });
   const base = { ...sorted[0] };
   const sources = new Set<string>();
   if (base.source) sources.add(base.source);
+  const pistes = new Set<string>(base.pistesEnrichissement || []);
 
   let maxEff = parseInt(base.effectif, 10) || 0;
   const allIncomingPhones: string[] = [];
@@ -1187,6 +1217,10 @@ export function mergeFicheGroup(group: FicheEntreprise[]): FicheEntreprise {
     if (!base.role && d.role) base.role = d.role;
     if (!base.ville && d.ville) base.ville = d.ville;
     if (!base.siteWeb && d.siteWeb) base.siteWeb = d.siteWeb;
+    if (d.verifieWeb) base.verifieWeb = true;
+    if (d.pistesEnrichissement?.length) {
+      d.pistesEnrichissement.forEach((p) => pistes.add(p));
+    }
     const eff = parseInt(d.effectif, 10) || 0;
     if (eff > maxEff) maxEff = eff;
     if (d.source) sources.add(d.source);
@@ -1201,6 +1235,10 @@ export function mergeFicheGroup(group: FicheEntreprise[]): FicheEntreprise {
   base.email = mergedEmails.primary;
   if (mergedEmails.extras.length > 0) base.emailsSupplementaires = mergedEmails.extras;
   else delete base.emailsSupplementaires;
+
+  if (pistes.size > 0) {
+    base.pistesEnrichissement = Array.from(pistes);
+  }
 
   base.effectif = maxEff > 0 ? String(maxEff) : '';
   base.source = Array.from(sources).join(' + ');
@@ -2570,6 +2608,9 @@ export default function App() {
   const lastTeamStatHashRef = useRef<string>('');
   const [includePhoneOnlyDedup, setIncludePhoneOnlyDedup] = useState(false);
   const [dismissedDedupKeys, setDismissedDedupKeys] = useState<string[]>([]);
+  const [dedupPrimaryChoices, setDedupPrimaryChoices] = useState<Record<string, string>>({});
+  const [dedupSaving, setDedupSaving] = useState(false);
+  const [userPresences, setUserPresences] = useState<UserPresenceRecord[]>([]);
   const [crmViewMode, setCrmViewMode] = useState<'table' | 'kanban'>('table');
   const [showAiCopilot, setShowAiCopilot] = useState(false);
   const [copilotFiche, setCopilotFiche] = useState<FicheEntreprise | null>(null);
@@ -2765,18 +2806,68 @@ export default function App() {
   const knownCloudFichesRef = useRef<Map<string, { hash: string; doc: SanitizedFicheDoc }>>(new Map());
   const knownCloudSkillsRef = useRef<Map<string, { hash: string; doc: SanitizedEmailSkillDoc }>>(new Map());
   const knownCloudWorkspaceHashRef = useRef<string>('');
-  const latestLocalStateRef = useRef({ fiches, villesState, emailSignature, emailSkills, userProfile });
-  latestLocalStateRef.current = { fiches, villesState, emailSignature, emailSkills, userProfile };
+  const hydratedUidRef = useRef<string>('');
+  const fichesSyncInFlightRef = useRef<number>(0);
+  const activeAttendanceRef = useRef<{
+    uid: string;
+    email: string;
+    displayName: string;
+    role: TeamRole;
+    zone: string;
+    sessionId: string;
+    dateKey: string;
+    startedAtMs: number;
+    lastTickMs: number;
+    todayBaseSeconds: number;
+    totalBaseSeconds: number;
+    sessionSeconds: number;
+    deviceLabel: string;
+    closed: boolean;
+  } | null>(null);
+  const latestLocalStateRef = useRef({
+    fiches,
+    villesState,
+    emailSignature,
+    emailSkills,
+    userProfile,
+    dismissedDedupKeys,
+    includePhoneOnlyDedup,
+  });
+  latestLocalStateRef.current = {
+    fiches,
+    villesState,
+    emailSignature,
+    emailSkills,
+    userProfile,
+    dismissedDedupKeys,
+    includePhoneOnlyDedup,
+  };
 
   // Sauvegarde locale isolée par UID utilisateur (jamais partagée entre deux comptes)
   useEffect(() => {
-    if (!cloudUser || !cloudSynced) return;
+    if (!cloudUser || hydratedUidRef.current !== cloudUser.uid) return;
     try {
       window.localStorage.setItem(`${STORAGE_KEY_PORTFOLIO}_${cloudUser.uid}`, JSON.stringify(fiches));
     } catch {
       // Ignore quota
     }
-  }, [fiches, cloudUser, cloudSynced]);
+  }, [fiches, cloudUser]);
+
+  // Sauvegarde locale immédiate des préférences de déduplication (isolée par UID)
+  useEffect(() => {
+    if (!cloudUser || hydratedUidRef.current !== cloudUser.uid) return;
+    try {
+      window.localStorage.setItem(
+        `op_dedup_prefs_${cloudUser.uid}`,
+        JSON.stringify({
+          dismissedDedupKeys,
+          includePhoneOnlyDedup,
+        })
+      );
+    } catch {
+      // Ignore quota
+    }
+  }, [dismissedDedupKeys, includePhoneOnlyDedup, cloudUser]);
 
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, (u) => {
@@ -2784,8 +2875,10 @@ export default function App() {
       setAuthReady(true);
       setProfileMenuOpen(false);
       // Toujours réinitialiser le portefeuille et le profil lors d'un changement/déconnexion de compte
+      hydratedUidRef.current = '';
       setFiches([]);
       setUserProfile(DEFAULT_USER_PROFILE);
+      setDedupPrimaryChoices({});
       setAchievementToastQueue([]);
       badgeBaselineRef.current = { initialized: false, unlockedIds: [] };
       seenBadgesUidRef.current = '';
@@ -2799,7 +2892,10 @@ export default function App() {
         setCloudApiKeys([]);
         setTeamStats([]);
         setSignedContracts([]);
+        setUserPresences([]);
         setNotifications([]);
+        setDismissedDedupKeys([]);
+        setIncludePhoneOnlyDedup(false);
         knownCloudFichesRef.current = new Map();
         knownCloudSkillsRef.current = new Map();
         knownCloudWorkspaceHashRef.current = '';
@@ -2808,6 +2904,22 @@ export default function App() {
         setCloudSynced(false);
         setCloudSyncError(null);
         setProfileChecked(false);
+        try {
+          const savedDedup = window.localStorage.getItem(`op_dedup_prefs_${u.uid}`);
+          if (savedDedup) {
+            const parsedDedup = JSON.parse(savedDedup);
+            setDismissedDedupKeys(
+              Array.isArray(parsedDedup?.dismissedDedupKeys) ? parsedDedup.dismissedDedupKeys : []
+            );
+            setIncludePhoneOnlyDedup(Boolean(parsedDedup?.includePhoneOnlyDedup));
+          } else {
+            setDismissedDedupKeys([]);
+            setIncludePhoneOnlyDedup(false);
+          }
+        } catch {
+          setDismissedDedupKeys([]);
+          setIncludePhoneOnlyDedup(false);
+        }
         try {
           const savedNotifs = window.localStorage.getItem(`op_notifications_${u.uid}`);
           if (savedNotifs) {
@@ -2920,6 +3032,383 @@ export default function App() {
     );
     return () => unsub();
   }, [authReady, cloudUser, isSuperAdmin]);
+
+  // Liste temps réel /user_presence réservée exclusivement au Super-Admin (profils complets, téléphones, appareils, pointage)
+  useEffect(() => {
+    if (!authReady || !cloudUser || !isSuperAdmin) {
+      setUserPresences([]);
+      return;
+    }
+    const unsub = onSnapshot(
+      getUserPresenceListQuery(),
+      (snap) => {
+        const list: UserPresenceRecord[] = [];
+        snap.forEach((docSnap) => {
+          const d = docSnap.data();
+          list.push({
+            uid: docSnap.id,
+            orgScope: 'orange_pro_team',
+            email: typeof d.email === 'string' ? d.email : '',
+            displayName: typeof d.displayName === 'string' ? d.displayName : 'Collaborateur',
+            firstName: typeof d.firstName === 'string' ? d.firstName : '',
+            lastName: typeof d.lastName === 'string' ? d.lastName : '',
+            phonePro: typeof d.phonePro === 'string' ? d.phonePro : '',
+            avatarDataUrl: typeof d.avatarDataUrl === 'string' ? d.avatarDataUrl : '',
+            role: d.role === 'super_admin' ? 'super_admin' : normalizeManagedRole(d.role),
+            zone: typeof d.zone === 'string' ? d.zone : 'Meknès',
+            isOnline: Boolean(d.isOnline),
+            currentDevice: typeof d.currentDevice === 'string' ? d.currentDevice : '',
+            devicesUsed: Array.isArray(d.devicesUsed) ? (d.devicesUsed as string[]) : [],
+            lastLoginAt: typeof d.lastLoginAt === 'string' ? d.lastLoginAt : '',
+            lastLogoutAt: typeof d.lastLogoutAt === 'string' ? d.lastLogoutAt : '',
+            lastSeenAt: typeof d.lastSeenAt === 'string' ? d.lastSeenAt : '',
+            lastWorkDisconnectAt:
+              typeof d.lastWorkDisconnectAt === 'string' ? d.lastWorkDisconnectAt : '',
+            workHoursDisconnectCount: Number(d.workHoursDisconnectCount) || 0,
+            workHoursDisconnectTimes: Array.isArray(d.workHoursDisconnectTimes)
+              ? (d.workHoursDisconnectTimes as string[])
+              : [],
+            activeDateKey: typeof d.activeDateKey === 'string' ? d.activeDateKey : '',
+            todayWorkedSeconds: Number(d.todayWorkedSeconds) || 0,
+            totalWorkedSeconds: Number(d.totalWorkedSeconds) || 0,
+            currentSessionId: typeof d.currentSessionId === 'string' ? d.currentSessionId : '',
+          });
+        });
+        setUserPresences(list);
+      },
+      (err) => {
+        try {
+          handleFirestoreError(err, OperationType.LIST, 'user_presence');
+        } catch {
+          // Non-fatal fallback
+        }
+      }
+    );
+    return () => unsub();
+  }, [authReady, cloudUser, isSuperAdmin]);
+
+  // Pointage automatique : connexion, appareil utilisé, heures travaillées et déconnexions pendant les heures de travail
+  useEffect(() => {
+    if (!authReady || !cloudUser || !cloudSynced || !canAccessWorkspace) return;
+    let cancelled = false;
+    const uid = cloudUser.uid;
+    const email = cloudUser.email || '';
+    const deviceInfo = detectClientDeviceInfo();
+    const sessionId = makeId('sess');
+    const nowMs = Date.now();
+    const nowIso = new Date(nowMs).toISOString();
+    const dateKey = getLocalDateKey(new Date(nowMs));
+
+    let pendingAbrupt: {
+      logoutAtIso: string;
+      duringWorkHours: boolean;
+      reason: string;
+      workedSeconds: number;
+      previousSessionId?: string;
+    } | null = null;
+
+    try {
+      const rawPending = window.localStorage.getItem(`op_pending_session_${uid}`);
+      window.localStorage.removeItem(`op_pending_session_${uid}`);
+      if (rawPending) {
+        const parsed = JSON.parse(rawPending);
+        if (
+          typeof parsed?.closedAtMs === 'number' &&
+          shouldFlagAbruptClosure(parsed.closedAtMs, nowMs)
+        ) {
+          pendingAbrupt = {
+            logoutAtIso:
+              typeof parsed.logoutAtIso === 'string'
+                ? parsed.logoutAtIso
+                : new Date(parsed.closedAtMs).toISOString(),
+            duringWorkHours: Boolean(parsed.duringWorkHours),
+            reason:
+              typeof parsed.reason === 'string' && parsed.reason
+                ? parsed.reason
+                : 'Fermeture onglet / navigateur',
+            workedSeconds: Number(parsed.workedSeconds) || 0,
+            previousSessionId:
+              typeof parsed.sessionId === 'string' ? parsed.sessionId : undefined,
+          };
+        }
+      }
+    } catch {
+      // Ignore malformed storage
+    }
+
+    try {
+      window.localStorage.removeItem(`op_offline_disconnect_${uid}`);
+    } catch {
+      // Ignore
+    }
+
+    const localSnap = latestLocalStateRef.current;
+    const initName =
+      localSnap.userProfile.displayName.trim() ||
+      appUserProfile?.displayName ||
+      cloudUser.displayName ||
+      email.split('@')[0] ||
+      'Collaborateur';
+    const initZone =
+      localSnap.userProfile.zone ||
+      appUserProfile?.zone ||
+      localSnap.villesState.defaultVille ||
+      'Meknès';
+
+    startAttendanceSession({
+      uid,
+      email,
+      displayName: initName,
+      phonePro: localSnap.userProfile.phonePro || '',
+      avatarDataUrl: localSnap.userProfile.avatarDataUrl || '',
+      role: currentUserRole,
+      zone: initZone,
+      deviceLabel: deviceInfo.label,
+      deviceType: deviceInfo.deviceType,
+      sessionId,
+      loginAtIso: nowIso,
+      dateKey,
+      pendingAbruptClosure: pendingAbrupt,
+    })
+      .then((res) => {
+        if (cancelled) return;
+        activeAttendanceRef.current = {
+          uid,
+          email,
+          displayName: initName,
+          role: currentUserRole,
+          zone: initZone,
+          sessionId,
+          dateKey,
+          startedAtMs: nowMs,
+          lastTickMs: nowMs,
+          todayBaseSeconds: res.todayWorkedSeconds,
+          totalBaseSeconds: res.totalWorkedSeconds,
+          sessionSeconds: 0,
+          deviceLabel: deviceInfo.label,
+          closed: false,
+        };
+      })
+      .catch(() => {
+        // Silent fallback if presence write temporarily fails offline
+      });
+
+    const accumulateElapsed = (commitNetwork = false) => {
+      const cur = activeAttendanceRef.current;
+      if (!cur || cur.closed || cur.uid !== uid) return;
+      const tickMs = Date.now();
+      const currentKey = getLocalDateKey(new Date(tickMs));
+      if (currentKey !== cur.dateKey) {
+        cur.dateKey = currentKey;
+        cur.todayBaseSeconds = 0;
+      }
+      if (document.visibilityState !== 'hidden' && navigator.onLine !== false) {
+        const delta = computeHeartbeatDeltaSeconds(cur.lastTickMs, tickMs);
+        cur.todayBaseSeconds += delta;
+        cur.totalBaseSeconds += delta;
+        cur.sessionSeconds += delta;
+      }
+      cur.lastTickMs = tickMs;
+
+      if (commitNetwork && navigator.onLine !== false) {
+        heartbeatAttendanceSession({
+          uid: cur.uid,
+          sessionId: cur.sessionId,
+          nowIso: new Date(tickMs).toISOString(),
+          dateKey: cur.dateKey,
+          todayWorkedSeconds: cur.todayBaseSeconds,
+          totalWorkedSeconds: cur.totalBaseSeconds,
+          sessionWorkedSeconds: cur.sessionSeconds,
+          deviceLabel: cur.deviceLabel,
+        }).catch(() => {});
+      }
+    };
+
+    const heartbeatTimer = window.setInterval(() => {
+      accumulateElapsed(true);
+    }, 60_000);
+
+    const handleVisibilityChange = () => {
+      const cur = activeAttendanceRef.current;
+      if (!cur || cur.closed || cur.uid !== uid) return;
+      if (document.visibilityState === 'hidden') {
+        const tickMs = Date.now();
+        const delta = computeHeartbeatDeltaSeconds(cur.lastTickMs, tickMs);
+        cur.todayBaseSeconds += delta;
+        cur.totalBaseSeconds += delta;
+        cur.sessionSeconds += delta;
+        cur.lastTickMs = tickMs;
+        if (navigator.onLine !== false) {
+          heartbeatAttendanceSession({
+            uid: cur.uid,
+            sessionId: cur.sessionId,
+            nowIso: new Date(tickMs).toISOString(),
+            dateKey: cur.dateKey,
+            todayWorkedSeconds: cur.todayBaseSeconds,
+            totalWorkedSeconds: cur.totalBaseSeconds,
+            sessionWorkedSeconds: cur.sessionSeconds,
+            deviceLabel: cur.deviceLabel,
+          }).catch(() => {});
+        }
+      } else {
+        cur.lastTickMs = Date.now();
+      }
+    };
+
+    const handleOffline = () => {
+      const cur = activeAttendanceRef.current;
+      if (!cur || cur.closed || cur.uid !== uid) return;
+      const offMs = Date.now();
+      const wh = isDuringWorkHours(new Date(offMs));
+      if (!wh.duringWorkHours) return;
+      try {
+        if (!window.localStorage.getItem(`op_offline_disconnect_${uid}`)) {
+          window.localStorage.setItem(
+            `op_offline_disconnect_${uid}`,
+            JSON.stringify({
+              atMs: offMs,
+              atIso: new Date(offMs).toISOString(),
+              sessionId: cur.sessionId,
+              sessionSeconds: cur.sessionSeconds,
+              todayBaseSeconds: cur.todayBaseSeconds,
+              totalBaseSeconds: cur.totalBaseSeconds,
+              reason: 'Perte connexion réseau',
+            })
+          );
+        }
+      } catch {
+        // Ignore
+      }
+    };
+
+    const handleOnline = () => {
+      const cur = activeAttendanceRef.current;
+      if (!cur || cur.closed || cur.uid !== uid) return;
+      try {
+        const rawOff = window.localStorage.getItem(`op_offline_disconnect_${uid}`);
+        window.localStorage.removeItem(`op_offline_disconnect_${uid}`);
+        if (rawOff) {
+          const off = JSON.parse(rawOff);
+          const backMs = Date.now();
+          if (typeof off?.atMs === 'number' && shouldFlagAbruptClosure(off.atMs, backMs)) {
+            const newSessId = makeId('sess');
+            const newNowIso = new Date(backMs).toISOString();
+            const newDateKey = getLocalDateKey(new Date(backMs));
+            const snapNow = latestLocalStateRef.current;
+            startAttendanceSession({
+              uid,
+              email,
+              displayName:
+                snapNow.userProfile.displayName.trim() || cur.displayName,
+              phonePro: snapNow.userProfile.phonePro || '',
+              avatarDataUrl: snapNow.userProfile.avatarDataUrl || '',
+              role: currentUserRole,
+              zone: snapNow.userProfile.zone || cur.zone,
+              deviceLabel: deviceInfo.label,
+              deviceType: deviceInfo.deviceType,
+              sessionId: newSessId,
+              loginAtIso: newNowIso,
+              dateKey: newDateKey,
+              pendingAbruptClosure: {
+                logoutAtIso:
+                  typeof off.atIso === 'string'
+                    ? off.atIso
+                    : new Date(off.atMs).toISOString(),
+                duringWorkHours: true,
+                reason: 'Perte connexion réseau',
+                workedSeconds: Number(off.sessionSeconds) || cur.sessionSeconds,
+                previousSessionId: cur.sessionId,
+              },
+            })
+              .then((r) => {
+                if (cancelled) return;
+                cur.sessionId = newSessId;
+                cur.dateKey = newDateKey;
+                cur.lastTickMs = backMs;
+                cur.todayBaseSeconds = r.todayWorkedSeconds;
+                cur.totalBaseSeconds = r.totalWorkedSeconds;
+                cur.sessionSeconds = 0;
+              })
+              .catch(() => {});
+            return;
+          }
+        }
+      } catch {
+        // Ignore
+      }
+      cur.lastTickMs = Date.now();
+    };
+
+    const handlePageHide = () => {
+      const cur = activeAttendanceRef.current;
+      if (!cur || cur.closed || cur.uid !== uid) return;
+      const closeMs = Date.now();
+      const currentKey = getLocalDateKey(new Date(closeMs));
+      if (currentKey !== cur.dateKey) {
+        cur.dateKey = currentKey;
+        cur.todayBaseSeconds = 0;
+      }
+      if (document.visibilityState !== 'hidden' && navigator.onLine !== false) {
+        const delta = computeHeartbeatDeltaSeconds(cur.lastTickMs, closeMs);
+        cur.todayBaseSeconds += delta;
+        cur.totalBaseSeconds += delta;
+        cur.sessionSeconds += delta;
+      }
+      cur.lastTickMs = closeMs;
+      const wh = isDuringWorkHours(new Date(closeMs));
+      const closeIso = new Date(closeMs).toISOString();
+      try {
+        window.localStorage.setItem(
+          `op_pending_session_${uid}`,
+          JSON.stringify({
+            sessionId: cur.sessionId,
+            closedAtMs: closeMs,
+            logoutAtIso: closeIso,
+            duringWorkHours: wh.duringWorkHours,
+            reason: 'Fermeture onglet / navigateur',
+            workedSeconds: cur.sessionSeconds,
+          })
+        );
+      } catch {
+        // Ignore
+      }
+      closeAttendanceSession({
+        uid: cur.uid,
+        sessionId: cur.sessionId,
+        logoutAtIso: closeIso,
+        dateKey: cur.dateKey,
+        todayWorkedSeconds: cur.todayBaseSeconds,
+        totalWorkedSeconds: cur.totalBaseSeconds,
+        sessionWorkedSeconds: cur.sessionSeconds,
+        reason: 'Fermeture onglet / navigateur',
+        duringWorkHours: wh.duringWorkHours,
+      })
+        .then(() => {
+          try {
+            window.localStorage.removeItem(`op_pending_session_${uid}`);
+          } catch {
+            // Ignore
+          }
+        })
+        .catch(() => {});
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    window.addEventListener('offline', handleOffline);
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('pagehide', handlePageHide);
+    window.addEventListener('beforeunload', handlePageHide);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(heartbeatTimer);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      window.removeEventListener('offline', handleOffline);
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('pagehide', handlePageHide);
+      window.removeEventListener('beforeunload', handlePageHide);
+    };
+  }, [authReady, cloudUser, cloudSynced, canAccessWorkspace, currentUserRole]);
 
   // Liste temps réel /api_keys réservée exclusivement au Super-Admin (filtrée par updatedBy == adminUid)
   useEffect(() => {
@@ -3078,6 +3567,11 @@ export default function App() {
         notifyBadges: typeof data.notifyBadges === 'boolean' ? data.notifyBadges : undefined,
         notifySound: typeof data.notifySound === 'boolean' ? data.notifySound : undefined,
         compactUi: typeof data.compactUi === 'boolean' ? data.compactUi : undefined,
+        dismissedDedupKeys: Array.isArray(data.dismissedDedupKeys)
+          ? (data.dismissedDedupKeys as string[])
+          : undefined,
+        includePhoneOnlyDedup:
+          typeof data.includePhoneOnlyDedup === 'boolean' ? data.includePhoneOnlyDedup : undefined,
       });
       const nextHash = serializeDocCanonical(cleanWs as unknown as Record<string, unknown>);
       if (nextHash !== knownCloudWorkspaceHashRef.current) {
@@ -3100,6 +3594,8 @@ export default function App() {
           notifySound: cleanWs.notifySound ?? true,
           compactUi: cleanWs.compactUi ?? false,
         });
+        setDismissedDedupKeys(cleanWs.dismissedDedupKeys ?? []);
+        setIncludePhoneOnlyDedup(cleanWs.includePhoneOnlyDedup ?? false);
       }
     };
 
@@ -3255,6 +3751,8 @@ export default function App() {
             notifyBadges: initialProfileSeed.notifyBadges,
             notifySound: initialProfileSeed.notifySound,
             compactUi: initialProfileSeed.compactUi,
+            dismissedDedupKeys: snapshotLocal.dismissedDedupKeys,
+            includePhoneOnlyDedup: snapshotLocal.includePhoneOnlyDedup,
           },
           [],
           snapshotLocal.emailSkills
@@ -3279,6 +3777,8 @@ export default function App() {
             notifyBadges: initialProfileSeed.notifyBadges,
             notifySound: initialProfileSeed.notifySound,
             compactUi: initialProfileSeed.compactUi,
+            dismissedDedupKeys: snapshotLocal.dismissedDedupKeys,
+            includePhoneOnlyDedup: snapshotLocal.includePhoneOnlyDedup,
           });
           knownCloudWorkspaceHashRef.current = serializeDocCanonical(
             initialWorkspace as unknown as Record<string, unknown>
@@ -3316,9 +3816,12 @@ export default function App() {
           }
         }
 
+        hydratedUidRef.current = uid;
+
         unsubUser = onSnapshot(
           doc(db, 'users', uid),
           (snap) => {
+            if (snap.metadata.hasPendingWrites) return;
             if (snap.exists()) {
               applyWorkspaceDoc(snap.data() as Record<string, unknown>);
             }
@@ -3337,6 +3840,9 @@ export default function App() {
         unsubFiches = onSnapshot(
           query(getUserFichesCollection(uid), where('ownerId', '==', uid)),
           (snap) => {
+            if (snap.metadata.hasPendingWrites || fichesSyncInFlightRef.current > 0) {
+              return;
+            }
             if (snap.metadata.fromCache && snap.empty && knownCloudFichesRef.current.size > 0) {
               return;
             }
@@ -3426,14 +3932,12 @@ export default function App() {
     };
   }, [authReady, cloudUser, canAccessWorkspace, cloudSyncRetryTick]);
 
-  // Synchroniser automatiquement toute modification de fiches vers Firestore
-  useEffect(() => {
-    if (!cloudUser || !cloudSynced) return;
-    const uid = cloudUser.uid;
-    const sanitized = fiches.map((f) => sanitizeFichePayload(uid, f));
+  // Synchroniser immédiatement les changements de fiches (ex: fusion déduplication) sans course onSnapshot
+  const persistFichesImmediate = async (uid: string, targetFiches: FicheEntreprise[]): Promise<boolean> => {
+    const sanitized = targetFiches.map((f) => sanitizeFichePayload(uid, f));
     const diff = computeCollectionSyncDiff(knownCloudFichesRef.current, sanitized);
     if (diff.toCreate.length === 0 && diff.toUpdate.length === 0 && diff.toDelete.length === 0) {
-      return;
+      return true;
     }
 
     const nextKnown = new Map<string, { hash: string; doc: SanitizedFicheDoc }>();
@@ -3447,12 +3951,25 @@ export default function App() {
     }
     knownCloudFichesRef.current = nextKnown;
 
-    syncFichesDiffToFirestore(uid, diff).catch((err) => {
+    fichesSyncInFlightRef.current += 1;
+    try {
+      await syncFichesDiffToFirestore(uid, diff);
+      return true;
+    } catch (err) {
       notify(
         `Échec de sauvegarde Cloud sur certaines fiches${extractShortCloudError(err)} (copie locale conservée).`,
         'err'
       );
-    });
+      return false;
+    } finally {
+      fichesSyncInFlightRef.current = Math.max(0, fichesSyncInFlightRef.current - 1);
+    }
+  };
+
+  // Synchroniser automatiquement toute modification de fiches vers Firestore
+  useEffect(() => {
+    if (!cloudUser || !cloudSynced) return;
+    void persistFichesImmediate(cloudUser.uid, fiches);
   }, [fiches, cloudUser, cloudSynced]);
 
   // Synchroniser automatiquement les skills Email IA vers Firestore
@@ -3481,7 +3998,7 @@ export default function App() {
     });
   }, [emailSkills, cloudUser, cloudSynced]);
 
-  // Synchroniser automatiquement les villes cibles, la signature email et les paramètres de profil vers Firestore (debounce 450ms)
+  // Synchroniser automatiquement les villes cibles, la signature email, les préférences de déduplication et les paramètres de profil vers Firestore
   useEffect(() => {
     if (!cloudUser || !cloudSynced) return;
     const uid = cloudUser.uid;
@@ -3501,6 +4018,8 @@ export default function App() {
       notifyBadges: userProfile.notifyBadges,
       notifySound: userProfile.notifySound,
       compactUi: userProfile.compactUi,
+      dismissedDedupKeys,
+      includePhoneOnlyDedup,
     });
     const nextHash = serializeDocCanonical(payload as unknown as Record<string, unknown>);
     if (nextHash === knownCloudWorkspaceHashRef.current) return;
@@ -3510,10 +4029,18 @@ export default function App() {
       syncWorkspaceToFirestore(uid, payload).catch((err) => {
         notify(`Échec de sauvegarde Cloud de la configuration${extractShortCloudError(err)}.`, 'err');
       });
-    }, 450);
+    }, 350);
 
     return () => window.clearTimeout(timer);
-  }, [villesState, emailSignature, userProfile, cloudUser, cloudSynced]);
+  }, [
+    villesState,
+    emailSignature,
+    userProfile,
+    dismissedDedupKeys,
+    includePhoneOnlyDedup,
+    cloudUser,
+    cloudSynced,
+  ]);
 
   // Calcul des métriques personnelles, badges automatiques et synchronisation /team_stats/{uid}
   const mySignedContracts = useMemo(() => {
@@ -3693,6 +4220,28 @@ export default function App() {
   const handleSaveUserProfile = (nextProfile: UserProfileSettings, nextSignature: string) => {
     setUserProfile(nextProfile);
     setEmailSignature(nextSignature);
+    if (cloudUser && canAccessWorkspace) {
+      const nextName =
+        nextProfile.displayName.trim() ||
+        appUserProfile?.displayName ||
+        cloudUser.displayName ||
+        cloudUser.email?.split('@')[0] ||
+        'Collaborateur';
+      const nextZone = nextProfile.zone || appUserProfile?.zone || villesState.defaultVille || 'Meknès';
+      if (activeAttendanceRef.current && activeAttendanceRef.current.uid === cloudUser.uid) {
+        activeAttendanceRef.current.displayName = nextName;
+        activeAttendanceRef.current.zone = nextZone;
+      }
+      syncMyUserPresenceProfile({
+        uid: cloudUser.uid,
+        email: cloudUser.email || '',
+        displayName: nextName,
+        phonePro: nextProfile.phonePro || '',
+        avatarDataUrl: nextProfile.avatarDataUrl || '',
+        role: currentUserRole,
+        zone: nextZone,
+      }).catch(() => {});
+    }
   };
 
   useEffect(() => {
@@ -3749,6 +4298,40 @@ export default function App() {
   const handleGoogleSignOut = async () => {
     try {
       setProfileMenuOpen(false);
+      const cur = activeAttendanceRef.current;
+      if (cur && !cur.closed) {
+        cur.closed = true;
+        const outMs = Date.now();
+        const outKey = getLocalDateKey(new Date(outMs));
+        if (outKey !== cur.dateKey) {
+          cur.dateKey = outKey;
+          cur.todayBaseSeconds = 0;
+        }
+        const delta = computeHeartbeatDeltaSeconds(cur.lastTickMs, outMs);
+        cur.todayBaseSeconds += delta;
+        cur.totalBaseSeconds += delta;
+        cur.sessionSeconds += delta;
+        cur.lastTickMs = outMs;
+        try {
+          window.localStorage.removeItem(`op_pending_session_${cur.uid}`);
+          window.localStorage.removeItem(`op_offline_disconnect_${cur.uid}`);
+        } catch {
+          // Ignore
+        }
+        const wh = isDuringWorkHours(new Date(outMs));
+        await closeAttendanceSession({
+          uid: cur.uid,
+          sessionId: cur.sessionId,
+          logoutAtIso: new Date(outMs).toISOString(),
+          dateKey: cur.dateKey,
+          todayWorkedSeconds: cur.todayBaseSeconds,
+          totalWorkedSeconds: cur.totalBaseSeconds,
+          sessionWorkedSeconds: cur.sessionSeconds,
+          reason: 'Déconnexion manuelle',
+          duringWorkHours: wh.duringWorkHours,
+        }).catch(() => {});
+        activeAttendanceRef.current = null;
+      }
       await signOutUser();
       setActiveTab('portefeuille');
       notify('Session fermée en toute sécurité.');
@@ -5171,24 +5754,98 @@ Réponds UNIQUEMENT en JSON strict : {"telephone":"","email":"","contact":"","ro
     setLastVerifyDiag('');
   };
 
-  // Déduplication MDM
-  const handleMergeGroup = (group: DuplicateGroup) => {
-    const merged = mergeFicheGroup(group.fiches);
-    const idSet = new Set(group.ids);
-    setFiches((prev) => [merged, ...prev.filter((f) => !idSet.has(f.id))]);
-    notify(`Fusion réussie : ${merged.societe} (${group.fiches.length} fiches réunies).`);
+  // Déduplication MDM (avec choix fiche principale + sauvegarde immédiate Cloud & locale)
+  const persistWorkspaceDedupNow = (
+    nextDismissed: string[],
+    nextIncludePhoneOnly: boolean
+  ) => {
+    if (!cloudUser || !cloudSynced) return;
+    const uid = cloudUser.uid;
+    const snap = latestLocalStateRef.current;
+    const payload = sanitizeWorkspacePayload(uid, {
+      villesAll: snap.villesState.all,
+      villesActive: snap.villesState.active,
+      modeVille: snap.villesState.mode,
+      defaultVille: snap.villesState.defaultVille,
+      emailSignature: snap.emailSignature,
+      seeded: true,
+      displayName: snap.userProfile.displayName,
+      avatarDataUrl: snap.userProfile.avatarDataUrl,
+      phonePro: snap.userProfile.phonePro,
+      zone: snap.userProfile.zone,
+      bio: snap.userProfile.bio,
+      monthlyGoalContracts: snap.userProfile.monthlyGoalContracts,
+      notifyBadges: snap.userProfile.notifyBadges,
+      notifySound: snap.userProfile.notifySound,
+      compactUi: snap.userProfile.compactUi,
+      dismissedDedupKeys: nextDismissed,
+      includePhoneOnlyDedup: nextIncludePhoneOnly,
+    });
+    knownCloudWorkspaceHashRef.current = serializeDocCanonical(
+      payload as unknown as Record<string, unknown>
+    );
+    syncWorkspaceToFirestore(uid, payload).catch((err) => {
+      notify(`Échec de sauvegarde du choix Déduplication${extractShortCloudError(err)}.`, 'err');
+    });
   };
 
-  const handleMergeAllDuplicates = () => {
+  const handleMergeGroup = async (group: DuplicateGroup) => {
+    const groupSignature = [...group.ids].sort().join('|');
+    const preferredPrimaryId = dedupPrimaryChoices[groupSignature];
+    const merged = mergeFicheGroup(group.fiches, preferredPrimaryId);
+    const idSet = new Set(group.ids);
+    const nextFiches = [merged, ...fiches.filter((f) => !idSet.has(f.id))];
+
+    setFiches(nextFiches);
+    setDedupPrimaryChoices((prev) => {
+      if (!(groupSignature in prev)) return prev;
+      const copy = { ...prev };
+      delete copy[groupSignature];
+      return copy;
+    });
+
+    if (cloudUser && cloudSynced) {
+      setDedupSaving(true);
+      try {
+        const ok = await persistFichesImmediate(cloudUser.uid, nextFiches);
+        if (ok) {
+          notify(`Fusion enregistrée dans le Cloud : ${merged.societe} (${group.fiches.length} fiches réunies).`);
+        }
+      } finally {
+        setDedupSaving(false);
+      }
+    } else {
+      notify(`Fusion réussie : ${merged.societe} (${group.fiches.length} fiches réunies).`);
+    }
+  };
+
+  const handleMergeAllDuplicates = async () => {
     if (duplicateGroups.length === 0) return;
+    const count = duplicateGroups.length;
     const allDupIds = new Set<string>();
     const mergedList: FicheEntreprise[] = [];
     duplicateGroups.forEach((g) => {
+      const groupSignature = [...g.ids].sort().join('|');
       g.ids.forEach((id) => allDupIds.add(id));
-      mergedList.push(mergeFicheGroup(g.fiches));
+      mergedList.push(mergeFicheGroup(g.fiches, dedupPrimaryChoices[groupSignature]));
     });
-    setFiches((prev) => [...mergedList, ...prev.filter((f) => !allDupIds.has(f.id))]);
-    notify(`${duplicateGroups.length} groupe(s) de doublons fusionnés.`);
+    const nextFiches = [...mergedList, ...fiches.filter((f) => !allDupIds.has(f.id))];
+    setFiches(nextFiches);
+    setDedupPrimaryChoices({});
+
+    if (cloudUser && cloudSynced) {
+      setDedupSaving(true);
+      try {
+        const ok = await persistFichesImmediate(cloudUser.uid, nextFiches);
+        if (ok) {
+          notify(`${count} groupe(s) de doublons fusionnés et enregistrés dans le Cloud.`);
+        }
+      } finally {
+        setDedupSaving(false);
+      }
+    } else {
+      notify(`${count} groupe(s) de doublons fusionnés.`);
+    }
   };
 
   // Exports CSV (3 modes + Copier CSV) & Backup JSON (SANS les clés API)
@@ -7763,19 +8420,38 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
           <section className="bg-white rounded-xl border border-stone-200 p-4 space-y-4">
             <div className="flex flex-wrap items-start justify-between gap-3">
               <div className="space-y-1">
-                <h2 className="text-sm font-bold text-stone-900 flex items-center gap-1.5 tabular-nums">
-                  <GitMerge className="w-4 h-4 text-orange-600" />
-                  Déduplication Intelligente MDM ({duplicateGroups.length} groupe{duplicateGroups.length > 1 ? 's' : ''})
-                </h2>
+                <div className="flex flex-wrap items-center gap-2">
+                  <h2 className="text-sm font-bold text-stone-900 flex items-center gap-1.5 tabular-nums">
+                    <GitMerge className="w-4 h-4 text-orange-600" />
+                    Déduplication Intelligente MDM ({duplicateGroups.length} groupe{duplicateGroups.length > 1 ? 's' : ''})
+                  </h2>
+                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200">
+                    {dedupSaving ? (
+                      <>
+                        <RefreshCw className="w-3 h-3 animate-spin" />
+                        Enregistrement Cloud...
+                      </>
+                    ) : (
+                      <>
+                        <CheckCircle2 className="w-3 h-3" />
+                        Choix &amp; fusions enregistrés automatiquement
+                      </>
+                    )}
+                  </span>
+                </div>
                 <p className="text-xs text-stone-500">
-                  Priorité stricte au <strong>nom de société</strong> (normalisation SARL/SA/STE/Cabinet/accents/villes + rapprochement orthographique intelligent). Les adresses email partagées ne créent jamais de faux doublons.
+                  Priorité stricte au <strong>nom de société</strong> (normalisation SARL/SA/STE/Cabinet/accents/villes + rapprochement orthographique intelligent). Choisissez la fiche principale à conserver avant de fusionner, ou marquez un groupe comme distinct.
                 </p>
                 <div className="flex flex-wrap items-center gap-3 pt-1">
                   <label className="inline-flex items-center gap-1.5 text-xs text-stone-700 cursor-pointer select-none">
                     <input
                       type="checkbox"
                       checked={includePhoneOnlyDedup}
-                      onChange={(e) => setIncludePhoneOnlyDedup(e.target.checked)}
+                      onChange={(e) => {
+                        const checked = e.target.checked;
+                        setIncludePhoneOnlyDedup(checked);
+                        persistWorkspaceDedupNow(dismissedDedupKeys, checked);
+                      }}
                       className="rounded border-stone-300 text-orange-600 focus:ring-orange-500"
                     />
                     Inclure doublons par téléphone seul (contrôle secondaire)
@@ -7783,7 +8459,11 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
                   {dismissedDedupKeys.length > 0 && (
                     <button
                       type="button"
-                      onClick={() => setDismissedDedupKeys([])}
+                      onClick={() => {
+                        setDismissedDedupKeys([]);
+                        persistWorkspaceDedupNow([], includePhoneOnlyDedup);
+                        notify('Groupes ignorés réaffichés et sauvegardés.');
+                      }}
                       className="text-xs font-medium text-orange-700 hover:underline"
                     >
                       Réafficher {dismissedDedupKeys.length} groupe{dismissedDedupKeys.length > 1 ? 's' : ''} ignoré{dismissedDedupKeys.length > 1 ? 's' : ''}
@@ -7794,8 +8474,9 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
               {duplicateGroups.length > 0 && (
                 <button
                   type="button"
-                  onClick={handleMergeAllDuplicates}
-                  className="px-4 py-2 rounded-lg bg-orange-600 hover:bg-orange-700 text-white text-xs font-semibold flex items-center gap-1.5 shrink-0"
+                  disabled={dedupSaving}
+                  onClick={() => void handleMergeAllDuplicates()}
+                  className="px-4 py-2 rounded-lg bg-orange-600 hover:bg-orange-700 disabled:opacity-60 text-white text-xs font-semibold flex items-center gap-1.5 shrink-0"
                 >
                   <Layers className="w-4 h-4" />
                   Tout fusionner
@@ -7810,8 +8491,20 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
             ) : (
               <div className="space-y-3">
                 {duplicateGroups.map((group) => {
-                  const previewMerged = mergeFicheGroup(group.fiches);
                   const groupSignature = [...group.ids].sort().join('|');
+                  const defaultSorted = [...group.fiches].sort((a, b) => {
+                    const aSigned = a.statut === 'Signé Orange Pro' ? 1 : 0;
+                    const bSigned = b.statut === 'Signé Orange Pro' ? 1 : 0;
+                    if (aSigned !== bSigned) return bSigned - aSigned;
+                    return computeMaturityScore(b) - computeMaturityScore(a);
+                  });
+                  const selectedPrimaryId =
+                    dedupPrimaryChoices[groupSignature] &&
+                    group.fiches.some((f) => f.id === dedupPrimaryChoices[groupSignature])
+                      ? dedupPrimaryChoices[groupSignature]
+                      : defaultSorted[0]?.id;
+                  const previewMerged = mergeFicheGroup(group.fiches, selectedPrimaryId);
+
                   return (
                     <div key={group.key} className="p-3.5 rounded-xl border border-amber-200 bg-amber-50/40 space-y-2.5">
                       <div className="flex flex-wrap items-center justify-between gap-2">
@@ -7834,20 +8527,24 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
                         <div className="flex items-center gap-2">
                           <button
                             type="button"
+                            disabled={dedupSaving}
                             onClick={() => {
-                              setDismissedDedupKeys((prev) =>
-                                prev.includes(groupSignature) ? prev : [...prev, groupSignature]
-                              );
-                              notify('Groupe ignoré — ces sociétés restent distinctes.');
+                              const nextDismissed = dismissedDedupKeys.includes(groupSignature)
+                                ? dismissedDedupKeys
+                                : [...dismissedDedupKeys, groupSignature];
+                              setDismissedDedupKeys(nextDismissed);
+                              persistWorkspaceDedupNow(nextDismissed, includePhoneOnlyDedup);
+                              notify('Choix enregistré — ces sociétés restent distinctes.');
                             }}
-                            className="px-2.5 py-1.5 rounded-lg border border-stone-300 bg-white hover:bg-stone-50 text-stone-700 text-xs font-semibold"
+                            className="px-2.5 py-1.5 rounded-lg border border-stone-300 bg-white hover:bg-stone-50 disabled:opacity-60 text-stone-700 text-xs font-semibold"
                           >
                             Pas un doublon
                           </button>
                           <button
                             type="button"
-                            onClick={() => handleMergeGroup(group)}
-                            className="px-3.5 py-1.5 rounded-lg bg-stone-900 hover:bg-stone-800 text-white text-xs font-semibold flex items-center gap-1.5"
+                            disabled={dedupSaving}
+                            onClick={() => void handleMergeGroup(group)}
+                            className="px-3.5 py-1.5 rounded-lg bg-stone-900 hover:bg-stone-800 disabled:opacity-60 text-white text-xs font-semibold flex items-center gap-1.5"
                           >
                             <GitMerge className="w-3.5 h-3.5" />
                             Fusionner en 1 clic
@@ -7856,24 +8553,59 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
                       </div>
 
                       <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-                        {group.fiches.map((f) => (
-                          <div key={f.id} className="p-2.5 rounded-lg bg-white border border-stone-200 text-xs space-y-0.5">
-                            <p className="font-semibold text-stone-900 tabular-nums flex items-center gap-1.5">
-                              {f.numeroFiche && (
-                                <span className="font-mono text-[10px] px-1.5 py-0.5 rounded bg-stone-100 text-stone-700">
-                                  {f.numeroFiche}
+                        {group.fiches.map((f) => {
+                          const isChosenPrimary = f.id === selectedPrimaryId;
+                          const isSigned = f.statut === 'Signé Orange Pro';
+                          return (
+                            <label
+                              key={f.id}
+                              className={`block p-2.5 rounded-lg border text-xs space-y-1 cursor-pointer transition-colors ${
+                                isChosenPrimary
+                                  ? 'bg-orange-50/70 border-orange-400 ring-1 ring-orange-300'
+                                  : 'bg-white border-stone-200 hover:border-stone-300'
+                              }`}
+                            >
+                              <div className="flex items-center justify-between gap-2">
+                                <span className="inline-flex items-center gap-1.5 text-[11px] font-semibold text-stone-800">
+                                  <input
+                                    type="radio"
+                                    name={`dedup-primary-${groupSignature}`}
+                                    checked={isChosenPrimary}
+                                    onChange={() =>
+                                      setDedupPrimaryChoices((prev) => ({
+                                        ...prev,
+                                        [groupSignature]: f.id,
+                                      }))
+                                    }
+                                    className="text-orange-600 focus:ring-orange-500"
+                                  />
+                                  <span>
+                                    {isChosenPrimary ? 'Fiche principale conservée' : 'Choisir comme principale'}
+                                  </span>
                                 </span>
-                              )}
-                              <span>{f.societe} ({computeMaturityScore(f)}%)</span>
-                            </p>
-                            <p className="text-stone-600 tabular-nums">
-                              {f.ville} · {f.telephone || '—'} · {f.email || '—'}
-                            </p>
-                            <p className="text-stone-500 tabular-nums">
-                              Contact : {f.contact || '—'} · Eff. : {f.effectif || '—'} · Source : {f.source}
-                            </p>
-                          </div>
-                        ))}
+                                {isSigned && (
+                                  <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-800">
+                                    Contrat signé
+                                  </span>
+                                )}
+                              </div>
+                              <p className="font-semibold text-stone-900 tabular-nums flex items-center gap-1.5 flex-wrap">
+                                {f.numeroFiche && (
+                                  <span className="font-mono text-[10px] px-1.5 py-0.5 rounded bg-stone-100 text-stone-700">
+                                    {f.numeroFiche}
+                                  </span>
+                                )}
+                                <span>{f.societe} ({computeMaturityScore(f)}%)</span>
+                              </p>
+                              <p className="text-stone-600 tabular-nums">
+                                {f.ville} · {f.telephone || '—'} · {f.email || '—'}
+                              </p>
+                              <p className="text-stone-500 tabular-nums">
+                                Contact : {f.contact || '—'} · Eff. : {f.effectif || '—'} · Statut : {f.statut} · Source : {f.source}
+                              </p>
+                            </label>
+                          );
+                        })}
                       </div>
 
                       <div className="p-2.5 rounded-lg bg-emerald-50 border border-emerald-200 text-xs text-emerald-900 tabular-nums">
@@ -7885,8 +8617,8 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
                         {previewMerged.emailsSupplementaires?.length
                           ? ` (+${previewMerged.emailsSupplementaires.length} mail)`
                           : ''}{' '}
-                        · Contact : {previewMerged.contact || '—'} · Eff. : {previewMerged.effectif || '—'} · Sources :{' '}
-                        {previewMerged.source}
+                        · Contact : {previewMerged.contact || '—'} · Eff. : {previewMerged.effectif || '—'} · Statut :{' '}
+                        {previewMerged.statut} · Sources : {previewMerged.source}
                       </div>
                     </div>
                   );
@@ -7974,6 +8706,8 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
             adminHasPasswordProvider={cloudUser.providerData.some((p) => p.providerId === 'password')}
             users={managedUsers}
             cloudApiKeys={cloudApiKeys}
+            teamStats={teamStats}
+            userPresences={userPresences}
             villesOptions={villesState.all}
             onNotify={notify}
           />

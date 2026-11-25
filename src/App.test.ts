@@ -125,6 +125,27 @@ test('MDM Entity Resolution detects duplicates and merges keeping max effectif a
   assert.equal(merged.email, 'contact@fiduciaire-ismailia.ma');
 });
 
+test('mergeFicheGroup honors preferredPrimaryId and preserves Signé Orange Pro status', () => {
+  const seed = createInitialPortfolio();
+  const groups = findDuplicateGroups(seed);
+  const group = groups[0].fiches;
+  assert.equal(group.length, 2);
+  const primary = group[0];
+  const secondary = group[1];
+
+  const chosenMerge = mergeFicheGroup(group, secondary.id);
+  assert.equal(chosenMerge.id, secondary.id);
+  assert.equal(chosenMerge.societe, secondary.societe);
+  assert.equal(chosenMerge.effectif, '16');
+
+  const withSigned = group.map((f) =>
+    f.id === secondary.id ? { ...f, statut: 'Signé Orange Pro' as const } : f
+  );
+  const signedMerge = mergeFicheGroup(withSigned, primary.id);
+  assert.equal(signedMerge.id, secondary.id);
+  assert.equal(signedMerge.statut, 'Signé Orange Pro');
+});
+
 test('buildStrictCsv produces UTF-8 BOM, semicolon delimiter, and exact 9 columns', () => {
   const sample: FicheEntreprise[] = [createInitialPortfolio()[0]];
   const csv = buildStrictCsv(sample);

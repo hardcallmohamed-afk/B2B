@@ -18,6 +18,20 @@ import {
   AlertTriangle,
   Sparkles,
   Loader2,
+  Phone,
+  Laptop,
+  Smartphone,
+  Tablet,
+  Clock,
+  LogIn,
+  LogOut,
+  Wifi,
+  WifiOff,
+  Pencil,
+  ChevronDown,
+  ChevronUp,
+  History,
+  X,
 } from 'lucide-react';
 import {
   adminCreateManagedUser,
@@ -25,10 +39,13 @@ import {
   adminDeleteManagedUser,
   adminUpsertApiKey,
   adminDeleteApiKey,
+  fetchUserAttendanceSessions,
   getCurrentUserIdToken,
   requestPasswordReset,
   setOrLinkAccountPassword,
+  type AttendanceSessionRecord,
   type CloudApiKeyRecord,
+  type UserPresenceRecord,
 } from '../firebase';
 import {
   FIREBASE_PROJECT_ID,
@@ -40,7 +57,15 @@ import {
   type ManagedAppUser,
   type ManagedUserRole,
 } from '../utils/authAccess';
-import { ADMIN_DISTINCTION_BADGES } from '../utils/gamification';
+import { ADMIN_DISTINCTION_BADGES, type TeamStatRecord } from '../utils/gamification';
+import { getUserInitials } from '../utils/avatarResize';
+import {
+  WORK_SCHEDULE_LABEL,
+  formatDateTimeShort,
+  formatWorkedDuration,
+  parseWorkDisconnectEvent,
+  splitFirstAndLastName,
+} from '../utils/attendance';
 import { BadgeArtwork } from './BadgeArtwork';
 import { RoleBadge } from './RoleBadge';
 
@@ -65,6 +90,8 @@ interface AdminUsersPanelProps {
   adminEmail: string;
   adminHasPasswordProvider: boolean;
   users: ManagedAppUser[];
+  teamStats?: TeamStatRecord[];
+  userPresences?: UserPresenceRecord[];
   cloudApiKeys?: CloudApiKeyRecord[];
   villesOptions: string[];
   onNotify: (msg: string, type?: 'ok' | 'warn' | 'err') => void;
@@ -75,6 +102,8 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
   adminEmail,
   adminHasPasswordProvider,
   users,
+  teamStats = [],
+  userPresences = [],
   cloudApiKeys = [],
   villesOptions,
   onNotify,
@@ -82,6 +111,7 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
   // Formulaire de création d'utilisateur
   const [displayName, setDisplayName] = useState('');
   const [email, setEmail] = useState('');
+  const [phonePro, setPhonePro] = useState('');
   const [password, setPassword] = useState(() => generateStrongTempPassword(12));
   const [showPwd, setShowPwd] = useState(true);
   const [role, setRole] = useState<ManagedUserRole>('commercial');
@@ -103,6 +133,21 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
   const [statusFilter, setStatusFilter] = useState<'all' | 'active' | 'suspended'>('all');
   const [busyUid, setBusyUid] = useState<string | null>(null);
   const [confirmDeleteUid, setConfirmDeleteUid] = useState<string | null>(null);
+  const [editingUserUid, setEditingUserUid] = useState<string | null>(null);
+  const [editUserForm, setEditUserForm] = useState<{
+    displayName: string;
+    phonePro: string;
+    zone: string;
+  }>({ displayName: '', phonePro: '', zone: '' });
+
+  // Suivi présence, appareils et pointage heures de travail
+  const [attendanceSearch, setAttendanceSearch] = useState('');
+  const [attendanceFilter, setAttendanceFilter] = useState<
+    'all' | 'online' | 'offline' | 'work_disconnect'
+  >('all');
+  const [expandedSessionsUid, setExpandedSessionsUid] = useState<string | null>(null);
+  const [sessionsByUid, setSessionsByUid] = useState<Record<string, AttendanceSessionRecord[]>>({});
+  const [loadingSessionsUid, setLoadingSessionsUid] = useState<string | null>(null);
 
   const roleDistinctionOptions = useMemo(
     () => ADMIN_DISTINCTION_BADGES.filter((b) => b.category === 'role'),
@@ -140,6 +185,171 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
     };
   }, [users]);
 
+  const presenceByUid = useMemo(() => {
+    const map = new Map<string, UserPresenceRecord>();
+    userPresences.forEach((p) => map.set(p.uid, p));
+    return map;
+  }, [userPresences]);
+
+  const statByUid = useMemo(() => {
+    const map = new Map<string, TeamStatRecord>();
+    teamStats.forEach((s) => map.set(s.uid, s));
+    return map;
+  }, [teamStats]);
+
+  // Liste consolidée (Super-Admin + tous les utilisateurs gérés + présences connues) pour le suivi complet
+  const consolidatedTeamTracking = useMemo(() => {
+    const seen = new Set<string>();
+    const rows: Array<{
+      uid: string;
+      displayName: string;
+      firstName: string;
+      lastName: string;
+      email: string;
+      phonePro: string;
+      avatarDataUrl: string;
+      role: TeamStatRecord['role'];
+      zone: string;
+      active: boolean;
+      isOnline: boolean;
+      currentDevice: string;
+      devicesUsed: string[];
+      lastLoginAt: string;
+      lastLogoutAt: string;
+      lastSeenAt: string;
+      lastWorkDisconnectAt: string;
+      workHoursDisconnectCount: number;
+      workHoursDisconnectTimes: string[];
+      todayWorkedSeconds: number;
+      totalWorkedSeconds: number;
+      isSuperAdminRow: boolean;
+    }> = [];
+
+    const buildRow = (params: {
+      uid: string;
+      fallbackName: string;
+      fallbackEmail: string;
+      fallbackRole: TeamStatRecord['role'];
+      fallbackZone: string;
+      active: boolean;
+      isSuperAdminRow: boolean;
+    }) => {
+      const pres = presenceByUid.get(params.uid);
+      const stat = statByUid.get(params.uid);
+      const effectiveName = pres?.displayName || stat?.displayName || params.fallbackName || 'Collaborateur';
+      const split = splitFirstAndLastName(effectiveName);
+      const firstName = pres?.firstName || split.firstName;
+      const lastName = pres?.lastName || split.lastName;
+      return {
+        uid: params.uid,
+        displayName: effectiveName,
+        firstName,
+        lastName,
+        email: pres?.email || params.fallbackEmail,
+        phonePro: pres?.phonePro || '',
+        avatarDataUrl: pres?.avatarDataUrl || stat?.avatarDataUrl || '',
+        role: pres?.role || stat?.role || params.fallbackRole,
+        zone: pres?.zone || stat?.zone || params.fallbackZone,
+        active: params.active,
+        isOnline: Boolean(pres?.isOnline),
+        currentDevice: pres?.currentDevice || '',
+        devicesUsed: pres?.devicesUsed || [],
+        lastLoginAt: pres?.lastLoginAt || '',
+        lastLogoutAt: pres?.lastLogoutAt || '',
+        lastSeenAt: pres?.lastSeenAt || '',
+        lastWorkDisconnectAt: pres?.lastWorkDisconnectAt || '',
+        workHoursDisconnectCount: pres?.workHoursDisconnectCount || 0,
+        workHoursDisconnectTimes: pres?.workHoursDisconnectTimes || [],
+        todayWorkedSeconds: pres?.todayWorkedSeconds || 0,
+        totalWorkedSeconds: pres?.totalWorkedSeconds || 0,
+        isSuperAdminRow: params.isSuperAdminRow,
+      };
+    };
+
+    // Toujours inclure le Super-Admin en tête
+    seen.add(adminUid);
+    rows.push(
+      buildRow({
+        uid: adminUid,
+        fallbackName: 'Administrateur Principal',
+        fallbackEmail: adminEmail,
+        fallbackRole: 'super_admin',
+        fallbackZone: 'Meknès',
+        active: true,
+        isSuperAdminRow: true,
+      })
+    );
+
+    users.forEach((u) => {
+      if (seen.has(u.uid)) return;
+      seen.add(u.uid);
+      rows.push(
+        buildRow({
+          uid: u.uid,
+          fallbackName: u.displayName,
+          fallbackEmail: u.email,
+          fallbackRole: u.role,
+          fallbackZone: u.zone,
+          active: u.active,
+          isSuperAdminRow: false,
+        })
+      );
+    });
+
+    // Compléter avec d'éventuelles présences orphelines
+    userPresences.forEach((p) => {
+      if (seen.has(p.uid)) return;
+      seen.add(p.uid);
+      rows.push(
+        buildRow({
+          uid: p.uid,
+          fallbackName: p.displayName,
+          fallbackEmail: p.email,
+          fallbackRole: p.role,
+          fallbackZone: p.zone,
+          active: true,
+          isSuperAdminRow: false,
+        })
+      );
+    });
+
+    return rows;
+  }, [adminUid, adminEmail, users, presenceByUid, statByUid, userPresences]);
+
+  const attendanceSummary = useMemo(() => {
+    const onlineCount = consolidatedTeamTracking.filter((r) => r.isOnline).length;
+    const totalTodaySec = consolidatedTeamTracking.reduce((s, r) => s + r.todayWorkedSeconds, 0);
+    const totalWorkDisconnects = consolidatedTeamTracking.reduce(
+      (s, r) => s + r.workHoursDisconnectCount,
+      0
+    );
+    return {
+      totalMembers: consolidatedTeamTracking.length,
+      onlineCount,
+      totalTodaySec,
+      totalWorkDisconnects,
+    };
+  }, [consolidatedTeamTracking]);
+
+  const filteredTrackingRows = useMemo(() => {
+    const q = attendanceSearch.trim().toLowerCase();
+    return consolidatedTeamTracking.filter((r) => {
+      if (attendanceFilter === 'online' && !r.isOnline) return false;
+      if (attendanceFilter === 'offline' && r.isOnline) return false;
+      if (attendanceFilter === 'work_disconnect' && r.workHoursDisconnectCount === 0) return false;
+      if (!q) return true;
+      return (
+        r.displayName.toLowerCase().includes(q) ||
+        r.firstName.toLowerCase().includes(q) ||
+        r.lastName.toLowerCase().includes(q) ||
+        r.email.toLowerCase().includes(q) ||
+        r.phonePro.toLowerCase().includes(q) ||
+        r.currentDevice.toLowerCase().includes(q) ||
+        r.zone.toLowerCase().includes(q)
+      );
+    });
+  }, [consolidatedTeamTracking, attendanceSearch, attendanceFilter]);
+
   const filteredUsers = useMemo(() => {
     const q = search.trim().toLowerCase();
     const sorted = [...users].sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
@@ -148,14 +358,16 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
       if (statusFilter === 'active' && !u.active) return false;
       if (statusFilter === 'suspended' && u.active) return false;
       if (!q) return true;
+      const pres = presenceByUid.get(u.uid);
       return (
         u.displayName.toLowerCase().includes(q) ||
         u.email.toLowerCase().includes(q) ||
         u.zone.toLowerCase().includes(q) ||
-        u.role.toLowerCase().includes(q)
+        u.role.toLowerCase().includes(q) ||
+        (pres?.phonePro || '').toLowerCase().includes(q)
       );
     });
-  }, [users, search, roleFilter, statusFilter]);
+  }, [users, search, roleFilter, statusFilter, presenceByUid]);
 
   const toggleInitialRoleBadge = (badgeId: string) => {
     setSelectedInitialRoleBadges((prev) =>
@@ -183,6 +395,7 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
         password,
         role,
         zone,
+        phonePro: phonePro.trim(),
         initialManualBadges: selectedInitialRoleBadges,
       });
       setLastCreatedCreds({
@@ -193,6 +406,7 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
       });
       setDisplayName('');
       setEmail('');
+      setPhonePro('');
       setSelectedInitialRoleBadges([]);
       setPassword(generateStrongTempPassword(12));
       onNotify(
@@ -255,6 +469,58 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
       onNotify('Impossible de modifier le rôle.', 'err');
     } finally {
       setBusyUid(null);
+    }
+  };
+
+  const startEditUserDetails = (u: ManagedAppUser) => {
+    const pres = presenceByUid.get(u.uid);
+    setEditingUserUid(u.uid);
+    setEditUserForm({
+      displayName: pres?.displayName || u.displayName,
+      phonePro: pres?.phonePro || '',
+      zone: pres?.zone || u.zone,
+    });
+  };
+
+  const handleSaveUserDetails = async (u: ManagedAppUser) => {
+    const cleanName = editUserForm.displayName.trim();
+    if (cleanName.length < 2) {
+      onNotify('Le nom complet doit contenir au moins 2 caractères.', 'warn');
+      return;
+    }
+    setBusyUid(u.uid);
+    try {
+      await adminUpdateManagedUser(u.uid, {
+        displayName: cleanName,
+        role: u.role,
+        zone: editUserForm.zone.trim(),
+        active: u.active,
+        phonePro: editUserForm.phonePro.trim(),
+        email: u.email,
+      });
+      setEditingUserUid(null);
+      onNotify(`Fiche utilisateur mise à jour pour ${cleanName}.`);
+    } catch {
+      onNotify('Impossible de mettre à jour les coordonnées utilisateur.', 'err');
+    } finally {
+      setBusyUid(null);
+    }
+  };
+
+  const handleToggleUserSessions = async (uid: string) => {
+    if (expandedSessionsUid === uid) {
+      setExpandedSessionsUid(null);
+      return;
+    }
+    setExpandedSessionsUid(uid);
+    setLoadingSessionsUid(uid);
+    try {
+      const list = await fetchUserAttendanceSessions(uid);
+      setSessionsByUid((prev) => ({ ...prev, [uid]: list }));
+    } catch {
+      onNotify('Impossible de charger l’historique de pointage pour cet utilisateur.', 'err');
+    } finally {
+      setLoadingSessionsUid(null);
     }
   };
 
@@ -454,6 +720,20 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
                   placeholder="commercial@orangepro.ma"
+                  className="w-full px-3 py-2 rounded-lg border border-stone-300 text-xs focus:outline-none focus:border-orange-600"
+                />
+              </div>
+
+              <div className="space-y-1">
+                <label htmlFor="admin-new-phone" className="block text-xs font-semibold text-stone-700">
+                  Téléphone professionnel (optionnel)
+                </label>
+                <input
+                  id="admin-new-phone"
+                  type="tel"
+                  value={phonePro}
+                  onChange={(e) => setPhonePro(e.target.value)}
+                  placeholder="06 61 00 00 00"
                   className="w-full px-3 py-2 rounded-lg border border-stone-300 text-xs focus:outline-none focus:border-orange-600"
                 />
               </div>
@@ -765,108 +1045,584 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
             <div className="space-y-2.5">
               {filteredUsers.map((u) => {
                 const isBusy = busyUid === u.uid;
+                const pres = presenceByUid.get(u.uid);
+                const stat = statByUid.get(u.uid);
+                const avatar = pres?.avatarDataUrl || stat?.avatarDataUrl || '';
+                const initials = getUserInitials(u.displayName, u.email);
+                const isEditing = editingUserUid === u.uid;
                 return (
                   <div
                     key={u.uid}
-                    className={`rounded-xl border p-3 flex flex-wrap items-center justify-between gap-3 text-xs ${
+                    className={`rounded-xl border p-3 space-y-2 text-xs ${
                       u.active ? 'border-stone-200 bg-white' : 'border-red-200 bg-red-50/40'
                     }`}
                   >
-                    <div className="min-w-0 space-y-0.5">
-                      <div className="flex items-center gap-2 flex-wrap">
-                        <span className="font-bold text-stone-900">{u.displayName}</span>
-                        <RoleBadge role={u.role} />
-                        <span
-                          className={`text-[10px] font-semibold px-1.5 py-0.5 rounded ${
-                            u.active ? 'bg-emerald-100 text-emerald-800' : 'bg-red-100 text-red-800'
-                          }`}
-                        >
-                          {u.active ? 'Actif' : 'Suspendu'}
-                        </span>
-                        {u.zone && (
-                          <span className="text-[11px] text-stone-500">· {u.zone}</span>
-                        )}
-                      </div>
-                      <p className="text-[11px] text-stone-600 break-all">{u.email}</p>
-                    </div>
-
-                    <div className="flex flex-wrap items-center gap-1.5">
-                      <select
-                        value={u.role}
-                        disabled={isBusy}
-                        aria-label={`Rôle de ${u.displayName}`}
-                        onChange={(e) => void handleRoleChange(u, e.target.value as ManagedUserRole)}
-                        className="px-2 py-1 rounded-lg border border-stone-300 bg-white text-[11px] font-medium text-stone-800"
-                      >
-                        {MANAGED_ROLE_OPTIONS.map((opt) => (
-                          <option key={opt.value} value={opt.value}>
-                            {opt.label}
-                          </option>
-                        ))}
-                      </select>
-
-                      <button
-                        type="button"
-                        disabled={isBusy}
-                        onClick={() => void handleToggleActive(u)}
-                        className={`px-2.5 py-1 rounded-lg border text-[11px] font-semibold flex items-center gap-1 ${
-                          u.active
-                            ? 'border-amber-300 bg-amber-50 hover:bg-amber-100 text-amber-900'
-                            : 'border-emerald-300 bg-emerald-50 hover:bg-emerald-100 text-emerald-900'
-                        }`}
-                      >
-                        {u.active ? <UserX className="w-3.5 h-3.5" /> : <UserCheck className="w-3.5 h-3.5" />}
-                        {u.active ? 'Suspendre' : 'Réactiver'}
-                      </button>
-
-                      <button
-                        type="button"
-                        disabled={isBusy}
-                        onClick={() => void handleSendReset(u)}
-                        title="Envoyer un email de réinitialisation de mot de passe"
-                        className="px-2 py-1 rounded-lg border border-stone-300 bg-white hover:bg-stone-50 text-stone-700 text-[11px] font-medium flex items-center gap-1"
-                      >
-                        <Mail className="w-3.5 h-3.5" />
-                        Reset MDP
-                      </button>
-
-                      {confirmDeleteUid === u.uid ? (
-                        <div className="flex items-center gap-1">
-                          <button
-                            type="button"
-                            disabled={isBusy}
-                            onClick={() => void handleDeleteUser(u)}
-                            className="px-2 py-1 rounded-lg bg-red-600 hover:bg-red-700 text-white text-[11px] font-semibold"
-                          >
-                            Confirmer
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => setConfirmDeleteUid(null)}
-                            className="px-2 py-1 rounded-lg border border-stone-300 bg-white text-[11px] text-stone-600"
-                          >
-                            Annuler
-                          </button>
+                    <div className="flex flex-wrap items-center justify-between gap-3">
+                      <div className="flex items-center gap-2.5 min-w-0">
+                        <div className="relative shrink-0">
+                          {avatar ? (
+                            <img
+                              src={avatar}
+                              alt={u.displayName}
+                              className="w-9 h-9 rounded-full object-cover border border-stone-200"
+                            />
+                          ) : (
+                            <span className="w-9 h-9 rounded-full bg-stone-900 text-white text-xs font-bold flex items-center justify-center">
+                              {initials}
+                            </span>
+                          )}
+                          <span
+                            title={pres?.isOnline ? 'En ligne' : 'Hors ligne'}
+                            className={`absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full ring-2 ring-white ${
+                              pres?.isOnline ? 'bg-emerald-500' : 'bg-stone-300'
+                            }`}
+                          />
                         </div>
-                      ) : (
+                        <div className="min-w-0 space-y-0.5">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className="font-bold text-stone-900">{u.displayName}</span>
+                            <RoleBadge role={u.role} />
+                            <span
+                              className={`text-[10px] font-semibold px-1.5 py-0.5 rounded ${
+                                u.active ? 'bg-emerald-100 text-emerald-800' : 'bg-red-100 text-red-800'
+                              }`}
+                            >
+                              {u.active ? 'Actif' : 'Suspendu'}
+                            </span>
+                            {u.zone && (
+                              <span className="text-[11px] text-stone-500">· {u.zone}</span>
+                            )}
+                          </div>
+                          <div className="flex flex-wrap items-center gap-x-2.5 gap-y-0.5 text-[11px] text-stone-600">
+                            <span className="break-all">{u.email}</span>
+                            {pres?.phonePro && (
+                              <span className="inline-flex items-center gap-1 font-medium text-stone-800 tabular-nums">
+                                <Phone className="w-3 h-3 text-orange-600" />
+                                {pres.phonePro}
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <select
+                          value={u.role}
+                          disabled={isBusy}
+                          aria-label={`Rôle de ${u.displayName}`}
+                          onChange={(e) => void handleRoleChange(u, e.target.value as ManagedUserRole)}
+                          className="px-2 py-1 rounded-lg border border-stone-300 bg-white text-[11px] font-medium text-stone-800"
+                        >
+                          {MANAGED_ROLE_OPTIONS.map((opt) => (
+                            <option key={opt.value} value={opt.value}>
+                              {opt.label}
+                            </option>
+                          ))}
+                        </select>
+
                         <button
                           type="button"
                           disabled={isBusy}
-                          onClick={() => setConfirmDeleteUid(u.uid)}
-                          aria-label={`Révoquer l'accès de ${u.displayName}`}
-                          title="Révoquer et supprimer l'accès"
-                          className="p-1.5 rounded-lg border border-stone-200 hover:border-red-300 hover:bg-red-50 text-stone-500 hover:text-red-700"
+                          onClick={() => (isEditing ? setEditingUserUid(null) : startEditUserDetails(u))}
+                          title="Modifier nom, téléphone et zone"
+                          className="px-2 py-1 rounded-lg border border-stone-300 bg-white hover:bg-stone-50 text-stone-700 text-[11px] font-medium flex items-center gap-1"
                         >
-                          <Trash2 className="w-3.5 h-3.5" />
+                          <Pencil className="w-3 h-3" />
+                          Éditer
                         </button>
-                      )}
+
+                        <button
+                          type="button"
+                          disabled={isBusy}
+                          onClick={() => void handleToggleActive(u)}
+                          className={`px-2.5 py-1 rounded-lg border text-[11px] font-semibold flex items-center gap-1 ${
+                            u.active
+                              ? 'border-amber-300 bg-amber-50 hover:bg-amber-100 text-amber-900'
+                              : 'border-emerald-300 bg-emerald-50 hover:bg-emerald-100 text-emerald-900'
+                          }`}
+                        >
+                          {u.active ? <UserX className="w-3.5 h-3.5" /> : <UserCheck className="w-3.5 h-3.5" />}
+                          {u.active ? 'Suspendre' : 'Réactiver'}
+                        </button>
+
+                        <button
+                          type="button"
+                          disabled={isBusy}
+                          onClick={() => void handleSendReset(u)}
+                          title="Envoyer un email de réinitialisation de mot de passe"
+                          className="px-2 py-1 rounded-lg border border-stone-300 bg-white hover:bg-stone-50 text-stone-700 text-[11px] font-medium flex items-center gap-1"
+                        >
+                          <Mail className="w-3.5 h-3.5" />
+                          Reset MDP
+                        </button>
+
+                        {confirmDeleteUid === u.uid ? (
+                          <div className="flex items-center gap-1">
+                            <button
+                              type="button"
+                              disabled={isBusy}
+                              onClick={() => void handleDeleteUser(u)}
+                              className="px-2 py-1 rounded-lg bg-red-600 hover:bg-red-700 text-white text-[11px] font-semibold"
+                            >
+                              Confirmer
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setConfirmDeleteUid(null)}
+                              className="px-2 py-1 rounded-lg border border-stone-300 bg-white text-[11px] text-stone-600"
+                            >
+                              Annuler
+                            </button>
+                          </div>
+                        ) : (
+                          <button
+                            type="button"
+                            disabled={isBusy}
+                            onClick={() => setConfirmDeleteUid(u.uid)}
+                            aria-label={`Révoquer l'accès de ${u.displayName}`}
+                            title="Révoquer et supprimer l'accès"
+                            className="p-1.5 rounded-lg border border-stone-200 hover:border-red-300 hover:bg-red-50 text-stone-500 hover:text-red-700"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        )}
+                      </div>
                     </div>
+
+                    {isEditing && (
+                      <div className="rounded-lg border border-orange-200 bg-orange-50/50 p-2.5 grid grid-cols-1 sm:grid-cols-4 gap-2 items-end">
+                        <div>
+                          <label className="block text-[10px] font-semibold text-stone-600 mb-0.5">
+                            Nom &amp; Prénom
+                          </label>
+                          <input
+                            type="text"
+                            value={editUserForm.displayName}
+                            onChange={(e) =>
+                              setEditUserForm((prev) => ({ ...prev, displayName: e.target.value }))
+                            }
+                            className="w-full px-2 py-1 rounded border border-stone-300 bg-white text-xs"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-[10px] font-semibold text-stone-600 mb-0.5">
+                            Téléphone
+                          </label>
+                          <input
+                            type="tel"
+                            value={editUserForm.phonePro}
+                            onChange={(e) =>
+                              setEditUserForm((prev) => ({ ...prev, phonePro: e.target.value }))
+                            }
+                            placeholder="06 61 ..."
+                            className="w-full px-2 py-1 rounded border border-stone-300 bg-white text-xs"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-[10px] font-semibold text-stone-600 mb-0.5">
+                            Zone / Ville
+                          </label>
+                          <input
+                            type="text"
+                            value={editUserForm.zone}
+                            onChange={(e) =>
+                              setEditUserForm((prev) => ({ ...prev, zone: e.target.value }))
+                            }
+                            className="w-full px-2 py-1 rounded border border-stone-300 bg-white text-xs"
+                          />
+                        </div>
+                        <div className="flex items-center gap-1.5">
+                          <button
+                            type="button"
+                            disabled={isBusy}
+                            onClick={() => void handleSaveUserDetails(u)}
+                            className="flex-1 py-1 px-2.5 rounded bg-orange-600 hover:bg-orange-700 text-white text-[11px] font-semibold"
+                          >
+                            Enregistrer
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setEditingUserUid(null)}
+                            aria-label="Fermer l'édition"
+                            className="p-1 rounded border border-stone-300 bg-white text-stone-600 hover:bg-stone-50"
+                          >
+                            <X className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      </div>
+                    )}
                   </div>
                 );
               })}
             </div>
           )}
         </div>
+      </div>
+
+      {/* Suivi Équipe, Profils complets, Appareils & Pointage Heures de Travail */}
+      <div
+        data-testid="admin-attendance-panel"
+        className="bg-white rounded-xl border border-stone-200 p-4 space-y-4"
+      >
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <h3 className="text-sm font-bold text-stone-900 flex items-center gap-2">
+              <Clock className="w-4 h-4 text-orange-600" />
+              Suivi Collaborateurs — Profils, Appareils &amp; Pointage Heures de Travail
+            </h3>
+            <p className="text-xs text-stone-500 mt-0.5">
+              Vue réservée au Super-Admin : Nom &amp; Prénom, photo, téléphone, appareils utilisés, heure de connexion, heure de sortie, déconnexions pendant les heures de travail ({WORK_SCHEDULE_LABEL}) et heures travaillées.
+            </p>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2">
+            <select
+              aria-label="Filtrer présence"
+              value={attendanceFilter}
+              onChange={(e) =>
+                setAttendanceFilter(
+                  e.target.value as 'all' | 'online' | 'offline' | 'work_disconnect'
+                )
+              }
+              className="px-2.5 py-1.5 rounded-lg border border-stone-300 bg-stone-50 text-xs font-semibold text-stone-800"
+            >
+              <option value="all">Tous les membres ({attendanceSummary.totalMembers})</option>
+              <option value="online">En ligne ({attendanceSummary.onlineCount})</option>
+              <option value="offline">
+                Hors ligne ({attendanceSummary.totalMembers - attendanceSummary.onlineCount})
+              </option>
+              <option value="work_disconnect">Avec déconnexion heures travail</option>
+            </select>
+            <div className="relative w-56">
+              <Search className="w-3.5 h-3.5 text-stone-400 absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+              <input
+                type="search"
+                value={attendanceSearch}
+                onChange={(e) => setAttendanceSearch(e.target.value)}
+                placeholder="Nom, prénom, tél, appareil..."
+                className="w-full pl-8 pr-3 py-1.5 rounded-lg border border-stone-300 text-xs focus:outline-none focus:border-orange-600"
+              />
+            </div>
+          </div>
+        </div>
+
+        {/* 4 KPI de présence */}
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-2.5 text-xs">
+          <div className="rounded-xl border border-stone-200 bg-stone-50/70 p-3">
+            <div className="text-[11px] font-semibold text-stone-500">Membres suivis</div>
+            <div className="text-lg font-extrabold text-stone-900 tabular-nums mt-0.5">
+              {attendanceSummary.totalMembers}
+            </div>
+          </div>
+          <div className="rounded-xl border border-emerald-200 bg-emerald-50/60 p-3">
+            <div className="text-[11px] font-semibold text-emerald-800">En ligne maintenant</div>
+            <div className="text-lg font-extrabold text-emerald-900 tabular-nums mt-0.5">
+              {attendanceSummary.onlineCount}
+            </div>
+          </div>
+          <div className="rounded-xl border border-orange-200 bg-orange-50/60 p-3">
+            <div className="text-[11px] font-semibold text-orange-800">Heures travaillées (aujourd&apos;hui)</div>
+            <div className="text-lg font-extrabold text-orange-950 tabular-nums mt-0.5">
+              {formatWorkedDuration(attendanceSummary.totalTodaySec)}
+            </div>
+          </div>
+          <div className="rounded-xl border border-amber-200 bg-amber-50/60 p-3">
+            <div className="text-[11px] font-semibold text-amber-900">Déconnexions heures travail</div>
+            <div className="text-lg font-extrabold text-amber-950 tabular-nums mt-0.5">
+              {attendanceSummary.totalWorkDisconnects}
+            </div>
+          </div>
+        </div>
+
+        {/* Cartes détaillées par collaborateur */}
+        {filteredTrackingRows.length === 0 ? (
+          <div className="rounded-xl border border-dashed border-stone-300 p-8 text-center text-xs text-stone-500">
+            Aucun collaborateur ne correspond aux filtres sélectionnés.
+          </div>
+        ) : (
+          <div className="space-y-3">
+            {filteredTrackingRows.map((member) => {
+              const initials = getUserInitials(member.displayName, member.email);
+              const isExpanded = expandedSessionsUid === member.uid;
+              const sessions = sessionsByUid[member.uid] || [];
+              const recentDisconnects = member.workHoursDisconnectTimes
+                .slice(0, 3)
+                .map((raw) => parseWorkDisconnectEvent(raw));
+
+              return (
+                <div
+                  key={member.uid}
+                  className="rounded-xl border border-stone-200 bg-stone-50/40 p-3.5 space-y-3 text-xs"
+                >
+                  <div className="flex flex-wrap items-start justify-between gap-3">
+                    {/* Identité : Photo, Nom, Prénom, Rôle, Téléphone, Email */}
+                    <div className="flex items-start gap-3 min-w-0">
+                      <div className="relative shrink-0">
+                        {member.avatarDataUrl ? (
+                          <img
+                            src={member.avatarDataUrl}
+                            alt={member.displayName}
+                            className="w-12 h-12 rounded-xl object-cover border border-stone-200 bg-white"
+                          />
+                        ) : (
+                          <span className="w-12 h-12 rounded-xl bg-stone-900 text-white text-sm font-bold flex items-center justify-center">
+                            {initials}
+                          </span>
+                        )}
+                        <span
+                          className={`absolute -bottom-1 -right-1 w-3.5 h-3.5 rounded-full ring-2 ring-white flex items-center justify-center ${
+                            member.isOnline ? 'bg-emerald-500' : 'bg-stone-400'
+                          }`}
+                        />
+                      </div>
+
+                      <div className="min-w-0 space-y-1">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className="font-bold text-stone-900 text-sm">
+                            {member.displayName}
+                          </span>
+                          <RoleBadge role={member.role} />
+                          <span
+                            className={`inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-md ${
+                              member.isOnline
+                                ? 'bg-emerald-100 text-emerald-800'
+                                : 'bg-stone-200 text-stone-700'
+                            }`}
+                          >
+                            {member.isOnline ? (
+                              <Wifi className="w-3 h-3" />
+                            ) : (
+                              <WifiOff className="w-3 h-3" />
+                            )}
+                            {member.isOnline ? 'En ligne' : 'Hors ligne'}
+                          </span>
+                        </div>
+
+                        <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[11px] text-stone-600">
+                          <span>
+                            Prénom : <strong className="text-stone-900">{member.firstName || '—'}</strong>
+                          </span>
+                          <span>
+                            Nom : <strong className="text-stone-900">{member.lastName || '—'}</strong>
+                          </span>
+                          <span>
+                            Zone : <strong className="text-stone-800">{member.zone || '—'}</strong>
+                          </span>
+                        </div>
+
+                        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px]">
+                          <span className="inline-flex items-center gap-1 text-stone-700">
+                            <Phone className="w-3 h-3 text-orange-600" />
+                            Tél :{' '}
+                            {member.phonePro ? (
+                              <a
+                                href={`tel:${member.phonePro}`}
+                                className="font-bold text-stone-900 hover:text-orange-700 tabular-nums"
+                              >
+                                {member.phonePro}
+                              </a>
+                            ) : (
+                              <span className="text-stone-400 italic">Non renseigné</span>
+                            )}
+                          </span>
+                          <span className="inline-flex items-center gap-1 text-stone-600 break-all">
+                            <Mail className="w-3 h-3 text-stone-400" />
+                            {member.email}
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={() => void handleToggleUserSessions(member.uid)}
+                      className="px-2.5 py-1.5 rounded-lg border border-stone-300 bg-white hover:bg-stone-100 text-stone-800 text-[11px] font-semibold inline-flex items-center gap-1.5 shrink-0"
+                    >
+                      <History className="w-3.5 h-3.5 text-orange-600" />
+                      Historique pointage
+                      {isExpanded ? (
+                        <ChevronUp className="w-3.5 h-3.5" />
+                      ) : (
+                        <ChevronDown className="w-3.5 h-3.5" />
+                      )}
+                    </button>
+                  </div>
+
+                  {/* Grille Pointage & Appareils */}
+                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-2">
+                    <div className="rounded-lg bg-white border border-stone-200 p-2.5 space-y-1">
+                      <div className="text-[10px] font-semibold uppercase tracking-wide text-stone-500 flex items-center gap-1">
+                        <Laptop className="w-3 h-3 text-stone-600" />
+                        Appareil(s) utilisé(s)
+                      </div>
+                      <div className="font-semibold text-stone-900 text-[11px] truncate" title={member.currentDevice}>
+                        {member.currentDevice || 'Aucune session enregistrée'}
+                      </div>
+                      {member.devicesUsed.length > 1 && (
+                        <div className="text-[10px] text-stone-500">
+                          +{member.devicesUsed.length - 1} autre{member.devicesUsed.length > 2 ? 's' : ''} :{' '}
+                          {member.devicesUsed.slice(1, 3).join(', ')}
+                        </div>
+                      )}
+                    </div>
+
+                    <div className="rounded-lg bg-white border border-stone-200 p-2.5 space-y-1">
+                      <div className="text-[10px] font-semibold uppercase tracking-wide text-stone-500 flex items-center gap-1">
+                        <LogIn className="w-3 h-3 text-emerald-600" />
+                        Heure de connexion (logue)
+                      </div>
+                      <div className="font-bold text-stone-900 tabular-nums">
+                        {formatDateTimeShort(member.lastLoginAt)}
+                      </div>
+                      <div className="text-[10px] text-stone-500 tabular-nums">
+                        Dernière activité : {formatDateTimeShort(member.lastSeenAt)}
+                      </div>
+                    </div>
+
+                    <div className="rounded-lg bg-white border border-stone-200 p-2.5 space-y-1">
+                      <div className="text-[10px] font-semibold uppercase tracking-wide text-stone-500 flex items-center gap-1">
+                        <LogOut className="w-3 h-3 text-stone-600" />
+                        Heure de sortie
+                      </div>
+                      <div className="font-bold text-stone-900 tabular-nums">
+                        {member.isOnline ? 'En session active' : formatDateTimeShort(member.lastLogoutAt)}
+                      </div>
+                      {member.isOnline && member.lastLogoutAt && (
+                        <div className="text-[10px] text-stone-500 tabular-nums">
+                          Sortie préc. : {formatDateTimeShort(member.lastLogoutAt)}
+                        </div>
+                      )}
+                    </div>
+
+                    <div className="rounded-lg bg-white border border-stone-200 p-2.5 space-y-1">
+                      <div className="text-[10px] font-semibold uppercase tracking-wide text-stone-500 flex items-center gap-1">
+                        <AlertTriangle
+                          className={`w-3 h-3 ${
+                            member.workHoursDisconnectCount > 0 ? 'text-amber-600' : 'text-emerald-600'
+                          }`}
+                        />
+                        Déconnexions heures travail
+                      </div>
+                      <div className="flex items-center gap-1.5">
+                        <span
+                          className={`font-extrabold tabular-nums ${
+                            member.workHoursDisconnectCount > 0 ? 'text-amber-700' : 'text-emerald-700'
+                          }`}
+                        >
+                          {member.workHoursDisconnectCount}
+                        </span>
+                        {member.lastWorkDisconnectAt && (
+                          <span className="text-[10px] text-stone-600 tabular-nums">
+                            (dern. {formatDateTimeShort(member.lastWorkDisconnectAt)})
+                          </span>
+                        )}
+                      </div>
+                      {recentDisconnects.length > 0 && (
+                        <div className="text-[10px] text-amber-800 space-y-0.5">
+                          {recentDisconnects.map((ev, idx) => (
+                            <div key={idx} className="truncate tabular-nums">
+                              • {ev.dateTimeLabel} — {ev.reason}
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+
+                    <div className="rounded-lg bg-white border border-stone-200 p-2.5 space-y-1">
+                      <div className="text-[10px] font-semibold uppercase tracking-wide text-stone-500 flex items-center gap-1">
+                        <Clock className="w-3 h-3 text-orange-600" />
+                        Heures travaillées
+                      </div>
+                      <div className="font-extrabold text-orange-700 tabular-nums">
+                        Aujourd&apos;hui : {formatWorkedDuration(member.todayWorkedSeconds)}
+                      </div>
+                      <div className="text-[10px] text-stone-600 tabular-nums">
+                        Total cumulé : {formatWorkedDuration(member.totalWorkedSeconds)}
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Historique détaillé des sessions à la demande */}
+                  {isExpanded && (
+                    <div className="rounded-lg border border-stone-200 bg-white p-3 space-y-2">
+                      <div className="flex items-center justify-between">
+                        <span className="text-[11px] font-bold text-stone-800">
+                          Journal des connexions, sorties &amp; temps travaillé ({sessions.length})
+                        </span>
+                        {loadingSessionsUid === member.uid && (
+                          <span className="text-[11px] text-stone-500 inline-flex items-center gap-1">
+                            <Loader2 className="w-3 h-3 animate-spin" /> Chargement...
+                          </span>
+                        )}
+                      </div>
+                      {loadingSessionsUid !== member.uid && sessions.length === 0 ? (
+                        <p className="text-[11px] text-stone-500">
+                          Aucune session de pointage enregistrée pour le moment (se crée automatiquement à la connexion).
+                        </p>
+                      ) : (
+                        <div className="overflow-x-auto">
+                          <table className="w-full text-left text-[11px] border-collapse">
+                            <thead>
+                              <tr className="border-b border-stone-200 text-stone-500">
+                                <th className="py-1.5 pr-3 font-semibold">Connexion</th>
+                                <th className="py-1.5 pr-3 font-semibold">Sortie</th>
+                                <th className="py-1.5 pr-3 font-semibold">Durée travaillée</th>
+                                <th className="py-1.5 pr-3 font-semibold">Appareil</th>
+                                <th className="py-1.5 font-semibold">Statut / Motif</th>
+                              </tr>
+                            </thead>
+                            <tbody className="divide-y divide-stone-100 tabular-nums">
+                              {sessions.slice(0, 15).map((ses) => (
+                                <tr key={ses.id}>
+                                  <td className="py-1.5 pr-3 text-stone-900 font-medium">
+                                    {formatDateTimeShort(ses.loginAt)}
+                                  </td>
+                                  <td className="py-1.5 pr-3 text-stone-700">
+                                    {ses.logoutAt ? formatDateTimeShort(ses.logoutAt) : 'En cours'}
+                                  </td>
+                                  <td className="py-1.5 pr-3 font-semibold text-stone-900">
+                                    {formatWorkedDuration(ses.workedSeconds)}
+                                  </td>
+                                  <td className="py-1.5 pr-3 text-stone-700">
+                                    <span className="inline-flex items-center gap-1">
+                                      {ses.deviceType === 'mobile' ? (
+                                        <Smartphone className="w-3 h-3 text-stone-500" />
+                                      ) : ses.deviceType === 'tablet' ? (
+                                        <Tablet className="w-3 h-3 text-stone-500" />
+                                      ) : (
+                                        <Laptop className="w-3 h-3 text-stone-500" />
+                                      )}
+                                      {ses.deviceLabel}
+                                    </span>
+                                  </td>
+                                  <td className="py-1.5">
+                                    {ses.status === 'active' ? (
+                                      <span className="px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-800 font-semibold text-[10px]">
+                                        Session active
+                                      </span>
+                                    ) : ses.disconnectedDuringWorkHours ? (
+                                      <span className="px-1.5 py-0.5 rounded bg-amber-100 text-amber-900 font-semibold text-[10px]">
+                                        Déco. heures travail ({ses.disconnectReason || 'Sortie'})
+                                      </span>
+                                    ) : (
+                                      <span className="px-1.5 py-0.5 rounded bg-stone-100 text-stone-700 font-semibold text-[10px]">
+                                        {ses.disconnectReason || 'Session terminée'}
+                                      </span>
+                                    )}
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
       </div>
 
       {/* Coffre Clés API Cloud (/api_keys/{provider}) — Super-Admin uniquement */}

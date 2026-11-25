@@ -326,6 +326,69 @@ test('parseFriendlyCloudError classifies permission-denied, offline, and unauthe
   assert.equal(unauth.code, 'unauthenticated');
 });
 
+test('sanitizeWorkspacePayload preserves deduplication preferences safely within blueprint bounds', () => {
+  const ws = sanitizeWorkspacePayload('u_dedup', {
+    villesAll: ['Meknès'],
+    villesActive: ['Meknès'],
+    modeVille: 'default',
+    defaultVille: 'Meknès',
+    emailSignature: 'Sig',
+    seeded: true,
+    dismissedDedupKeys: ['id1|id2', 'id1|id2', 'id3|id4'],
+    includePhoneOnlyDedup: true,
+  });
+  assert.deepEqual(ws.dismissedDedupKeys, ['id1|id2', 'id3|id4']);
+  assert.equal(ws.includePhoneOnlyDedup, true);
+});
+
+test('sanitizeUserPresencePayload and sanitizeAttendanceSessionPayload enforce bounds, enums, and PII fields', async () => {
+  const { sanitizeUserPresencePayload, sanitizeAttendanceSessionPayload } = await import(
+    './firestoreSanitize'
+  );
+  const presence = sanitizeUserPresencePayload({
+    uid: 'u/presence!',
+    email: '  Youssef@OrangePro.MA ',
+    displayName: 'Youssef Bennani',
+    firstName: 'Youssef',
+    lastName: 'Bennani',
+    phonePro: '0661223344',
+    role: 'invalid_role',
+    zone: 'Meknès',
+    isOnline: true,
+    currentDevice: 'Windows · Chrome (PC / Bureau)',
+    devicesUsed: Array.from({ length: 16 }, (_, i) => `Device ${i}`),
+    todayWorkedSeconds: 120000, // capped to 86400
+    totalWorkedSeconds: -50,
+    workHoursDisconnectTimes: Array.from({ length: 40 }, (_, i) => `2026-11-25T10:${String(i % 60).padStart(2, '0')}:00Z|Déconnexion`),
+  });
+  assert.equal(presence.uid, 'u_presence_');
+  assert.equal(presence.orgScope, 'orange_pro_team');
+  assert.equal(presence.email, 'youssef@orangepro.ma');
+  assert.equal(presence.role, 'commercial');
+  assert.equal(presence.devicesUsed.length, 12);
+  assert.equal(presence.todayWorkedSeconds, 86400);
+  assert.equal(presence.totalWorkedSeconds, 0);
+  assert.equal(presence.workHoursDisconnectTimes.length, 30);
+
+  const session = sanitizeAttendanceSessionPayload({
+    id: 'ses/1',
+    ownerId: 'u_1',
+    dateKey: '2026-11-25',
+    loginAt: '2026-11-25T08:40:00.000Z',
+    lastSeenAt: '2026-11-25T10:00:00.000Z',
+    workedSeconds: 4800,
+    deviceLabel: 'Windows · Chrome (PC / Bureau)',
+    deviceType: 'bad_type',
+    status: 'disconnected_work_hours',
+    disconnectReason: 'Déconnexion manuelle',
+    disconnectedDuringWorkHours: true,
+  });
+  assert.equal(session.id, 'ses_1');
+  assert.equal(session.deviceType, 'desktop');
+  assert.equal(session.status, 'disconnected_work_hours');
+  assert.equal(session.disconnectedDuringWorkHours, true);
+});
+
 
 
 

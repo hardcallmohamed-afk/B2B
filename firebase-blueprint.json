@@ -69,6 +69,13 @@
         "compactUi": {
           "type": "boolean"
         },
+        "dismissedDedupKeys": {
+          "type": "array",
+          "description": "Groupes de doublons explicitement marqués comme distincts par l'utilisateur (max 100)."
+        },
+        "includePhoneOnlyDedup": {
+          "type": "boolean"
+        },
         "createdAt": {
           "type": "string",
           "format": "date-time"
@@ -597,6 +604,231 @@
         "createdAt",
         "updatedAt"
       ]
+    },
+    "UserPresence": {
+      "title": "UserPresence",
+      "description": "Profil collaborateur (nom, prénom, téléphone, photo), appareils utilisés et suivi pointage/heures travaillées (accès restreint au propriétaire et au Super-Admin).",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "orgScope": {
+          "type": "string",
+          "enum": ["orange_pro_team"]
+        },
+        "email": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 160
+        },
+        "displayName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "firstName": {
+          "type": "string",
+          "maxLength": 60
+        },
+        "lastName": {
+          "type": "string",
+          "maxLength": 60
+        },
+        "phonePro": {
+          "type": "string",
+          "maxLength": 30
+        },
+        "avatarDataUrl": {
+          "type": "string",
+          "maxLength": 45000,
+          "pattern": "^(|data:image/(jpeg|png|webp);base64,[A-Za-z0-9+/=]+)$"
+        },
+        "role": {
+          "type": "string",
+          "enum": ["super_admin", "manager", "team_lead", "grand_compte", "commercial"]
+        },
+        "zone": {
+          "type": "string",
+          "maxLength": 100
+        },
+        "isOnline": {
+          "type": "boolean"
+        },
+        "currentDevice": {
+          "type": "string",
+          "maxLength": 160
+        },
+        "devicesUsed": {
+          "type": "array",
+          "description": "Liste bornée des appareils utilisés (max 12)."
+        },
+        "lastLoginAt": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "lastLogoutAt": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "lastSeenAt": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "lastWorkDisconnectAt": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "workHoursDisconnectCount": {
+          "type": "integer"
+        },
+        "workHoursDisconnectTimes": {
+          "type": "array",
+          "description": "Horodatages des déconnexions pendant les heures de travail (max 30)."
+        },
+        "activeDateKey": {
+          "type": "string",
+          "maxLength": 16
+        },
+        "todayWorkedSeconds": {
+          "type": "integer"
+        },
+        "totalWorkedSeconds": {
+          "type": "integer"
+        },
+        "currentSessionId": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "uid",
+        "orgScope",
+        "email",
+        "displayName",
+        "firstName",
+        "lastName",
+        "phonePro",
+        "avatarDataUrl",
+        "role",
+        "zone",
+        "isOnline",
+        "currentDevice",
+        "devicesUsed",
+        "lastLoginAt",
+        "lastLogoutAt",
+        "lastSeenAt",
+        "lastWorkDisconnectAt",
+        "workHoursDisconnectCount",
+        "workHoursDisconnectTimes",
+        "activeDateKey",
+        "todayWorkedSeconds",
+        "totalWorkedSeconds",
+        "currentSessionId",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "AttendanceSession": {
+      "title": "AttendanceSession",
+      "description": "Session de connexion/pointage d'un utilisateur (heure d'entrée, heure de sortie, appareil, durée travaillée, déconnexion heures de travail).",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "ownerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "orgScope": {
+          "type": "string",
+          "enum": ["orange_pro_team"]
+        },
+        "dateKey": {
+          "type": "string",
+          "minLength": 8,
+          "maxLength": 16
+        },
+        "loginAt": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "lastSeenAt": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "logoutAt": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "workedSeconds": {
+          "type": "integer"
+        },
+        "deviceLabel": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "deviceType": {
+          "type": "string",
+          "enum": ["desktop", "mobile", "tablet"]
+        },
+        "status": {
+          "type": "string",
+          "enum": ["active", "closed", "disconnected_work_hours"]
+        },
+        "disconnectReason": {
+          "type": "string",
+          "maxLength": 80
+        },
+        "disconnectedDuringWorkHours": {
+          "type": "boolean"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "ownerId",
+        "orgScope",
+        "dateKey",
+        "loginAt",
+        "lastSeenAt",
+        "logoutAt",
+        "workedSeconds",
+        "deviceLabel",
+        "deviceType",
+        "status",
+        "disconnectReason",
+        "disconnectedDuringWorkHours",
+        "createdAt",
+        "updatedAt"
+      ]
     }
   },
   "firestore": {
@@ -623,6 +855,18 @@
         "$ref": "#/entities/SignedContract"
       },
       "description": "Contrats Orange Pro signés avec produit et payout MAD (accès fiche client verrouillé pour les collaborateurs après signature)."
+    },
+    "/user_presence/{userId}": {
+      "schema": {
+        "$ref": "#/entities/UserPresence"
+      },
+      "description": "Profil PII, appareils et suivi temps de travail/déconnexions accessible uniquement au propriétaire et au Super-Admin."
+    },
+    "/user_presence/{userId}/sessions/{sessionId}": {
+      "schema": {
+        "$ref": "#/entities/AttendanceSession"
+      },
+      "description": "Historique des sessions de pointage d'un utilisateur accessible uniquement au propriétaire et au Super-Admin."
     },
     "/users/{userId}": {
       "schema": {

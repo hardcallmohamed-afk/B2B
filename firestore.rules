@@ -70,6 +70,14 @@ service cloud.firestore {
       return val is string && val in ['En attente', 'Validé', 'Versé'];
     }
 
+    function isValidDeviceType(val) {
+      return val is string && val in ['desktop', 'mobile', 'tablet'];
+    }
+
+    function isValidSessionStatus(val) {
+      return val is string && val in ['active', 'closed', 'disconnected_work_hours'];
+    }
+
     function isValidStringList(arr, maxItems, maxItemLen) {
       return arr is list
         && arr.size() <= maxItems
@@ -192,6 +200,84 @@ service cloud.firestore {
         && data.updatedAt is timestamp;
     }
 
+    function isValidUserPresence(data, targetUid) {
+      return data.keys().hasAll([
+          'uid', 'orgScope', 'email', 'displayName', 'firstName', 'lastName',
+          'phonePro', 'avatarDataUrl', 'role', 'zone', 'isOnline',
+          'currentDevice', 'devicesUsed', 'lastLoginAt', 'lastLogoutAt',
+          'lastSeenAt', 'lastWorkDisconnectAt', 'workHoursDisconnectCount',
+          'workHoursDisconnectTimes', 'activeDateKey', 'todayWorkedSeconds',
+          'totalWorkedSeconds', 'currentSessionId', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'uid', 'orgScope', 'email', 'displayName', 'firstName', 'lastName',
+          'phonePro', 'avatarDataUrl', 'role', 'zone', 'isOnline',
+          'currentDevice', 'devicesUsed', 'lastLoginAt', 'lastLogoutAt',
+          'lastSeenAt', 'lastWorkDisconnectAt', 'workHoursDisconnectCount',
+          'workHoursDisconnectTimes', 'activeDateKey', 'todayWorkedSeconds',
+          'totalWorkedSeconds', 'currentSessionId', 'createdAt', 'updatedAt'
+        ])
+        && data.uid is string
+        && data.uid == targetUid
+        && isValidId(data.uid)
+        && data.orgScope is string && data.orgScope == 'orange_pro_team'
+        && data.email is string && data.email.size() >= 3 && data.email.size() <= 160
+        && data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 120
+        && data.firstName is string && data.firstName.size() <= 60
+        && data.lastName is string && data.lastName.size() <= 60
+        && data.phonePro is string && data.phonePro.size() <= 30
+        && isValidAvatarDataUrl(data.avatarDataUrl)
+        && isValidTeamRole(data.role)
+        && data.zone is string && data.zone.size() <= 100
+        && data.isOnline is bool
+        && data.currentDevice is string && data.currentDevice.size() <= 160
+        && isValidStringList(data.devicesUsed, 12, 160)
+        && data.lastLoginAt is string && data.lastLoginAt.size() <= 64
+        && data.lastLogoutAt is string && data.lastLogoutAt.size() <= 64
+        && data.lastSeenAt is string && data.lastSeenAt.size() <= 64
+        && data.lastWorkDisconnectAt is string && data.lastWorkDisconnectAt.size() <= 64
+        && data.workHoursDisconnectCount is int && data.workHoursDisconnectCount >= 0 && data.workHoursDisconnectCount <= 100000
+        && isValidStringList(data.workHoursDisconnectTimes, 30, 80)
+        && data.activeDateKey is string && data.activeDateKey.size() <= 16
+        && data.todayWorkedSeconds is int && data.todayWorkedSeconds >= 0 && data.todayWorkedSeconds <= 86400
+        && data.totalWorkedSeconds is int && data.totalWorkedSeconds >= 0 && data.totalWorkedSeconds <= 100000000
+        && data.currentSessionId is string && (data.currentSessionId == '' || isValidId(data.currentSessionId))
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidAttendanceSession(data, userId, sessionId) {
+      return data.keys().hasAll([
+          'id', 'ownerId', 'orgScope', 'dateKey', 'loginAt', 'lastSeenAt',
+          'logoutAt', 'workedSeconds', 'deviceLabel', 'deviceType', 'status',
+          'disconnectReason', 'disconnectedDuringWorkHours', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'id', 'ownerId', 'orgScope', 'dateKey', 'loginAt', 'lastSeenAt',
+          'logoutAt', 'workedSeconds', 'deviceLabel', 'deviceType', 'status',
+          'disconnectReason', 'disconnectedDuringWorkHours', 'createdAt', 'updatedAt'
+        ])
+        && data.id is string
+        && data.id == sessionId
+        && isValidId(data.id)
+        && data.ownerId is string
+        && data.ownerId == userId
+        && isValidId(data.ownerId)
+        && data.orgScope is string && data.orgScope == 'orange_pro_team'
+        && data.dateKey is string && data.dateKey.size() >= 8 && data.dateKey.size() <= 16
+        && data.loginAt is string && data.loginAt.size() >= 1 && data.loginAt.size() <= 64
+        && data.lastSeenAt is string && data.lastSeenAt.size() >= 1 && data.lastSeenAt.size() <= 64
+        && data.logoutAt is string && data.logoutAt.size() <= 64
+        && data.workedSeconds is int && data.workedSeconds >= 0 && data.workedSeconds <= 86400
+        && data.deviceLabel is string && data.deviceLabel.size() >= 1 && data.deviceLabel.size() <= 160
+        && isValidDeviceType(data.deviceType)
+        && isValidSessionStatus(data.status)
+        && data.disconnectReason is string && data.disconnectReason.size() <= 80
+        && data.disconnectedDuringWorkHours is bool
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
     function isValidUserWorkspaceConfig(data, userId) {
       return data.keys().hasAll([
           'ownerId', 'villesAll', 'villesActive', 'modeVille',
@@ -202,6 +288,7 @@ service cloud.firestore {
           'defaultVille', 'emailSignature', 'seeded',
           'displayName', 'avatarDataUrl', 'phonePro', 'zone', 'bio',
           'monthlyGoalContracts', 'notifyBadges', 'notifySound', 'compactUi',
+          'dismissedDedupKeys', 'includePhoneOnlyDedup',
           'createdAt', 'updatedAt'
         ])
         && data.ownerId is string
@@ -225,6 +312,8 @@ service cloud.firestore {
         && (!('notifyBadges' in data) || data.notifyBadges is bool)
         && (!('notifySound' in data) || data.notifySound is bool)
         && (!('compactUi' in data) || data.compactUi is bool)
+        && (!('dismissedDedupKeys' in data) || isValidStringList(data.dismissedDedupKeys, 100, 200))
+        && (!('includePhoneOnlyDedup' in data) || data.includePhoneOnlyDedup is bool)
         && data.createdAt is timestamp
         && data.updatedAt is timestamp;
     }
@@ -464,7 +553,111 @@ service cloud.firestore {
       allow delete: if isSuperAdmin() && isValidId(contractId);
     }
 
-    // 8. Collection: /users/{userId} (Workspace Settings)
+    // 8. Collection: /user_presence/{userId} (PII Profile, Devices & Work-Hours Attendance — Owner & Super-Admin ONLY)
+    match /user_presence/{userId} {
+      allow get: if isValidId(userId) && (
+        isSuperAdmin()
+        || (isOwner(userId) && (resource == null || existing().uid == request.auth.uid))
+      );
+
+      // Strictly Super-Admin only; query MUST filter by orgScope == 'orange_pro_team'.
+      allow list: if isSuperAdmin() && resource.data.orgScope == 'orange_pro_team';
+
+      allow create: if isValidId(userId)
+        && isValidUserPresence(incoming(), userId)
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && (
+          isSuperAdmin()
+          || (
+            isOwner(userId)
+            && incoming().uid == request.auth.uid
+            && incoming().role == get(/databases/$(database)/documents/app_users/$(userId)).data.role
+          )
+        );
+
+      allow update: if isValidId(userId)
+        && isValidUserPresence(incoming(), userId)
+        && incoming().uid == existing().uid
+        && incoming().orgScope == existing().orgScope
+        && incoming().email == existing().email
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          // Action 1: Super-Admin updates collaborator profile metadata or own presence
+          (
+            isSuperAdmin()
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+              'displayName', 'firstName', 'lastName', 'phonePro', 'avatarDataUrl',
+              'role', 'zone', 'isOnline', 'currentDevice', 'devicesUsed',
+              'lastLoginAt', 'lastLogoutAt', 'lastSeenAt', 'lastWorkDisconnectAt',
+              'workHoursDisconnectCount', 'workHoursDisconnectTimes',
+              'activeDateKey', 'todayWorkedSeconds', 'totalWorkedSeconds',
+              'currentSessionId', 'updatedAt'
+            ])
+          )
+          ||
+          // Action 2: Collaborator updates own profile, device list, and live attendance status (role immutable)
+          (
+            isOwner(userId)
+            && incoming().uid == request.auth.uid
+            && incoming().role == existing().role
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+              'displayName', 'firstName', 'lastName', 'phonePro', 'avatarDataUrl',
+              'zone', 'isOnline', 'currentDevice', 'devicesUsed',
+              'lastLoginAt', 'lastLogoutAt', 'lastSeenAt', 'lastWorkDisconnectAt',
+              'workHoursDisconnectCount', 'workHoursDisconnectTimes',
+              'activeDateKey', 'todayWorkedSeconds', 'totalWorkedSeconds',
+              'currentSessionId', 'updatedAt'
+            ])
+          )
+        );
+
+      allow delete: if isSuperAdmin() && isValidId(userId);
+
+      // 8b. Subcollection: /user_presence/{userId}/sessions/{sessionId} (Login/Logout & Work-Hours Sessions)
+      match /sessions/{sessionId} {
+        allow get: if isValidId(userId) && isValidId(sessionId) && (
+          isSuperAdmin()
+          || (isOwner(userId) && (resource == null || existing().ownerId == request.auth.uid))
+        );
+
+        allow list: if (isSuperAdmin() && resource.data.orgScope == 'orange_pro_team')
+          || (isVerifiedUser() && request.auth.uid == userId && resource.data.ownerId == request.auth.uid);
+
+        allow create: if isValidId(userId)
+          && isValidId(sessionId)
+          && isValidAttendanceSession(incoming(), userId, sessionId)
+          && isOwner(userId)
+          && incoming().ownerId == request.auth.uid
+          && incoming().createdAt == request.time
+          && incoming().updatedAt == request.time
+          && exists(/databases/$(database)/documents/user_presence/$(userId));
+
+        allow update: if isValidId(userId)
+          && isValidId(sessionId)
+          && isValidAttendanceSession(incoming(), userId, sessionId)
+          && isOwner(userId)
+          && existing().ownerId == request.auth.uid
+          && incoming().ownerId == existing().ownerId
+          && incoming().id == existing().id
+          && incoming().orgScope == existing().orgScope
+          && incoming().createdAt == existing().createdAt
+          && incoming().updatedAt == request.time
+          && exists(/databases/$(database)/documents/user_presence/$(userId))
+          && (
+            // Action: Heartbeat or session closure (login/logout/disconnect)
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'lastSeenAt', 'logoutAt', 'workedSeconds', 'status',
+              'disconnectReason', 'disconnectedDuringWorkHours', 'updatedAt'
+            ])
+          );
+
+        allow delete: if isSuperAdmin() && isValidId(userId) && isValidId(sessionId);
+      }
+    }
+
+    // 9. Collection: /users/{userId} (Workspace Settings)
     match /users/{userId} {
       allow get: if isValidId(userId) && isOwner(userId)
         && (resource == null || existing().ownerId == request.auth.uid);
@@ -484,18 +677,19 @@ service cloud.firestore {
         && incoming().createdAt == existing().createdAt
         && incoming().updatedAt == request.time
         && (
-          // Action: Update workspace & personal profile settings (cities, signature, photo, preferences)
+          // Action: Update workspace & personal profile settings (cities, signature, photo, preferences, dedup choices)
           incoming().diff(existing()).affectedKeys().hasOnly([
             'villesAll', 'villesActive', 'modeVille', 'defaultVille',
             'emailSignature', 'seeded', 'displayName', 'avatarDataUrl',
             'phonePro', 'zone', 'bio', 'monthlyGoalContracts',
-            'notifyBadges', 'notifySound', 'compactUi', 'updatedAt'
+            'notifyBadges', 'notifySound', 'compactUi',
+            'dismissedDedupKeys', 'includePhoneOnlyDedup', 'updatedAt'
           ])
         );
 
       allow delete: if isValidId(userId) && isOwner(userId) && existing().ownerId == request.auth.uid;
 
-      // 9. Subcollection: /users/{userId}/fiches/{ficheId} (B2B CRM Prospects — Locked after Signing for Collaborators)
+      // 10. Subcollection: /users/{userId}/fiches/{ficheId} (B2B CRM Prospects — Locked after Signing for Collaborators)
       match /fiches/{ficheId} {
         allow get: if isValidId(userId) && isValidId(ficheId) && isOwner(userId)
           && (resource == null || existing().ownerId == request.auth.uid)
@@ -545,7 +739,7 @@ service cloud.firestore {
           && exists(/databases/$(database)/documents/users/$(userId));
       }
 
-      // 10. Subcollection: /users/{userId}/skills/{skillId} (Email Studio Skills)
+      // 11. Subcollection: /users/{userId}/skills/{skillId} (Email Studio Skills)
       match /skills/{skillId} {
         allow get: if isValidId(userId) && isValidId(skillId) && isOwner(userId)
           && (resource == null || existing().ownerId == request.auth.uid);

@@ -72,6 +72,8 @@ export interface WorkspaceLike {
   notifyBadges?: boolean;
   notifySound?: boolean;
   compactUi?: boolean;
+  dismissedDedupKeys?: string[];
+  includePhoneOnlyDedup?: boolean;
 }
 
 export interface SanitizedWorkspaceDoc {
@@ -91,6 +93,8 @@ export interface SanitizedWorkspaceDoc {
   notifyBadges?: boolean;
   notifySound?: boolean;
   compactUi?: boolean;
+  dismissedDedupKeys?: string[];
+  includePhoneOnlyDedup?: boolean;
 }
 
 export interface SanitizedFicheDoc {
@@ -243,6 +247,12 @@ export function sanitizeWorkspacePayload(ownerId: string, input: WorkspaceLike):
   }
   if (typeof input.compactUi === 'boolean') {
     doc.compactUi = input.compactUi;
+  }
+  if (Array.isArray(input.dismissedDedupKeys)) {
+    doc.dismissedDedupKeys = sanitizeStringArray(input.dismissedDedupKeys, 100, 200);
+  }
+  if (typeof input.includePhoneOnlyDedup === 'boolean') {
+    doc.includePhoneOnlyDedup = input.includePhoneOnlyDedup;
   }
 
   return doc;
@@ -532,6 +542,169 @@ export function sanitizeApiKeyConfigPayload(input: ApiKeyConfigLike): SanitizedA
     label,
     active: input.active !== false,
     updatedBy,
+  };
+}
+
+export const VALID_DEVICE_TYPES = new Set(['desktop', 'mobile', 'tablet'] as const);
+export const VALID_SESSION_STATUSES = new Set([
+  'active',
+  'closed',
+  'disconnected_work_hours',
+] as const);
+
+export interface UserPresenceLike {
+  uid: string;
+  email: string;
+  displayName: string;
+  firstName?: string;
+  lastName?: string;
+  phonePro?: string;
+  avatarDataUrl?: string;
+  role: string;
+  zone?: string;
+  isOnline?: boolean;
+  currentDevice?: string;
+  devicesUsed?: string[];
+  lastLoginAt?: string;
+  lastLogoutAt?: string;
+  lastSeenAt?: string;
+  lastWorkDisconnectAt?: string;
+  workHoursDisconnectCount?: number;
+  workHoursDisconnectTimes?: string[];
+  activeDateKey?: string;
+  todayWorkedSeconds?: number;
+  totalWorkedSeconds?: number;
+  currentSessionId?: string;
+}
+
+export interface SanitizedUserPresenceDoc {
+  uid: string;
+  orgScope: 'orange_pro_team';
+  email: string;
+  displayName: string;
+  firstName: string;
+  lastName: string;
+  phonePro: string;
+  avatarDataUrl: string;
+  role: SanitizedTeamRole;
+  zone: string;
+  isOnline: boolean;
+  currentDevice: string;
+  devicesUsed: string[];
+  lastLoginAt: string;
+  lastLogoutAt: string;
+  lastSeenAt: string;
+  lastWorkDisconnectAt: string;
+  workHoursDisconnectCount: number;
+  workHoursDisconnectTimes: string[];
+  activeDateKey: string;
+  todayWorkedSeconds: number;
+  totalWorkedSeconds: number;
+  currentSessionId: string;
+}
+
+export function sanitizeUserPresencePayload(input: UserPresenceLike): SanitizedUserPresenceDoc {
+  const cleanUid = sanitizeDocId(input.uid, 'usr');
+  const rawEmail = clampString((input.email || '').trim().toLowerCase(), 160);
+  const email = rawEmail.length >= 3 ? rawEmail : 'user@orangepro.ma';
+  const rawName = clampString((input.displayName || '').trim(), 120);
+  const displayName = rawName.length >= 1 ? rawName : email.split('@')[0] || 'Collaborateur';
+  const role: SanitizedTeamRole = VALID_TEAM_ROLES.has(input.role as never)
+    ? (input.role as SanitizedTeamRole)
+    : 'commercial';
+
+  const clampInt = (n: unknown, maxVal: number) =>
+    Math.min(maxVal, Math.max(0, Math.round(Number(n) || 0)));
+
+  return {
+    uid: cleanUid,
+    orgScope: 'orange_pro_team',
+    email,
+    displayName,
+    firstName: clampString((input.firstName || '').trim(), 60),
+    lastName: clampString((input.lastName || '').trim(), 60),
+    phonePro: clampString((input.phonePro || '').trim(), 30),
+    avatarDataUrl: sanitizeAvatarDataUrl(input.avatarDataUrl),
+    role,
+    zone: clampString((input.zone || '').trim(), 100),
+    isOnline: Boolean(input.isOnline),
+    currentDevice: clampString((input.currentDevice || '').trim(), 160),
+    devicesUsed: sanitizeStringArray(input.devicesUsed ?? [], 12, 160),
+    lastLoginAt: clampString((input.lastLoginAt || '').trim(), 64),
+    lastLogoutAt: clampString((input.lastLogoutAt || '').trim(), 64),
+    lastSeenAt: clampString((input.lastSeenAt || '').trim(), 64),
+    lastWorkDisconnectAt: clampString((input.lastWorkDisconnectAt || '').trim(), 64),
+    workHoursDisconnectCount: clampInt(input.workHoursDisconnectCount, 100000),
+    workHoursDisconnectTimes: sanitizeStringArray(input.workHoursDisconnectTimes ?? [], 30, 80),
+    activeDateKey: clampString((input.activeDateKey || '').trim(), 16),
+    todayWorkedSeconds: clampInt(input.todayWorkedSeconds, 86400),
+    totalWorkedSeconds: clampInt(input.totalWorkedSeconds, 100000000),
+    currentSessionId: input.currentSessionId ? sanitizeDocId(input.currentSessionId, 'ses') : '',
+  };
+}
+
+export interface AttendanceSessionLike {
+  id: string;
+  ownerId: string;
+  dateKey: string;
+  loginAt: string;
+  lastSeenAt: string;
+  logoutAt?: string;
+  workedSeconds: number;
+  deviceLabel: string;
+  deviceType: string;
+  status: string;
+  disconnectReason?: string;
+  disconnectedDuringWorkHours?: boolean;
+}
+
+export interface SanitizedAttendanceSessionDoc {
+  id: string;
+  ownerId: string;
+  orgScope: 'orange_pro_team';
+  dateKey: string;
+  loginAt: string;
+  lastSeenAt: string;
+  logoutAt: string;
+  workedSeconds: number;
+  deviceLabel: string;
+  deviceType: 'desktop' | 'mobile' | 'tablet';
+  status: 'active' | 'closed' | 'disconnected_work_hours';
+  disconnectReason: string;
+  disconnectedDuringWorkHours: boolean;
+}
+
+export function sanitizeAttendanceSessionPayload(
+  input: AttendanceSessionLike
+): SanitizedAttendanceSessionDoc {
+  const id = sanitizeDocId(input.id, 'ses');
+  const ownerId = sanitizeDocId(input.ownerId, 'usr');
+  const rawDateKey = clampString((input.dateKey || '').trim(), 16);
+  const dateKey = rawDateKey.length >= 8 ? rawDateKey : new Date().toISOString().slice(0, 10);
+  const rawLogin = clampString((input.loginAt || '').trim(), 64) || new Date().toISOString();
+  const rawSeen = clampString((input.lastSeenAt || '').trim(), 64) || rawLogin;
+  const rawDevice = clampString((input.deviceLabel || '').trim(), 160) || 'Navigateur';
+  const deviceType = VALID_DEVICE_TYPES.has(input.deviceType as never)
+    ? (input.deviceType as 'desktop' | 'mobile' | 'tablet')
+    : 'desktop';
+  const status = VALID_SESSION_STATUSES.has(input.status as never)
+    ? (input.status as 'active' | 'closed' | 'disconnected_work_hours')
+    : 'active';
+
+  return {
+    id,
+    ownerId,
+    orgScope: 'orange_pro_team',
+    dateKey,
+    loginAt: rawLogin,
+    lastSeenAt: rawSeen,
+    logoutAt: clampString((input.logoutAt || '').trim(), 64),
+    workedSeconds: Math.min(86400, Math.max(0, Math.round(Number(input.workedSeconds) || 0))),
+    deviceLabel: rawDevice,
+    deviceType,
+    status,
+    disconnectReason: clampString((input.disconnectReason || '').trim(), 80),
+    disconnectedDuringWorkHours: Boolean(input.disconnectedDuringWorkHours),
   };
 }
 

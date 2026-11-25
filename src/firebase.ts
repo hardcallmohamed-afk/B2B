@@ -27,6 +27,7 @@ import {
   setDoc,
   updateDoc,
   deleteDoc,
+  deleteField,
   writeBatch,
   serverTimestamp,
   type DocumentData,
@@ -41,6 +42,8 @@ import {
   sanitizeTeamStatPayload,
   sanitizeSignedContractPayload,
   sanitizeApiKeyConfigPayload,
+  sanitizeUserPresencePayload,
+  sanitizeAttendanceSessionPayload,
   sanitizeProviderId,
   type FicheLike,
   type EmailSkillLike,
@@ -51,10 +54,18 @@ import {
   type SanitizedFicheDoc,
   type SanitizedEmailSkillDoc,
   type SanitizedSignedContractDoc,
+  type SanitizedUserPresenceDoc,
+  type SanitizedAttendanceSessionDoc,
   type SyncDiff,
 } from './utils/firestoreSanitize';
 import { normalizeManagedRole, type ManagedAppUser, type ManagedUserRole } from './utils/authAccess';
 import type { TeamRole } from './utils/gamification';
+import {
+  buildDeviceHistoryList,
+  buildWorkDisconnectEntry,
+  splitFirstAndLastName,
+  type ClientDeviceType,
+} from './utils/attendance';
 
 const app = getApps().find((a) => a.name === '[DEFAULT]') || initializeApp(firebaseConfig);
 
@@ -252,6 +263,17 @@ export function getSignedContractsQuery(uid: string, isSuperAdmin: boolean) {
   return query(collection(db, 'signed_contracts'), where('ownerId', '==', uid));
 }
 
+export type UserPresenceRecord = SanitizedUserPresenceDoc;
+export type AttendanceSessionRecord = SanitizedAttendanceSessionDoc;
+
+export function getUserPresenceListQuery() {
+  return query(collection(db, 'user_presence'), where('orgScope', '==', 'orange_pro_team'));
+}
+
+export function getUserSessionsQuery(uid: string) {
+  return query(collection(db, 'user_presence', uid, 'sessions'), where('orgScope', '==', 'orange_pro_team'));
+}
+
 export interface CloudApiKeyRecord {
   provider: string;
   label: string;
@@ -325,6 +347,7 @@ export async function adminCreateManagedUser(params: {
   password: string;
   role: ManagedUserRole;
   zone: string;
+  phonePro?: string;
   initialManualBadges?: string[];
 }): Promise<ManagedAppUser> {
   const secondaryAuth = getSecondaryProvisioningAuth();
@@ -409,6 +432,42 @@ export async function adminCreateManagedUser(params: {
     // Non-fatal; will also be created automatically on collaborator's first workspace sync
   }
 
+  // Seed initial /user_presence/{uid} record so Super-Admin immediately sees Name, Prénom, Phone, and Attendance
+  try {
+    const { firstName, lastName } = splitFirstAndLastName(sanitized.displayName);
+    const initialPresence = sanitizeUserPresencePayload({
+      uid: sanitized.uid,
+      email: sanitized.email,
+      displayName: sanitized.displayName,
+      firstName,
+      lastName,
+      phonePro: params.phonePro || '',
+      avatarDataUrl: '',
+      role: sanitized.role,
+      zone: sanitized.zone,
+      isOnline: false,
+      currentDevice: '',
+      devicesUsed: [],
+      lastLoginAt: '',
+      lastLogoutAt: '',
+      lastSeenAt: '',
+      lastWorkDisconnectAt: '',
+      workHoursDisconnectCount: 0,
+      workHoursDisconnectTimes: [],
+      activeDateKey: '',
+      todayWorkedSeconds: 0,
+      totalWorkedSeconds: 0,
+      currentSessionId: '',
+    });
+    await setDoc(doc(db, 'user_presence', sanitized.uid), {
+      ...initialPresence,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    });
+  } catch {
+    // Non-fatal; will also be created automatically on collaborator's first login
+  }
+
   return {
     ...sanitized,
     createdAt: new Date().toISOString(),
@@ -422,6 +481,8 @@ export async function adminUpdateManagedUser(
     role: ManagedUserRole;
     zone: string;
     active: boolean;
+    phonePro?: string;
+    email?: string;
   }
 ): Promise<void> {
   const targetPath = `app_users/${uid}`;
@@ -456,6 +517,48 @@ export async function adminUpdateManagedUser(
   } catch {
     // Non-fatal
   }
+
+  // Keep /user_presence/{uid} metadata (name, surname, phone, role, zone) in sync
+  try {
+    const presRef = doc(db, 'user_presence', uid);
+    const presSnap = await getDoc(presRef);
+    const { firstName, lastName } = splitFirstAndLastName(cleanName);
+    const cleanPhone = typeof updates.phonePro === 'string' ? updates.phonePro.trim().slice(0, 30) : undefined;
+    if (presSnap.exists()) {
+      const presUpdate: DocumentData = {
+        displayName: cleanName,
+        firstName,
+        lastName,
+        role: cleanRole,
+        zone: cleanZone,
+        updatedAt: serverTimestamp(),
+      };
+      if (cleanPhone !== undefined) {
+        presUpdate.phonePro = cleanPhone;
+      }
+      await updateDoc(presRef, presUpdate);
+    } else if (updates.email) {
+      const seeded = sanitizeUserPresencePayload({
+        uid,
+        email: updates.email,
+        displayName: cleanName,
+        firstName,
+        lastName,
+        phonePro: cleanPhone || '',
+        avatarDataUrl: '',
+        role: cleanRole,
+        zone: cleanZone,
+        isOnline: false,
+      });
+      await setDoc(presRef, {
+        ...seeded,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+    }
+  } catch {
+    // Non-fatal
+  }
 }
 
 export async function adminDeleteManagedUser(uid: string): Promise<void> {
@@ -469,6 +572,11 @@ export async function adminDeleteManagedUser(uid: string): Promise<void> {
     await deleteDoc(doc(db, 'team_stats', uid));
   } catch {
     // Non-fatal if stat doc does not exist
+  }
+  try {
+    await deleteDoc(doc(db, 'user_presence', uid));
+  } catch {
+    // Non-fatal if presence doc does not exist
   }
 }
 
@@ -631,9 +739,31 @@ export async function adminUpdateSignedContract(
 
 const BATCH_LIMIT = 400;
 
-function stripImmutableFicheKeys(docData: SanitizedFicheDoc): DocumentData {
-  const { ownerId: _o, id: _i, ...mutable } = docData;
-  return mutable;
+function buildMutableFicheUpdate(docData: SanitizedFicheDoc): DocumentData {
+  const {
+    ownerId: _o,
+    id: _i,
+    numeroFiche,
+    telephonesSupplementaires,
+    emailsSupplementaires,
+    siteWeb,
+    verifieWeb,
+    pistesEnrichissement,
+    ...requiredMutable
+  } = docData;
+
+  return {
+    ...requiredMutable,
+    numeroFiche: numeroFiche !== undefined ? numeroFiche : deleteField(),
+    telephonesSupplementaires:
+      telephonesSupplementaires !== undefined ? telephonesSupplementaires : deleteField(),
+    emailsSupplementaires:
+      emailsSupplementaires !== undefined ? emailsSupplementaires : deleteField(),
+    siteWeb: siteWeb !== undefined ? siteWeb : deleteField(),
+    verifieWeb: verifieWeb !== undefined ? verifieWeb : deleteField(),
+    pistesEnrichissement:
+      pistesEnrichissement !== undefined ? pistesEnrichissement : deleteField(),
+  };
 }
 
 function stripImmutableSkillKeys(docData: SanitizedEmailSkillDoc): DocumentData {
@@ -774,7 +904,7 @@ async function upsertFicheResilient(
         updatedAt: serverTimestamp(),
       });
     } else {
-      const mutable = stripImmutableFicheKeys(ficheDoc);
+      const mutable = buildMutableFicheUpdate(ficheDoc);
       await updateDoc(ref, {
         ...mutable,
         updatedAt: serverTimestamp(),
@@ -852,7 +982,7 @@ export async function syncFichesDiffToFirestore(
         })
       );
     } else {
-      const mutable = stripImmutableFicheKeys(upd.next);
+      const mutable = buildMutableFicheUpdate(upd.next);
       pushOp((b) =>
         b.update(ref, {
           ...mutable,
@@ -1029,4 +1159,411 @@ export function getUserFichesCollection(uid: string) {
 
 export function getUserSkillsCollection(uid: string) {
   return collection(db, 'users', uid, 'skills');
+}
+
+export async function syncMyUserPresenceProfile(params: {
+  uid: string;
+  email: string;
+  displayName: string;
+  phonePro: string;
+  avatarDataUrl: string;
+  role: TeamRole;
+  zone: string;
+}): Promise<void> {
+  const path = `user_presence/${params.uid}`;
+  const ref = doc(db, 'user_presence', params.uid);
+  const { firstName, lastName } = splitFirstAndLastName(params.displayName);
+
+  try {
+    const snap = await getDoc(ref);
+    if (!snap.exists()) {
+      const clean = sanitizeUserPresencePayload({
+        uid: params.uid,
+        email: params.email,
+        displayName: params.displayName,
+        firstName,
+        lastName,
+        phonePro: params.phonePro,
+        avatarDataUrl: params.avatarDataUrl,
+        role: params.role,
+        zone: params.zone,
+        isOnline: true,
+      });
+      await setDoc(ref, {
+        ...clean,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+      return;
+    }
+
+    const cleanProfile = sanitizeUserPresencePayload({
+      uid: params.uid,
+      email: params.email,
+      displayName: params.displayName,
+      firstName,
+      lastName,
+      phonePro: params.phonePro,
+      avatarDataUrl: params.avatarDataUrl,
+      role: params.role,
+      zone: params.zone,
+    });
+    await updateDoc(ref, {
+      displayName: cleanProfile.displayName,
+      firstName: cleanProfile.firstName,
+      lastName: cleanProfile.lastName,
+      phonePro: cleanProfile.phonePro,
+      avatarDataUrl: cleanProfile.avatarDataUrl,
+      zone: cleanProfile.zone,
+      updatedAt: serverTimestamp(),
+    });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, path);
+  }
+}
+
+export async function startAttendanceSession(params: {
+  uid: string;
+  email: string;
+  displayName: string;
+  phonePro: string;
+  avatarDataUrl: string;
+  role: TeamRole;
+  zone: string;
+  deviceLabel: string;
+  deviceType: ClientDeviceType;
+  sessionId: string;
+  loginAtIso: string;
+  dateKey: string;
+  pendingAbruptClosure?: {
+    logoutAtIso: string;
+    duringWorkHours: boolean;
+    reason: string;
+    workedSeconds: number;
+    previousSessionId?: string;
+  } | null;
+}): Promise<{ todayWorkedSeconds: number; totalWorkedSeconds: number; workHoursDisconnectCount: number }> {
+  const presPath = `user_presence/${params.uid}`;
+  const presRef = doc(db, 'user_presence', params.uid);
+  const { firstName, lastName } = splitFirstAndLastName(params.displayName);
+
+  let nextTodaySeconds = 0;
+  let nextTotalSeconds = 0;
+  let nextDisconnectCount = 0;
+  let nextDisconnectTimes: string[] = [];
+  let nextLastWorkDisconnectAt = '';
+  let nextLastLogoutAt = '';
+  let nextDevices: string[] = [params.deviceLabel];
+
+  try {
+    const snap = await getDoc(presRef);
+    if (snap.exists()) {
+      const prev = snap.data();
+      const sameDay = prev.activeDateKey === params.dateKey;
+      nextTodaySeconds = sameDay ? Math.max(0, Math.round(Number(prev.todayWorkedSeconds) || 0)) : 0;
+      nextTotalSeconds = Math.max(0, Math.round(Number(prev.totalWorkedSeconds) || 0));
+      nextDisconnectCount = Math.max(0, Math.round(Number(prev.workHoursDisconnectCount) || 0));
+      nextDisconnectTimes = Array.isArray(prev.workHoursDisconnectTimes)
+        ? (prev.workHoursDisconnectTimes as string[])
+        : [];
+      nextLastWorkDisconnectAt = typeof prev.lastWorkDisconnectAt === 'string' ? prev.lastWorkDisconnectAt : '';
+      nextLastLogoutAt = typeof prev.lastLogoutAt === 'string' ? prev.lastLogoutAt : '';
+      const prevDevices = Array.isArray(prev.devicesUsed) ? (prev.devicesUsed as string[]) : [];
+      nextDevices = buildDeviceHistoryList(prevDevices, params.deviceLabel, 12);
+
+      // Flush unclosed session from an earlier browser/network closure if user was away >= 2 min
+      if (params.pendingAbruptClosure && params.pendingAbruptClosure.previousSessionId) {
+        try {
+          const oldSessRef = doc(
+            db,
+            'user_presence',
+            params.uid,
+            'sessions',
+            params.pendingAbruptClosure.previousSessionId
+          );
+          const oldSnap = await getDoc(oldSessRef);
+          if (oldSnap.exists() && oldSnap.data().status === 'active') {
+            nextLastLogoutAt = params.pendingAbruptClosure.logoutAtIso;
+            if (params.pendingAbruptClosure.duringWorkHours) {
+              nextDisconnectCount += 1;
+              nextLastWorkDisconnectAt = params.pendingAbruptClosure.logoutAtIso;
+              const entry = buildWorkDisconnectEntry(
+                params.pendingAbruptClosure.logoutAtIso,
+                params.pendingAbruptClosure.reason
+              );
+              nextDisconnectTimes = [entry, ...nextDisconnectTimes.filter((x) => x !== entry)].slice(0, 30);
+            }
+            await updateDoc(oldSessRef, {
+              lastSeenAt: params.pendingAbruptClosure.logoutAtIso,
+              logoutAt: params.pendingAbruptClosure.logoutAtIso,
+              workedSeconds: Math.min(86400, Math.max(0, Math.round(params.pendingAbruptClosure.workedSeconds))),
+              status: params.pendingAbruptClosure.duringWorkHours
+                ? 'disconnected_work_hours'
+                : 'closed',
+              disconnectReason: params.pendingAbruptClosure.reason.slice(0, 80),
+              disconnectedDuringWorkHours: params.pendingAbruptClosure.duringWorkHours,
+              updatedAt: serverTimestamp(),
+            });
+          }
+        } catch {
+          // Non-fatal cleanup of prior session
+        }
+      }
+
+      const cleanPres = sanitizeUserPresencePayload({
+        uid: params.uid,
+        email: params.email,
+        displayName: params.displayName,
+        firstName,
+        lastName,
+        phonePro: params.phonePro,
+        avatarDataUrl: params.avatarDataUrl,
+        role: params.role,
+        zone: params.zone,
+        isOnline: true,
+        currentDevice: params.deviceLabel,
+        devicesUsed: nextDevices,
+        lastLoginAt: params.loginAtIso,
+        lastLogoutAt: nextLastLogoutAt,
+        lastSeenAt: params.loginAtIso,
+        lastWorkDisconnectAt: nextLastWorkDisconnectAt,
+        workHoursDisconnectCount: nextDisconnectCount,
+        workHoursDisconnectTimes: nextDisconnectTimes,
+        activeDateKey: params.dateKey,
+        todayWorkedSeconds: nextTodaySeconds,
+        totalWorkedSeconds: nextTotalSeconds,
+        currentSessionId: params.sessionId,
+      });
+
+      await updateDoc(presRef, {
+        displayName: cleanPres.displayName,
+        firstName: cleanPres.firstName,
+        lastName: cleanPres.lastName,
+        phonePro: cleanPres.phonePro,
+        avatarDataUrl: cleanPres.avatarDataUrl,
+        zone: cleanPres.zone,
+        isOnline: true,
+        currentDevice: cleanPres.currentDevice,
+        devicesUsed: cleanPres.devicesUsed,
+        lastLoginAt: cleanPres.lastLoginAt,
+        lastLogoutAt: cleanPres.lastLogoutAt,
+        lastSeenAt: cleanPres.lastSeenAt,
+        lastWorkDisconnectAt: cleanPres.lastWorkDisconnectAt,
+        workHoursDisconnectCount: cleanPres.workHoursDisconnectCount,
+        workHoursDisconnectTimes: cleanPres.workHoursDisconnectTimes,
+        activeDateKey: cleanPres.activeDateKey,
+        todayWorkedSeconds: cleanPres.todayWorkedSeconds,
+        totalWorkedSeconds: cleanPres.totalWorkedSeconds,
+        currentSessionId: cleanPres.currentSessionId,
+        updatedAt: serverTimestamp(),
+      });
+    } else {
+      const cleanPres = sanitizeUserPresencePayload({
+        uid: params.uid,
+        email: params.email,
+        displayName: params.displayName,
+        firstName,
+        lastName,
+        phonePro: params.phonePro,
+        avatarDataUrl: params.avatarDataUrl,
+        role: params.role,
+        zone: params.zone,
+        isOnline: true,
+        currentDevice: params.deviceLabel,
+        devicesUsed: nextDevices,
+        lastLoginAt: params.loginAtIso,
+        lastLogoutAt: '',
+        lastSeenAt: params.loginAtIso,
+        lastWorkDisconnectAt: '',
+        workHoursDisconnectCount: 0,
+        workHoursDisconnectTimes: [],
+        activeDateKey: params.dateKey,
+        todayWorkedSeconds: 0,
+        totalWorkedSeconds: 0,
+        currentSessionId: params.sessionId,
+      });
+      await setDoc(presRef, {
+        ...cleanPres,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+    }
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, presPath);
+  }
+
+  // Create the session log document after /user_presence/{uid} exists (Master Gate)
+  const sessPath = `user_presence/${params.uid}/sessions/${params.sessionId}`;
+  try {
+    const cleanSess = sanitizeAttendanceSessionPayload({
+      id: params.sessionId,
+      ownerId: params.uid,
+      dateKey: params.dateKey,
+      loginAt: params.loginAtIso,
+      lastSeenAt: params.loginAtIso,
+      logoutAt: '',
+      workedSeconds: 0,
+      deviceLabel: params.deviceLabel,
+      deviceType: params.deviceType,
+      status: 'active',
+      disconnectReason: '',
+      disconnectedDuringWorkHours: false,
+    });
+    await setDoc(doc(db, 'user_presence', params.uid, 'sessions', params.sessionId), {
+      ...cleanSess,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.CREATE, sessPath);
+  }
+
+  return {
+    todayWorkedSeconds: nextTodaySeconds,
+    totalWorkedSeconds: nextTotalSeconds,
+    workHoursDisconnectCount: nextDisconnectCount,
+  };
+}
+
+export async function heartbeatAttendanceSession(params: {
+  uid: string;
+  sessionId: string;
+  nowIso: string;
+  dateKey: string;
+  todayWorkedSeconds: number;
+  totalWorkedSeconds: number;
+  sessionWorkedSeconds: number;
+  deviceLabel: string;
+}): Promise<void> {
+  const presRef = doc(db, 'user_presence', params.uid);
+  const sessRef = doc(db, 'user_presence', params.uid, 'sessions', params.sessionId);
+  const safeToday = Math.min(86400, Math.max(0, Math.round(params.todayWorkedSeconds)));
+  const safeTotal = Math.min(100000000, Math.max(0, Math.round(params.totalWorkedSeconds)));
+  const safeSession = Math.min(86400, Math.max(0, Math.round(params.sessionWorkedSeconds)));
+
+  try {
+    await updateDoc(presRef, {
+      isOnline: true,
+      currentDevice: params.deviceLabel.slice(0, 160),
+      lastSeenAt: params.nowIso.slice(0, 64),
+      activeDateKey: params.dateKey.slice(0, 16),
+      todayWorkedSeconds: safeToday,
+      totalWorkedSeconds: safeTotal,
+      updatedAt: serverTimestamp(),
+    });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.UPDATE, `user_presence/${params.uid}`);
+  }
+
+  try {
+    await updateDoc(sessRef, {
+      lastSeenAt: params.nowIso.slice(0, 64),
+      workedSeconds: safeSession,
+      updatedAt: serverTimestamp(),
+    });
+  } catch {
+    // Non-fatal if session doc hasn't settled yet
+  }
+}
+
+export async function closeAttendanceSession(params: {
+  uid: string;
+  sessionId: string;
+  logoutAtIso: string;
+  dateKey: string;
+  todayWorkedSeconds: number;
+  totalWorkedSeconds: number;
+  sessionWorkedSeconds: number;
+  reason: string;
+  duringWorkHours: boolean;
+}): Promise<void> {
+  const presRef = doc(db, 'user_presence', params.uid);
+  const sessRef = doc(db, 'user_presence', params.uid, 'sessions', params.sessionId);
+  const safeToday = Math.min(86400, Math.max(0, Math.round(params.todayWorkedSeconds)));
+  const safeTotal = Math.min(100000000, Math.max(0, Math.round(params.totalWorkedSeconds)));
+  const safeSession = Math.min(86400, Math.max(0, Math.round(params.sessionWorkedSeconds)));
+  const cleanReason = params.reason.trim().slice(0, 80) || 'Déconnexion';
+
+  try {
+    const snap = await getDoc(presRef);
+    if (snap.exists()) {
+      const prev = snap.data();
+      let disconnectCount = Math.max(0, Math.round(Number(prev.workHoursDisconnectCount) || 0));
+      let disconnectTimes = Array.isArray(prev.workHoursDisconnectTimes)
+        ? (prev.workHoursDisconnectTimes as string[])
+        : [];
+      let lastWorkDisconnectAt =
+        typeof prev.lastWorkDisconnectAt === 'string' ? prev.lastWorkDisconnectAt : '';
+
+      if (params.duringWorkHours) {
+        disconnectCount += 1;
+        lastWorkDisconnectAt = params.logoutAtIso.slice(0, 64);
+        const entry = buildWorkDisconnectEntry(params.logoutAtIso, cleanReason);
+        disconnectTimes = [entry, ...disconnectTimes.filter((x) => x !== entry)].slice(0, 30);
+      }
+
+      await updateDoc(presRef, {
+        isOnline: false,
+        lastLogoutAt: params.logoutAtIso.slice(0, 64),
+        lastSeenAt: params.logoutAtIso.slice(0, 64),
+        lastWorkDisconnectAt,
+        workHoursDisconnectCount: disconnectCount,
+        workHoursDisconnectTimes: disconnectTimes,
+        activeDateKey: params.dateKey.slice(0, 16),
+        todayWorkedSeconds: safeToday,
+        totalWorkedSeconds: safeTotal,
+        currentSessionId: '',
+        updatedAt: serverTimestamp(),
+      });
+    }
+  } catch (error) {
+    handleFirestoreError(error, OperationType.UPDATE, `user_presence/${params.uid}`);
+  }
+
+  try {
+    await updateDoc(sessRef, {
+      lastSeenAt: params.logoutAtIso.slice(0, 64),
+      logoutAt: params.logoutAtIso.slice(0, 64),
+      workedSeconds: safeSession,
+      status: params.duringWorkHours ? 'disconnected_work_hours' : 'closed',
+      disconnectReason: cleanReason,
+      disconnectedDuringWorkHours: params.duringWorkHours,
+      updatedAt: serverTimestamp(),
+    });
+  } catch {
+    // Non-fatal if session doc already closed
+  }
+}
+
+export async function fetchUserAttendanceSessions(
+  uid: string
+): Promise<AttendanceSessionRecord[]> {
+  const path = `user_presence/${uid}/sessions`;
+  try {
+    const snap = await getDocs(getUserSessionsQuery(uid));
+    const list: AttendanceSessionRecord[] = [];
+    snap.forEach((docSnap) => {
+      const d = docSnap.data();
+      list.push(
+        sanitizeAttendanceSessionPayload({
+          id: docSnap.id,
+          ownerId: typeof d.ownerId === 'string' ? d.ownerId : uid,
+          dateKey: typeof d.dateKey === 'string' ? d.dateKey : '',
+          loginAt: typeof d.loginAt === 'string' ? d.loginAt : '',
+          lastSeenAt: typeof d.lastSeenAt === 'string' ? d.lastSeenAt : '',
+          logoutAt: typeof d.logoutAt === 'string' ? d.logoutAt : '',
+          workedSeconds: Number(d.workedSeconds) || 0,
+          deviceLabel: typeof d.deviceLabel === 'string' ? d.deviceLabel : 'Navigateur',
+          deviceType: typeof d.deviceType === 'string' ? d.deviceType : 'desktop',
+          status: typeof d.status === 'string' ? d.status : 'closed',
+          disconnectReason: typeof d.disconnectReason === 'string' ? d.disconnectReason : '',
+          disconnectedDuringWorkHours: Boolean(d.disconnectedDuringWorkHours),
+        })
+      );
+    });
+    list.sort((a, b) => (b.loginAt || '').localeCompare(a.loginAt || ''));
+    return list;
+  } catch (error) {
+    handleFirestoreError(error, OperationType.LIST, path);
+  }
 }
