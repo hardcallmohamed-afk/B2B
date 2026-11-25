@@ -15,14 +15,23 @@ service cloud.firestore {
     function isVerifiedUser() {
       return isSignedIn() && request.auth.token.email_verified == true;
     }
+    function isSuperAdmin() {
+      return isVerifiedUser() && request.auth.token.email == 'hardcallmohamed@gmail.com';
+    }
     function isValidId(id) {
       return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
     }
     function isValidNumeroFiche(val) {
       return val is string && val.size() >= 1 && val.size() <= 32 && val.matches('^[A-Z0-9_\\-]+$');
     }
+    function isApprovedMember(userId) {
+      return isVerifiedUser()
+        && request.auth.uid == userId
+        && exists(/databases/$(database)/documents/app_users/$(userId))
+        && get(/databases/$(database)/documents/app_users/$(userId)).data.active == true;
+    }
     function isOwner(userId) {
-      return isVerifiedUser() && request.auth.uid == userId;
+      return (isSuperAdmin() && request.auth.uid == userId) || isApprovedMember(userId);
     }
 
     function isValidSecteur(val) {
@@ -40,6 +49,10 @@ service cloud.firestore {
       ];
     }
 
+    function isValidManagedRole(val) {
+      return val is string && val in ['commercial', 'manager'];
+    }
+
     function isValidStringList(arr, maxItems, maxItemLen) {
       return arr is list
         && arr.size() <= maxItems
@@ -47,6 +60,29 @@ service cloud.firestore {
     }
 
     // 3. Entity Validation Blueprints (Anti-Update-Gap)
+    function isValidAppUser(data, targetUid) {
+      return data.keys().hasAll([
+          'uid', 'email', 'displayName', 'role', 'zone', 'active',
+          'createdBy', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'uid', 'email', 'displayName', 'role', 'zone', 'active',
+          'createdBy', 'createdAt', 'updatedAt'
+        ])
+        && data.uid is string
+        && data.uid == targetUid
+        && isValidId(data.uid)
+        && data.email is string && data.email.size() >= 3 && data.email.size() <= 160
+        && data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 120
+        && isValidManagedRole(data.role)
+        && data.zone is string && data.zone.size() <= 100
+        && data.active is bool
+        && data.createdBy is string
+        && isValidId(data.createdBy)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
     function isValidUserWorkspaceConfig(data, userId) {
       return data.keys().hasAll([
           'ownerId', 'villesAll', 'villesActive', 'modeVille',
@@ -137,21 +173,57 @@ service cloud.firestore {
         && data.updatedAt is timestamp;
     }
 
-    // 4. Collection: /users/{userId} (Workspace Settings)
-    match /users/{userId} {
-      allow get: if isOwner(userId) && isValidId(userId)
-        && (resource == null || existing().ownerId == request.auth.uid);
-      allow list: if false;
+    // 4. Collection: /app_users/{userId} (Admin-Managed Authorized Users Directory)
+    match /app_users/{userId} {
+      // Super-Admin can inspect any user; a signed-in user can only check their own authorization doc.
+      allow get: if isValidId(userId) && (
+        isSuperAdmin()
+        || (isSignedIn() && request.auth.uid == userId && (resource == null || existing().uid == request.auth.uid))
+      );
 
-      allow create: if isOwner(userId)
+      // Strictly Super-Admin only for listing all authorized users (no get()/exists() in list).
+      allow list: if isSuperAdmin() && resource.data.uid is string;
+
+      allow create: if isSuperAdmin()
         && isValidId(userId)
-        && isValidUserWorkspaceConfig(incoming(), userId)
+        && isValidAppUser(incoming(), userId)
+        && incoming().createdBy == request.auth.uid
         && incoming().createdAt == request.time
         && incoming().updatedAt == request.time;
 
-      allow update: if isOwner(userId)
+      allow update: if isSuperAdmin()
         && isValidId(userId)
+        && isValidAppUser(incoming(), userId)
+        && incoming().uid == existing().uid
+        && incoming().email == existing().email
+        && incoming().createdBy == existing().createdBy
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          // Action: Admin updates user profile, role, zone, or active status
+          incoming().diff(existing()).affectedKeys().hasOnly([
+            'displayName', 'role', 'zone', 'active', 'updatedAt'
+          ])
+        );
+
+      allow delete: if isSuperAdmin() && isValidId(userId);
+    }
+
+    // 5. Collection: /users/{userId} (Workspace Settings)
+    match /users/{userId} {
+      allow get: if isValidId(userId) && isOwner(userId)
+        && (resource == null || existing().ownerId == request.auth.uid);
+      allow list: if false;
+
+      allow create: if isValidId(userId)
         && isValidUserWorkspaceConfig(incoming(), userId)
+        && isOwner(userId)
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+
+      allow update: if isValidId(userId)
+        && isValidUserWorkspaceConfig(incoming(), userId)
+        && isOwner(userId)
         && existing().ownerId == request.auth.uid
         && incoming().ownerId == existing().ownerId
         && incoming().createdAt == existing().createdAt
@@ -164,27 +236,29 @@ service cloud.firestore {
           ])
         );
 
-      allow delete: if isOwner(userId) && isValidId(userId) && existing().ownerId == request.auth.uid;
+      allow delete: if isValidId(userId) && isOwner(userId) && existing().ownerId == request.auth.uid;
 
-      // 5. Subcollection: /users/{userId}/fiches/{ficheId} (B2B CRM Prospects)
+      // 6. Subcollection: /users/{userId}/fiches/{ficheId} (B2B CRM Prospects)
       match /fiches/{ficheId} {
-        allow get: if isOwner(userId) && isValidId(userId) && isValidId(ficheId)
+        allow get: if isValidId(userId) && isValidId(ficheId) && isOwner(userId)
           && (resource == null || existing().ownerId == request.auth.uid);
 
-        allow list: if isOwner(userId) && resource.data.ownerId == request.auth.uid;
+        allow list: if isVerifiedUser()
+          && request.auth.uid == userId
+          && resource.data.ownerId == request.auth.uid;
 
-        allow create: if isOwner(userId)
-          && isValidId(userId)
+        allow create: if isValidId(userId)
           && isValidId(ficheId)
           && isValidFicheEntreprise(incoming(), userId, ficheId)
+          && isOwner(userId)
           && incoming().createdAt == request.time
           && incoming().updatedAt == request.time
           && exists(/databases/$(database)/documents/users/$(userId));
 
-        allow update: if isOwner(userId)
-          && isValidId(userId)
+        allow update: if isValidId(userId)
           && isValidId(ficheId)
           && isValidFicheEntreprise(incoming(), userId, ficheId)
+          && isOwner(userId)
           && existing().ownerId == request.auth.uid
           && incoming().ownerId == existing().ownerId
           && incoming().id == existing().id
@@ -204,32 +278,34 @@ service cloud.firestore {
             ])
           );
 
-        allow delete: if isOwner(userId)
-          && isValidId(userId)
+        allow delete: if isValidId(userId)
           && isValidId(ficheId)
+          && isOwner(userId)
           && existing().ownerId == request.auth.uid
           && exists(/databases/$(database)/documents/users/$(userId));
       }
 
-      // 6. Subcollection: /users/{userId}/skills/{skillId} (Email Studio Skills)
+      // 7. Subcollection: /users/{userId}/skills/{skillId} (Email Studio Skills)
       match /skills/{skillId} {
-        allow get: if isOwner(userId) && isValidId(userId) && isValidId(skillId)
+        allow get: if isValidId(userId) && isValidId(skillId) && isOwner(userId)
           && (resource == null || existing().ownerId == request.auth.uid);
 
-        allow list: if isOwner(userId) && resource.data.ownerId == request.auth.uid;
+        allow list: if isVerifiedUser()
+          && request.auth.uid == userId
+          && resource.data.ownerId == request.auth.uid;
 
-        allow create: if isOwner(userId)
-          && isValidId(userId)
+        allow create: if isValidId(userId)
           && isValidId(skillId)
           && isValidEmailSkill(incoming(), userId, skillId)
+          && isOwner(userId)
           && incoming().createdAt == request.time
           && incoming().updatedAt == request.time
           && exists(/databases/$(database)/documents/users/$(userId));
 
-        allow update: if isOwner(userId)
-          && isValidId(userId)
+        allow update: if isValidId(userId)
           && isValidId(skillId)
           && isValidEmailSkill(incoming(), userId, skillId)
+          && isOwner(userId)
           && existing().ownerId == request.auth.uid
           && incoming().ownerId == existing().ownerId
           && incoming().id == existing().id
@@ -243,9 +319,9 @@ service cloud.firestore {
             ])
           );
 
-        allow delete: if isOwner(userId)
-          && isValidId(userId)
+        allow delete: if isValidId(userId)
           && isValidId(skillId)
+          && isOwner(userId)
           && existing().ownerId == request.auth.uid
           && exists(/databases/$(database)/documents/users/$(userId));
       }

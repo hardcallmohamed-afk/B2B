@@ -108,6 +108,28 @@ export interface SanitizedEmailSkillDoc {
   isBuiltin?: boolean;
 }
 
+export const VALID_MANAGED_ROLES = new Set(['commercial', 'manager'] as const);
+
+export interface AppUserLike {
+  uid: string;
+  email: string;
+  displayName: string;
+  role: string;
+  zone: string;
+  active: boolean;
+  createdBy: string;
+}
+
+export interface SanitizedAppUserDoc {
+  uid: string;
+  email: string;
+  displayName: string;
+  role: 'commercial' | 'manager';
+  zone: string;
+  active: boolean;
+  createdBy: string;
+}
+
 function clampString(value: unknown, maxLen: number, fallback = ''): string {
   const str = typeof value === 'string' ? value : fallback;
   return str.slice(0, maxLen);
@@ -229,6 +251,28 @@ export function sanitizeSkillPayload(ownerId: string, skill: EmailSkillLike): Sa
   }
 
   return doc;
+}
+
+export function sanitizeAppUserPayload(input: AppUserLike): SanitizedAppUserDoc {
+  const cleanUid = sanitizeDocId(input.uid, 'usr');
+  const cleanCreatedBy = sanitizeDocId(input.createdBy, 'admin');
+  const rawEmail = clampString((input.email || '').trim().toLowerCase(), 160);
+  const email = rawEmail.length >= 3 ? rawEmail : 'user@orangepro.ma';
+  const rawName = clampString((input.displayName || '').trim(), 120);
+  const displayName = rawName.length >= 1 ? rawName : email.split('@')[0] || 'Utilisateur';
+  const role: 'commercial' | 'manager' = VALID_MANAGED_ROLES.has(input.role as never)
+    ? (input.role as 'commercial' | 'manager')
+    : 'commercial';
+
+  return {
+    uid: cleanUid,
+    email,
+    displayName,
+    role,
+    zone: clampString((input.zone || '').trim(), 100),
+    active: Boolean(input.active),
+    createdBy: cleanCreatedBy,
+  };
 }
 
 export function serializeDocCanonical(doc: Record<string, unknown>): string {

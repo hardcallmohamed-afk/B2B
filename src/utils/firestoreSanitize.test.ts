@@ -5,6 +5,7 @@ import {
   sanitizeWorkspacePayload,
   sanitizeFichePayload,
   sanitizeSkillPayload,
+  sanitizeAppUserPayload,
   serializeDocCanonical,
   computeCollectionSyncDiff,
   type SanitizedFicheDoc,
@@ -139,4 +140,24 @@ test('computeCollectionSyncDiff detects create, status-only update, full update,
   const diff2 = computeCollectionSyncDiff(known, [editedA, baseB]);
   assert.equal(diff2.toUpdate.length, 1);
   assert.equal(diff2.toUpdate[0].statusOnly, false);
+});
+
+test('sanitizeAppUserPayload enforces role enum, email lowercasing, and blueprint bounds', () => {
+  const out = sanitizeAppUserPayload({
+    uid: 'uid/bad!',
+    email: '  Rep.Meknes@OrangePro.MA ',
+    displayName: '  Youssef Benali  ',
+    role: 'superadmin_injection',
+    zone: 'Meknès ' + 'Z'.repeat(150),
+    active: true,
+    createdBy: 'admin_123',
+  });
+
+  assert.equal(out.uid, 'uid_bad_');
+  assert.equal(out.email, 'rep.meknes@orangepro.ma');
+  assert.equal(out.displayName, 'Youssef Benali');
+  assert.equal(out.role, 'commercial'); // invalid role safely falls back to commercial
+  assert.equal(out.zone.length, 100);
+  assert.equal(out.active, true);
+  assert.equal(out.createdBy, 'admin_123');
 });

@@ -248,9 +248,74 @@
         "createdAt",
         "updatedAt"
       ]
+    },
+    "AppUser": {
+      "title": "AppUser",
+      "description": "Compte utilisateur autorisé créé exclusivement par le Super-Admin pour accéder à l'application CRM Orange Pro.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "email": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 160
+        },
+        "displayName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "role": {
+          "type": "string",
+          "enum": ["commercial", "manager"]
+        },
+        "zone": {
+          "type": "string",
+          "maxLength": 100
+        },
+        "active": {
+          "type": "boolean"
+        },
+        "createdBy": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "uid",
+        "email",
+        "displayName",
+        "role",
+        "zone",
+        "active",
+        "createdBy",
+        "createdAt",
+        "updatedAt"
+      ]
     }
   },
   "firestore": {
+    "/app_users/{userId}": {
+      "schema": {
+        "$ref": "#/entities/AppUser"
+      },
+      "description": "Répertoire des comptes utilisateurs autorisés, administré exclusivement par le Super-Admin."
+    },
     "/users/{userId}": {
       "schema": {
         "$ref": "#/entities/UserWorkspaceConfig"

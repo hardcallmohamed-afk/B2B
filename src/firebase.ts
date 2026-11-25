@@ -1,8 +1,16 @@
-import { initializeApp } from 'firebase/app';
+import { initializeApp, getApps } from 'firebase/app';
 import {
   getAuth,
   GoogleAuthProvider,
+  EmailAuthProvider,
   signInWithPopup,
+  signInWithEmailAndPassword,
+  createUserWithEmailAndPassword,
+  sendPasswordResetEmail,
+  sendEmailVerification,
+  updateProfile,
+  linkWithCredential,
+  updatePassword,
   signOut,
   type User,
 } from 'firebase/auth';
@@ -14,6 +22,7 @@ import {
   getDocFromServer,
   setDoc,
   updateDoc,
+  deleteDoc,
   writeBatch,
   serverTimestamp,
   type DocumentData,
@@ -23,6 +32,7 @@ import {
   sanitizeFichePayload,
   sanitizeSkillPayload,
   sanitizeWorkspacePayload,
+  sanitizeAppUserPayload,
   type FicheLike,
   type EmailSkillLike,
   type WorkspaceLike,
@@ -30,6 +40,7 @@ import {
   type SanitizedEmailSkillDoc,
   type SyncDiff,
 } from './utils/firestoreSanitize';
+import type { ManagedAppUser, ManagedUserRole } from './utils/authAccess';
 
 const app = initializeApp(firebaseConfig);
 
@@ -115,8 +126,175 @@ export async function signInWithGoogle(): Promise<User> {
   return result.user;
 }
 
+export async function signInWithEmail(email: string, password: string): Promise<User> {
+  const result = await signInWithEmailAndPassword(auth, email.trim().toLowerCase(), password);
+  return result.user;
+}
+
+export async function requestPasswordReset(email: string): Promise<void> {
+  await sendPasswordResetEmail(auth, email.trim().toLowerCase());
+}
+
+export async function resendVerificationEmail(): Promise<void> {
+  if (!auth.currentUser) throw new Error('Aucun utilisateur connecté.');
+  await sendEmailVerification(auth.currentUser);
+}
+
+export async function reloadCurrentUser(): Promise<User | null> {
+  if (!auth.currentUser) return null;
+  await auth.currentUser.reload();
+  await auth.currentUser.getIdToken(true);
+  return auth.currentUser;
+}
+
+export async function setOrLinkAccountPassword(newPassword: string): Promise<void> {
+  const user = auth.currentUser;
+  if (!user || !user.email) {
+    throw new Error('Aucun compte connecté.');
+  }
+  const hasPasswordProvider = user.providerData.some((p) => p.providerId === 'password');
+  if (hasPasswordProvider) {
+    await updatePassword(user, newPassword);
+  } else {
+    const credential = EmailAuthProvider.credential(user.email, newPassword);
+    await linkWithCredential(user, credential);
+  }
+}
+
 export async function signOutUser(): Promise<void> {
   await signOut(auth);
+}
+
+function getSecondaryProvisioningAuth() {
+  const existing = getApps().find((a) => a.name === 'admin-user-provisioning');
+  const secApp = existing || initializeApp(firebaseConfig, 'admin-user-provisioning');
+  return getAuth(secApp);
+}
+
+export async function fetchAppUserProfile(uid: string): Promise<ManagedAppUser | null> {
+  const path = `app_users/${uid}`;
+  try {
+    const snap = await getDoc(doc(db, 'app_users', uid));
+    if (!snap.exists()) return null;
+    const d = snap.data();
+    return {
+      uid: snap.id,
+      email: typeof d.email === 'string' ? d.email : '',
+      displayName: typeof d.displayName === 'string' ? d.displayName : '',
+      role: d.role === 'manager' ? 'manager' : 'commercial',
+      zone: typeof d.zone === 'string' ? d.zone : '',
+      active: Boolean(d.active),
+      createdBy: typeof d.createdBy === 'string' ? d.createdBy : '',
+      createdAt: d.createdAt?.toDate ? d.createdAt.toDate().toISOString() : undefined,
+    };
+  } catch (error) {
+    handleFirestoreError(error, OperationType.GET, path);
+  }
+}
+
+export function getAppUsersCollection() {
+  return collection(db, 'app_users');
+}
+
+/**
+ * Super-Admin-only user provisioning:
+ * Creates a Firebase Auth Email/Password user via a secondary Firebase App instance
+ * so the Super-Admin stays signed in, sends a verification email, signs out the secondary
+ * auth instance, and writes the /app_users/{uid} authorization record in Firestore.
+ */
+export async function adminCreateManagedUser(params: {
+  adminUid: string;
+  displayName: string;
+  email: string;
+  password: string;
+  role: ManagedUserRole;
+  zone: string;
+}): Promise<ManagedAppUser> {
+  const secondaryAuth = getSecondaryProvisioningAuth();
+  const cleanEmail = params.email.trim().toLowerCase();
+  const cleanName = params.displayName.trim();
+
+  let newUid = '';
+  try {
+    const cred = await createUserWithEmailAndPassword(secondaryAuth, cleanEmail, params.password);
+    newUid = cred.user.uid;
+    try {
+      await updateProfile(cred.user, { displayName: cleanName });
+    } catch {
+      // Non-fatal profile name update
+    }
+    try {
+      await sendEmailVerification(cred.user);
+    } catch {
+      // Non-fatal; user can also request resend on first login
+    }
+  } finally {
+    try {
+      await signOut(secondaryAuth);
+    } catch {
+      // Ensure secondary session is cleared
+    }
+  }
+
+  const sanitized = sanitizeAppUserPayload({
+    uid: newUid,
+    email: cleanEmail,
+    displayName: cleanName,
+    role: params.role,
+    zone: params.zone,
+    active: true,
+    createdBy: params.adminUid,
+  });
+
+  const targetPath = `app_users/${sanitized.uid}`;
+  try {
+    await setDoc(doc(db, 'app_users', sanitized.uid), {
+      ...sanitized,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.CREATE, targetPath);
+  }
+
+  return {
+    ...sanitized,
+    createdAt: new Date().toISOString(),
+  };
+}
+
+export async function adminUpdateManagedUser(
+  uid: string,
+  updates: {
+    displayName: string;
+    role: ManagedUserRole;
+    zone: string;
+    active: boolean;
+  }
+): Promise<void> {
+  const targetPath = `app_users/${uid}`;
+  const cleanName = updates.displayName.trim().slice(0, 120) || 'Utilisateur';
+  const cleanZone = updates.zone.trim().slice(0, 100);
+  try {
+    await updateDoc(doc(db, 'app_users', uid), {
+      displayName: cleanName,
+      role: updates.role === 'manager' ? 'manager' : 'commercial',
+      zone: cleanZone,
+      active: Boolean(updates.active),
+      updatedAt: serverTimestamp(),
+    });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.UPDATE, targetPath);
+  }
+}
+
+export async function adminDeleteManagedUser(uid: string): Promise<void> {
+  const targetPath = `app_users/${uid}`;
+  try {
+    await deleteDoc(doc(db, 'app_users', uid));
+  } catch (error) {
+    handleFirestoreError(error, OperationType.DELETE, targetPath);
+  }
 }
 
 const BATCH_LIMIT = 400;

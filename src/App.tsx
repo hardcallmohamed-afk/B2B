@@ -38,13 +38,22 @@ import {
   Cloud,
   LogOut,
   ClipboardPaste,
+  Users,
 } from 'lucide-react';
 import { onAuthStateChanged, type User } from 'firebase/auth';
 import { doc, onSnapshot, query, where } from 'firebase/firestore';
 import { KpiTrendChart } from './components/KpiTrendChart';
 import { KanbanBoard } from './components/KanbanBoard';
 import { AiCopilotDrawer } from './components/AiCopilotDrawer';
+import { LoginScreen, AccessGateNotice } from './components/LoginScreen';
+import { AdminUsersPanel } from './components/AdminUsersPanel';
 import { moveFicheToStatut } from './utils/analytics';
+import { findSmartDuplicateGroups } from './utils/deduplication';
+import {
+  evaluateUserAccess,
+  isSuperAdminEmail,
+  type ManagedAppUser,
+} from './utils/authAccess';
 import {
   extractAllFromAssistedPaste,
   extractAllMoroccanPhones,
@@ -57,7 +66,6 @@ import {
 import {
   auth,
   db,
-  signInWithGoogle,
   signOutUser,
   ensureUserWorkspace,
   syncWorkspaceToFirestore,
@@ -65,6 +73,8 @@ import {
   syncSkillsDiffToFirestore,
   getUserFichesCollection,
   getUserSkillsCollection,
+  fetchAppUserProfile,
+  getAppUsersCollection,
   handleFirestoreError,
   OperationType,
 } from './firebase';
@@ -1099,65 +1109,16 @@ export function expandPaginationUrls(
 export interface DuplicateGroup {
   key: string;
   motif: string;
+  confidence: number;
   ids: string[];
   fiches: FicheEntreprise[];
 }
 
-export function findDuplicateGroups(fiches: FicheEntreprise[]): DuplicateGroup[] {
-  const parent: Record<string, string> = {};
-  const motifMap: Record<string, string> = {};
-  fiches.forEach((f) => (parent[f.id] = f.id));
-
-  const find = (x: string): string => (parent[x] === x ? x : (parent[x] = find(parent[x])));
-  const union = (a: string, b: string, motif: string) => {
-    const ra = find(a);
-    const rb = find(b);
-    if (ra !== rb) {
-      parent[rb] = ra;
-      motifMap[ra] = motifMap[ra] || motif;
-    }
-  };
-
-  const byName = new Map<string, string>();
-  const byPhone = new Map<string, string>();
-  const byEmail = new Map<string, string>();
-
-  for (const f of fiches) {
-    const nName = normalizeCompanyForDedup(f.societe);
-    if (nName.length >= 3) {
-      if (byName.has(nName)) union(byName.get(nName)!, f.id, 'Nom normalisé identique');
-      else byName.set(nName, f.id);
-    }
-    if (f.telephone) {
-      if (byPhone.has(f.telephone)) union(byPhone.get(f.telephone)!, f.id, 'Téléphone identique');
-      else byPhone.set(f.telephone, f.id);
-    }
-    if (f.email) {
-      if (byEmail.has(f.email)) union(byEmail.get(f.email)!, f.id, 'Email exact identique');
-      else byEmail.set(f.email, f.id);
-    }
-  }
-
-  const buckets = new Map<string, FicheEntreprise[]>();
-  fiches.forEach((f) => {
-    const r = find(f.id);
-    const arr = buckets.get(r) || [];
-    arr.push(f);
-    buckets.set(r, arr);
-  });
-
-  const groups: DuplicateGroup[] = [];
-  buckets.forEach((list, root) => {
-    if (list.length > 1) {
-      groups.push({
-        key: root,
-        motif: motifMap[root] || 'Doublon détecté',
-        ids: list.map((x) => x.id),
-        fiches: list,
-      });
-    }
-  });
-  return groups;
+export function findDuplicateGroups(
+  fiches: FicheEntreprise[],
+  options: { includePhoneOnly?: boolean } = {}
+): DuplicateGroup[] {
+  return findSmartDuplicateGroups(fiches, options);
 }
 
 export function mergeFicheGroup(group: FicheEntreprise[]): FicheEntreprise {
@@ -2525,7 +2486,9 @@ export default function App() {
   );
 
   // 4. Navigation, Vue Kanban, Copilote IA intégré & Filtres Portefeuille
-  const [activeTab, setActiveTab] = useState<'portefeuille' | 'kanban' | 'crawler' | 'paste' | 'dedup'>('portefeuille');
+  const [activeTab, setActiveTab] = useState<'portefeuille' | 'kanban' | 'crawler' | 'paste' | 'dedup' | 'admin'>('portefeuille');
+  const [includePhoneOnlyDedup, setIncludePhoneOnlyDedup] = useState(false);
+  const [dismissedDedupKeys, setDismissedDedupKeys] = useState<string[]>([]);
   const [crmViewMode, setCrmViewMode] = useState<'table' | 'kanban'>('table');
   const [showAiCopilot, setShowAiCopilot] = useState(false);
   const [copilotFiche, setCopilotFiche] = useState<FicheEntreprise | null>(null);
@@ -2705,9 +2668,13 @@ export default function App() {
     toastTimerRef.current = window.setTimeout(() => setToast(null), 4000);
   };
 
-  // 11. Sauvegarde Cloud temps réel (Firebase Auth Google + Firestore)
+  // 11. Authentification Privée (Email/MDP + Google), Contrôle Super-Admin & Sauvegarde Cloud Firestore
   const [cloudUser, setCloudUser] = useState<User | null>(null);
   const [authReady, setAuthReady] = useState(false);
+  const [authReloadTick, setAuthReloadTick] = useState(0);
+  const [appUserProfile, setAppUserProfile] = useState<ManagedAppUser | null>(null);
+  const [profileChecked, setProfileChecked] = useState(false);
+  const [managedUsers, setManagedUsers] = useState<ManagedAppUser[]>([]);
   const [cloudSynced, setCloudSynced] = useState(false);
   const [cloudBusy, setCloudBusy] = useState(false);
 
@@ -2723,16 +2690,111 @@ export default function App() {
       setAuthReady(true);
       if (!u) {
         setCloudSynced(false);
+        setAppUserProfile(null);
+        setProfileChecked(true);
+        setManagedUsers([]);
         knownCloudFichesRef.current = new Map();
         knownCloudSkillsRef.current = new Map();
         knownCloudWorkspaceHashRef.current = '';
+      } else {
+        setProfileChecked(false);
       }
     });
     return () => unsub();
   }, []);
 
+  // Vérification du profil /app_users/{uid} pour les comptes non-Super-Admin
   useEffect(() => {
-    if (!authReady || !cloudUser) return;
+    if (!authReady) return;
+    if (!cloudUser) {
+      setAppUserProfile(null);
+      setProfileChecked(true);
+      return;
+    }
+    if (isSuperAdminEmail(cloudUser.email)) {
+      setAppUserProfile(null);
+      setProfileChecked(true);
+      return;
+    }
+
+    let cancelled = false;
+    setProfileChecked(false);
+    fetchAppUserProfile(cloudUser.uid)
+      .then((profile) => {
+        if (!cancelled) {
+          setAppUserProfile(profile);
+          setProfileChecked(true);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setAppUserProfile(null);
+          setProfileChecked(true);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [authReady, cloudUser, authReloadTick]);
+
+  const accessDecision = useMemo(() => {
+    if (!cloudUser || !profileChecked) return null;
+    return evaluateUserAccess({
+      email: cloudUser.email,
+      emailVerified: cloudUser.emailVerified,
+      appUserProfile,
+    });
+  }, [cloudUser, profileChecked, appUserProfile, authReloadTick]);
+
+  const isSuperAdmin = accessDecision?.status === 'allowed' && accessDecision.isAdmin;
+  const canAccessWorkspace = accessDecision?.status === 'allowed';
+
+  // Empêche tout non-admin d'accéder à l'onglet Utilisateurs & Accès
+  useEffect(() => {
+    if (!isSuperAdmin && activeTab === 'admin') {
+      setActiveTab('portefeuille');
+    }
+  }, [isSuperAdmin, activeTab]);
+
+  // Liste temps réel /app_users réservée exclusivement au Super-Admin
+  useEffect(() => {
+    if (!authReady || !cloudUser || !isSuperAdmin) {
+      setManagedUsers([]);
+      return;
+    }
+    const unsub = onSnapshot(
+      getAppUsersCollection(),
+      (snap) => {
+        const list: ManagedAppUser[] = [];
+        snap.forEach((docSnap) => {
+          const d = docSnap.data();
+          list.push({
+            uid: docSnap.id,
+            email: typeof d.email === 'string' ? d.email : '',
+            displayName: typeof d.displayName === 'string' ? d.displayName : '',
+            role: d.role === 'manager' ? 'manager' : 'commercial',
+            zone: typeof d.zone === 'string' ? d.zone : '',
+            active: Boolean(d.active),
+            createdBy: typeof d.createdBy === 'string' ? d.createdBy : '',
+            createdAt: d.createdAt?.toDate ? d.createdAt.toDate().toISOString() : undefined,
+          });
+        });
+        setManagedUsers(list);
+      },
+      (err) => {
+        try {
+          handleFirestoreError(err, OperationType.LIST, 'app_users');
+        } catch {
+          notify('Impossible de charger la liste des utilisateurs.', 'err');
+        }
+      }
+    );
+    return () => unsub();
+  }, [authReady, cloudUser, isSuperAdmin]);
+
+  useEffect(() => {
+    if (!authReady || !cloudUser || !canAccessWorkspace) return;
     let cancelled = false;
     let unsubUser: (() => void) | null = null;
     let unsubFiches: (() => void) | null = null;
@@ -2990,7 +3052,7 @@ export default function App() {
       unsubFiches?.();
       unsubSkills?.();
     };
-  }, [authReady, cloudUser]);
+  }, [authReady, cloudUser, canAccessWorkspace]);
 
   // Synchroniser automatiquement toute modification de fiches vers Firestore
   useEffect(() => {
@@ -3069,29 +3131,11 @@ export default function App() {
     return () => window.clearTimeout(timer);
   }, [villesState, emailSignature, cloudUser, cloudSynced]);
 
-  const handleGoogleSignIn = async () => {
-    setCloudBusy(true);
-    try {
-      const signedInUser = await signInWithGoogle();
-      notify(`Connecté au Cloud (${signedInUser.email || signedInUser.displayName || 'Google'}). Vos données sont synchronisées.`);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : '';
-      if (msg.includes('popup-closed-by-user')) {
-        notify('Connexion Google annulée.', 'warn');
-      } else if (msg.includes('unauthorized-domain')) {
-        notify('Domaine non autorisé dans Firebase Auth — ajoutez votre domaine dans Firebase Console.', 'err');
-      } else {
-        notify('Impossible d’ouvrir la connexion Google. Vérifiez le bloqueur de pop-ups.', 'err');
-      }
-    } finally {
-      setCloudBusy(false);
-    }
-  };
-
   const handleGoogleSignOut = async () => {
     try {
       await signOutUser();
-      notify('Déconnecté du Cloud — bascule en mode sauvegarde locale navigateur.');
+      setActiveTab('portefeuille');
+      notify('Session fermée en toute sécurité.');
     } catch {
       notify('Erreur lors de la déconnexion.', 'err');
     }
@@ -3261,8 +3305,19 @@ export default function App() {
     }
   }, [pasteInput, pasteSource, activeVilles, modeVille, defaultVille]);
 
-  // Données dérivées : doublons, KPIs, filtres
-  const duplicateGroups = useMemo(() => findDuplicateGroups(fiches), [fiches]);
+  // Données dérivées : doublons (priorité stricte au nom de société), KPIs, filtres
+  const allDetectedDuplicateGroups = useMemo(
+    () => findDuplicateGroups(fiches, { includePhoneOnly: includePhoneOnlyDedup }),
+    [fiches, includePhoneOnlyDedup]
+  );
+  const duplicateGroups = useMemo(
+    () =>
+      allDetectedDuplicateGroups.filter((g) => {
+        const signature = [...g.ids].sort().join('|');
+        return !dismissedDedupKeys.includes(signature);
+      }),
+    [allDetectedDuplicateGroups, dismissedDedupKeys]
+  );
   const duplicateIdSet = useMemo(() => {
     const s = new Set<string>();
     duplicateGroups.forEach((g) => g.ids.forEach((id) => s.add(id)));
@@ -4941,6 +4996,51 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
   );
 
   // ============================================================================
+  // CONTRÔLE D'ACCÈS PRIVÉ (LOGIN MOT DE PASSE / VERIFICATION / RBAC)
+  // ============================================================================
+
+  if (!authReady || (cloudUser && !profileChecked)) {
+    return (
+      <div className="min-h-screen bg-[#F6F5F2] flex items-center justify-center p-4">
+        <div className="flex items-center gap-2.5 text-sm font-medium text-stone-700">
+          <RefreshCw className="w-4 h-4 text-orange-600 animate-spin" />
+          Vérification de votre session sécurisée...
+        </div>
+      </div>
+    );
+  }
+
+  if (!cloudUser) {
+    return <LoginScreen onSuccessNotify={(msg) => notify(msg)} />;
+  }
+
+  if (accessDecision?.status === 'verify_email') {
+    return (
+      <AccessGateNotice
+        mode="verify_email"
+        email={accessDecision.email}
+        onUserReloaded={async () => {
+          setCloudUser(auth.currentUser);
+          setAuthReloadTick((t) => t + 1);
+        }}
+      />
+    );
+  }
+
+  if (!canAccessWorkspace) {
+    return (
+      <AccessGateNotice
+        mode="denied"
+        email={cloudUser.email || ''}
+        reason={accessDecision?.status === 'denied' ? accessDecision.reason : undefined}
+        onUserReloaded={async () => {
+          setAuthReloadTick((t) => t + 1);
+        }}
+      />
+    );
+  }
+
+  // ============================================================================
   // RENDU INTERFACE « EXECUTIVE B2B WORKSPACE » (#F7F5F0)
   // ============================================================================
 
@@ -4986,37 +5086,38 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
-            {cloudUser ? (
-              <div className="flex items-center gap-1 rounded-lg border border-emerald-200 bg-emerald-50 px-2.5 py-1.5 text-xs text-emerald-900 shrink-0">
-                <Cloud className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+            <div className="flex items-center gap-1.5 rounded-lg border border-emerald-200 bg-emerald-50 px-2.5 py-1.5 text-xs text-emerald-900 shrink-0">
+              <Cloud className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+              <span
+                className="font-semibold max-w-[140px] truncate"
+                title={`Connecté et synchronisé (${cloudUser.email || ''})`}
+              >
+                {cloudBusy
+                  ? 'Synchro...'
+                  : appUserProfile?.displayName ||
+                    cloudUser.displayName?.split(' ')[0] ||
+                    cloudUser.email?.split('@')[0] ||
+                    'Connecté'}
+              </span>
+              {accessDecision?.status === 'allowed' && (
                 <span
-                  className="font-semibold max-w-[140px] truncate"
-                  title={`Synchronisé sur le Cloud (${cloudUser.email || cloudUser.displayName || 'Google'})`}
+                  className={`hidden sm:inline-block text-[10px] font-bold px-1.5 py-0.5 rounded ${
+                    isSuperAdmin ? 'bg-orange-600 text-white' : 'bg-emerald-200/80 text-emerald-950'
+                  }`}
                 >
-                  {cloudBusy ? 'Synchro...' : cloudUser.displayName?.split(' ')[0] || cloudUser.email || 'Cloud actif'}
+                  {accessDecision.roleLabel}
                 </span>
-                <button
-                  type="button"
-                  onClick={handleGoogleSignOut}
-                  aria-label="Se déconnecter du Cloud"
-                  title="Se déconnecter du Cloud"
-                  className="ml-1 p-0.5 rounded hover:bg-emerald-200/70 text-emerald-800 transition-colors"
-                >
-                  <LogOut className="w-3.5 h-3.5" />
-                </button>
-              </div>
-            ) : (
+              )}
               <button
                 type="button"
-                disabled={cloudBusy}
-                onClick={handleGoogleSignIn}
-                title="Connectez votre compte Google pour sauvegarder et synchroniser vos fiches dans le Cloud"
-                className="px-3 py-2 rounded-lg border border-stone-300 bg-white hover:bg-stone-50 disabled:opacity-60 text-xs font-semibold text-stone-800 flex items-center gap-1.5 whitespace-nowrap shrink-0 transition-colors"
+                onClick={handleGoogleSignOut}
+                aria-label="Se déconnecter"
+                title="Se déconnecter"
+                className="ml-1 p-0.5 rounded hover:bg-emerald-200/70 text-emerald-800 transition-colors"
               >
-                <Cloud className="w-3.5 h-3.5 text-orange-600" />
-                {cloudBusy ? 'Connexion...' : 'Sauvegarde Cloud'}
+                <LogOut className="w-3.5 h-3.5" />
               </button>
-            )}
+            </div>
             <button
               type="button"
               disabled={isAuditing}
@@ -5352,6 +5453,9 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
             { id: 'crawler', label: 'Crawler Profond N1/N2', icon: Globe },
             { id: 'paste', label: 'Extraction HTML / CSV / JSON', icon: FileText },
             { id: 'dedup', label: `Déduplication MDM (${duplicateGroups.length})`, icon: GitMerge },
+            ...(isSuperAdmin
+              ? [{ id: 'admin', label: `Utilisateurs & Accès (${managedUsers.length})`, icon: Users }]
+              : []),
           ].map((t) => {
             const Icon = t.icon;
             const active = activeTab === t.id;
@@ -6683,25 +6787,45 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
         )}
 
         {/* ================================================================== */}
-        {/* ONGLET 4 : DÉDUPLICATION INTELLIGENTE (MDM / ENTITY RESOLUTION)    */}
+        {/* ONGLET 4 : DÉDUPLICATION INTELLIGENTE (PRIORITÉ NOM DE SOCIÉTÉ)    */}
         {/* ================================================================== */}
         {activeTab === 'dedup' && (
           <section className="bg-white rounded-xl border border-stone-200 p-4 space-y-4">
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <div>
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div className="space-y-1">
                 <h2 className="text-sm font-bold text-stone-900 flex items-center gap-1.5 tabular-nums">
                   <GitMerge className="w-4 h-4 text-orange-600" />
                   Déduplication Intelligente MDM ({duplicateGroups.length} groupe{duplicateGroups.length > 1 ? 's' : ''})
                 </h2>
-                <p className="text-xs text-stone-500 mt-0.5">
-                  Détection multi-critères par nom normalisé (hors SARL/SA/STE/ETS/Cabinet/accents), téléphone normalisé et email exact. La fusion conserve la fiche la plus complète, récupère les champs manquants, prend l’effectif max et concatène les sources.
+                <p className="text-xs text-stone-500">
+                  Priorité stricte au <strong>nom de société</strong> (normalisation SARL/SA/STE/Cabinet/accents/villes + rapprochement orthographique intelligent). Les adresses email partagées ne créent jamais de faux doublons.
                 </p>
+                <div className="flex flex-wrap items-center gap-3 pt-1">
+                  <label className="inline-flex items-center gap-1.5 text-xs text-stone-700 cursor-pointer select-none">
+                    <input
+                      type="checkbox"
+                      checked={includePhoneOnlyDedup}
+                      onChange={(e) => setIncludePhoneOnlyDedup(e.target.checked)}
+                      className="rounded border-stone-300 text-orange-600 focus:ring-orange-500"
+                    />
+                    Inclure doublons par téléphone seul (contrôle secondaire)
+                  </label>
+                  {dismissedDedupKeys.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => setDismissedDedupKeys([])}
+                      className="text-xs font-medium text-orange-700 hover:underline"
+                    >
+                      Réafficher {dismissedDedupKeys.length} groupe{dismissedDedupKeys.length > 1 ? 's' : ''} ignoré{dismissedDedupKeys.length > 1 ? 's' : ''}
+                    </button>
+                  )}
+                </div>
               </div>
               {duplicateGroups.length > 0 && (
                 <button
                   type="button"
                   onClick={handleMergeAllDuplicates}
-                  className="px-4 py-2 rounded-lg bg-orange-600 hover:bg-orange-700 text-white text-xs font-semibold flex items-center gap-1.5"
+                  className="px-4 py-2 rounded-lg bg-orange-600 hover:bg-orange-700 text-white text-xs font-semibold flex items-center gap-1.5 shrink-0"
                 >
                   <Layers className="w-4 h-4" />
                   Tout fusionner
@@ -6711,33 +6835,66 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
 
             {duplicateGroups.length === 0 ? (
               <div className="p-8 text-center rounded-xl bg-emerald-50 border border-emerald-200 text-sm font-medium text-emerald-800">
-                Aucun doublon détecté dans le portefeuille actuel. Base propre prête à exporter.
+                Aucun doublon de société détecté dans le portefeuille actuel. Base propre prête à exporter.
               </div>
             ) : (
               <div className="space-y-3">
                 {duplicateGroups.map((group) => {
                   const previewMerged = mergeFicheGroup(group.fiches);
+                  const groupSignature = [...group.ids].sort().join('|');
                   return (
                     <div key={group.key} className="p-3.5 rounded-xl border border-amber-200 bg-amber-50/40 space-y-2.5">
                       <div className="flex flex-wrap items-center justify-between gap-2">
-                        <span className="text-xs font-bold text-amber-900 tabular-nums">
-                          {group.fiches.length} fiches liées — Motif : {group.motif}
-                        </span>
-                        <button
-                          type="button"
-                          onClick={() => handleMergeGroup(group)}
-                          className="px-3.5 py-1.5 rounded-lg bg-stone-900 hover:bg-stone-800 text-white text-xs font-semibold flex items-center gap-1.5"
-                        >
-                          <GitMerge className="w-3.5 h-3.5" />
-                          Fusionner en 1 clic
-                        </button>
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="text-xs font-bold text-amber-950 tabular-nums">
+                            {group.fiches.length} fiches liées — {group.motif}
+                          </span>
+                          <span
+                            className={`text-[11px] font-mono font-bold px-2 py-0.5 rounded ${
+                              group.confidence >= 95
+                                ? 'bg-orange-600 text-white'
+                                : group.confidence >= 84
+                                ? 'bg-amber-200 text-amber-950'
+                                : 'bg-stone-200 text-stone-800'
+                            }`}
+                          >
+                            Fiabilité {group.confidence}%
+                          </span>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setDismissedDedupKeys((prev) =>
+                                prev.includes(groupSignature) ? prev : [...prev, groupSignature]
+                              );
+                              notify('Groupe ignoré — ces sociétés restent distinctes.');
+                            }}
+                            className="px-2.5 py-1.5 rounded-lg border border-stone-300 bg-white hover:bg-stone-50 text-stone-700 text-xs font-semibold"
+                          >
+                            Pas un doublon
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleMergeGroup(group)}
+                            className="px-3.5 py-1.5 rounded-lg bg-stone-900 hover:bg-stone-800 text-white text-xs font-semibold flex items-center gap-1.5"
+                          >
+                            <GitMerge className="w-3.5 h-3.5" />
+                            Fusionner en 1 clic
+                          </button>
+                        </div>
                       </div>
 
                       <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
                         {group.fiches.map((f) => (
                           <div key={f.id} className="p-2.5 rounded-lg bg-white border border-stone-200 text-xs space-y-0.5">
-                            <p className="font-semibold text-stone-900 tabular-nums">
-                              {f.societe} ({computeMaturityScore(f)}%)
+                            <p className="font-semibold text-stone-900 tabular-nums flex items-center gap-1.5">
+                              {f.numeroFiche && (
+                                <span className="font-mono text-[10px] px-1.5 py-0.5 rounded bg-stone-100 text-stone-700">
+                                  {f.numeroFiche}
+                                </span>
+                              )}
+                              <span>{f.societe} ({computeMaturityScore(f)}%)</span>
                             </p>
                             <p className="text-stone-600 tabular-nums">
                               {f.ville} · {f.telephone || '—'} · {f.email || '—'}
@@ -6750,9 +6907,16 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
                       </div>
 
                       <div className="p-2.5 rounded-lg bg-emerald-50 border border-emerald-200 text-xs text-emerald-900 tabular-nums">
-                        <strong>Résultat fusionné :</strong> {previewMerged.societe} · {previewMerged.telephone || '—'} ·{' '}
-                        {previewMerged.email || '—'} · Contact : {previewMerged.contact || '—'} · Eff. :{' '}
-                        {previewMerged.effectif || '—'} · Sources : {previewMerged.source}
+                        <strong>Résultat fusionné :</strong> {previewMerged.societe} · {previewMerged.telephone || '—'}
+                        {previewMerged.telephonesSupplementaires?.length
+                          ? ` (+${previewMerged.telephonesSupplementaires.length} tél.)`
+                          : ''}{' '}
+                        · {previewMerged.email || '—'}
+                        {previewMerged.emailsSupplementaires?.length
+                          ? ` (+${previewMerged.emailsSupplementaires.length} mail)`
+                          : ''}{' '}
+                        · Contact : {previewMerged.contact || '—'} · Eff. : {previewMerged.effectif || '—'} · Sources :{' '}
+                        {previewMerged.source}
                       </div>
                     </div>
                   );
@@ -6760,6 +6924,20 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
               </div>
             )}
           </section>
+        )}
+
+        {/* ================================================================== */}
+        {/* ONGLET 5 : ADMINISTRATION UTILISATEURS (SUPER-ADMIN EXCLUSIF)      */}
+        {/* ================================================================== */}
+        {activeTab === 'admin' && isSuperAdmin && (
+          <AdminUsersPanel
+            adminUid={cloudUser.uid}
+            adminEmail={cloudUser.email || ''}
+            adminHasPasswordProvider={cloudUser.providerData.some((p) => p.providerId === 'password')}
+            users={managedUsers}
+            villesOptions={villesState.all}
+            onNotify={notify}
+          />
         )}
       </main>
 
