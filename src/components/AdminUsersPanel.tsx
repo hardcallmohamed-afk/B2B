@@ -1859,7 +1859,7 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
                     </div>
                   </div>
                   <div className="flex items-center gap-1 shrink-0">
-                    {['groq', 'mistral', 'openrouter', 'openai', 'deepseek'].includes(item.provider) && (
+                    {['groq', 'mistral', 'openrouter', 'openai', 'deepseek', 'anthropic'].includes(item.provider) && (
                       <button
                         type="button"
                         disabled={proxyTestBusy !== null}

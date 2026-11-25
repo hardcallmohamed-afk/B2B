@@ -77,7 +77,11 @@ import {
   computePortfolioVelocity,
   type VelocityLevel,
 } from './utils/analytics';
-import { fetchJsonWithRetry, parseJsonObjectFromLlmText } from './utils/aiCopilotClient';
+import {
+  fetchJsonWithRetry,
+  isStaticHostingEnvironment,
+  parseJsonObjectFromLlmText,
+} from './utils/aiCopilotClient';
 import {
   detectApiKeyProviderSync,
   probeApiKeyProviderViaServer,
@@ -1642,7 +1646,15 @@ async function fetchFastest(
 // 7. HUB API MULTI-FOURNISSEURS, ROUTAGE PAR TÂCHE & ROTATION AUTO SUR QUOTA
 // ============================================================================
 
-export type ApiProvider = 'tavily' | 'openrouter' | 'groq' | 'mistral' | 'gemini' | 'openai' | 'deepseek';
+export type ApiProvider =
+  | 'tavily'
+  | 'openrouter'
+  | 'groq'
+  | 'mistral'
+  | 'gemini'
+  | 'openai'
+  | 'deepseek'
+  | 'anthropic';
 export type ApiTask = 'search' | 'extract' | 'email';
 export type ApiTaskScope = 'all' | ApiTask;
 export type ApiKeyHealth = 'idle' | 'ok' | 'quota' | 'error';
@@ -1715,7 +1727,7 @@ export const PROVIDER_META: Record<
     defaultModel: 'auto-flash',
     defaultScope: 'all',
     placeholderKey: 'AIza... ou AQ....',
-    modelHint: 'auto-flash (3.8 / 2.5 Flash)',
+    modelHint: 'auto-flash (2.5 Flash / Lite)',
     endpoint: 'https://generativelanguage.googleapis.com/v1beta',
     capabilities: ['search', 'extract', 'email'],
   },
@@ -1737,12 +1749,21 @@ export const PROVIDER_META: Record<
     endpoint: 'https://api.deepseek.com/chat/completions',
     capabilities: ['extract', 'email'],
   },
+  anthropic: {
+    name: 'Anthropic Claude',
+    defaultModel: 'claude-3-5-haiku-latest',
+    defaultScope: 'all',
+    placeholderKey: 'sk-ant-...',
+    modelHint: 'claude-3-5-haiku-latest',
+    endpoint: 'https://api.anthropic.com/v1/messages',
+    capabilities: ['extract', 'email'],
+  },
 };
 
 export const TASK_PROVIDER_ORDER: Record<ApiTask, ApiProvider[]> = {
   search: ['tavily', 'gemini'],
-  extract: ['groq', 'openrouter', 'mistral', 'gemini', 'openai', 'deepseek'],
-  email: ['mistral', 'openrouter', 'gemini', 'groq', 'openai', 'deepseek'],
+  extract: ['groq', 'openrouter', 'mistral', 'gemini', 'openai', 'deepseek', 'anthropic'],
+  email: ['mistral', 'openrouter', 'gemini', 'groq', 'openai', 'deepseek', 'anthropic'],
 };
 
 export function getOrderedKeysForTask(
@@ -1819,6 +1840,7 @@ export function mergeHubAndCloudKeys(
     'gemini',
     'openai',
     'deepseek',
+    'anthropic',
   ]);
   const existingSecrets = new Set(localKeys.map((k) => k.apiKey.trim()));
   const cloudEntries: ApiKeyEntry[] = [];
@@ -1912,7 +1934,6 @@ async function callGeminiAutoModel(
       [
         customModel,
         cachedWorkingGeminiModel,
-        'gemini-3.8-flash',
         'gemini-2.5-flash',
         'gemini-2.5-flash-lite',
       ].filter(Boolean)
@@ -2119,6 +2140,42 @@ async function callSingleLLMKey(
     }
     const json = await res.json();
     const text = String(json?.choices?.[0]?.message?.content || '').trim();
+    return { ok: Boolean(text), text, usedModel: model, status: 200, error: text ? '' : 'Réponse vide' };
+  }
+
+  if (entry.provider === 'anthropic') {
+    const model = entry.model.trim() || 'claude-3-5-haiku-latest';
+    const res = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': key,
+        'anthropic-version': '2023-06-01',
+        'anthropic-dangerous-direct-browser-access': 'true',
+      },
+      signal,
+      body: JSON.stringify({
+        model,
+        max_tokens: 1400,
+        messages: [{ role: 'user', content: prompt }],
+      }),
+    });
+    if (!res.ok) {
+      const errJson = await res.json().catch(() => ({}));
+      return {
+        ok: false,
+        text: '',
+        usedModel: model,
+        status: res.status,
+        error: errJson?.error?.message || `HTTP ${res.status}`,
+      };
+    }
+    const json = await res.json();
+    const parts = Array.isArray(json?.content) ? json.content : [];
+    const text = parts
+      .map((p: { text?: string }) => (typeof p?.text === 'string' ? p.text : ''))
+      .join('\n')
+      .trim();
     return { ok: Boolean(text), text, usedModel: model, status: 200, error: text ? '' : 'Réponse vide' };
   }
 
@@ -2826,10 +2883,14 @@ export default function App() {
   });
 
   const refreshServerAiStatus = useCallback(() => {
+    if (isStaticHostingEnvironment()) {
+      setServerAiStatus({ available: false, model: 'gemini-4-hydrogen' });
+      return;
+    }
     fetchJsonWithRetry<{ available?: boolean; model?: string }>(
       '/api/ai/status',
       { method: 'GET' },
-      { timeoutMs: 8000, maxNetworkRetries: 1, fallbackLabel: 'Statut IA indisponible' }
+      { timeoutMs: 8000, maxNetworkRetries: 0, fallbackLabel: 'Statut IA indisponible' }
     )
       .then((res) => {
         if (res.ok && res.data && typeof res.data.available === 'boolean') {
@@ -2837,6 +2898,8 @@ export default function App() {
             available: res.data.available,
             model: res.data.model || 'gemini-4-hydrogen',
           });
+        } else if (res.isStaticOrHtml || res.status === 404) {
+          setServerAiStatus({ available: false, model: 'gemini-4-hydrogen' });
         }
       })
       .catch(() => {});
@@ -4595,11 +4658,11 @@ export default function App() {
       }
 
       // 2. Essayer le coffre Cloud sécurisé côté serveur (/api/ai/groq-secure) si l'utilisateur est authentifié
-      if (cloudUser) {
+      if (cloudUser && !isStaticHostingEnvironment()) {
         try {
           const idToken = await getCurrentUserIdToken();
           if (idToken) {
-            for (const providerId of ['groq', 'mistral', 'openrouter', 'openai', 'deepseek']) {
+            for (const providerId of ['groq', 'mistral', 'openrouter', 'openai', 'deepseek', 'anthropic']) {
               const res = await fetchJsonWithRetry<{
                 reply?: string;
                 providerLabel?: string;
@@ -4631,7 +4694,13 @@ export default function App() {
               if (res.error && !lastFallbackError) {
                 lastFallbackError = res.error;
               }
-              if (res.isNetworkFailure || res.status === 401 || res.status === 403 || res.status === 503) {
+              if (
+                res.isNetworkFailure ||
+                res.isStaticOrHtml ||
+                res.status === 401 ||
+                res.status === 403 ||
+                res.status === 503
+              ) {
                 break;
               }
             }
@@ -4646,7 +4715,7 @@ export default function App() {
         text: '',
         error:
           lastFallbackError ||
-          'Aucune clé IA de secours active. Ajoutez n’importe quelle clé (Groq, Mistral, OpenRouter, OpenAI, DeepSeek ou Gemini) dans le Hub API : le fournisseur est détecté automatiquement.',
+          'Aucune clé IA de secours active. Ajoutez n’importe quelle clé (Groq, Mistral, OpenRouter, OpenAI, DeepSeek, Claude ou Gemini) dans le Hub API : le fournisseur est détecté automatiquement.',
       };
     },
     [cloudApiKeys, cloudUser, updateApiKeyStatus]
@@ -4701,6 +4770,7 @@ export default function App() {
           'openai',
           'deepseek',
           'mistral',
+          'anthropic',
         ]);
         if (probed.provider && probed.provider in PROVIDER_META) {
           const detectedProv = probed.provider as ApiProvider;
@@ -7275,6 +7345,7 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
                     <option value="gemini">Google Gemini (Grounding + IA)</option>
                     <option value="openai">OpenAI (GPT-4o mini)</option>
                     <option value="deepseek">DeepSeek (Chat)</option>
+                    <option value="anthropic">Anthropic Claude (Haiku)</option>
                     <option value="tavily">Tavily (Search Web)</option>
                   </select>
                 </div>
@@ -10327,7 +10398,9 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
         onClearFocusedFiche={() => setCopilotFiche(null)}
         aiAvailable={serverAiStatus.available}
         aiModel={serverAiStatus.model}
-        hasConfiguredFallbackKeys={activeApiCount > 0 || cloudApiKeys.length > 0}
+        hasConfiguredFallbackKeys={
+          activeApiCount > 0 || cloudApiKeys.some((k) => k.active && k.key.trim().length > 0)
+        }
         onOpenApiHub={() => {
           setShowAiCopilot(false);
           setShowApiHub(true);

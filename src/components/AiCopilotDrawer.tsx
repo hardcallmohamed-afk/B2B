@@ -20,14 +20,18 @@ import {
 } from '../App';
 import { buildPortfolioAiSummary } from '../utils/analytics';
 import {
+  buildCommercialBriefFromTextFallback,
   buildFallbackBriefPrompt,
   buildFallbackChatPrompt,
   buildFallbackInsightsPrompt,
+  buildLocalDeterministicBrief,
+  buildLocalDeterministicChatReply,
+  buildLocalDeterministicInsights,
+  buildPortfolioInsightsFromTextFallback,
   fetchJsonWithRetry,
-  normalizeCommercialBrief,
-  normalizePortfolioInsights,
-  parseJsonObjectFromLlmText,
+  isStaticHostingEnvironment,
   type CommercialBrief,
+  type CopilotFicheInput,
   type PortfolioInsights,
 } from '../utils/aiCopilotClient';
 
@@ -35,6 +39,7 @@ interface ChatMessage {
   id: string;
   role: 'user' | 'assistant';
   content: string;
+  isLocalFallback?: boolean;
 }
 
 interface AiCopilotDrawerProps {
@@ -80,6 +85,27 @@ const QUICK_PROMPTS = [
   },
 ];
 
+function toCopilotFicheInput(f: FicheEntreprise): CopilotFicheInput {
+  return {
+    id: f.id,
+    numeroFiche: f.numeroFiche,
+    societe: f.societe,
+    secteur: f.secteur,
+    secteurLabel: SECTEURS_META[f.secteur]?.label || f.secteur,
+    ville: f.ville,
+    telephone: f.telephone,
+    telephonesSupplementaires: f.telephonesSupplementaires,
+    email: f.email,
+    emailsSupplementaires: f.emailsSupplementaires,
+    contact: f.contact,
+    role: f.role,
+    effectif: f.effectif,
+    statut: f.statut,
+    dateAjout: f.dateAjout,
+    statutUpdatedAt: f.statutUpdatedAt,
+  };
+}
+
 export const AiCopilotDrawer: React.FC<AiCopilotDrawerProps> = ({
   open,
   onClose,
@@ -107,20 +133,34 @@ export const AiCopilotDrawer: React.FC<AiCopilotDrawerProps> = ({
   ]);
   const [input, setInput] = useState('');
   const [isSending, setIsSending] = useState(false);
-  const [chatError, setChatError] = useState('');
-  const [lastFailedChatText, setLastFailedChatText] = useState('');
+  const [chatNotice, setChatNotice] = useState('');
+  const [lastChatQuery, setLastChatQuery] = useState('');
   const [activeProviderHint, setActiveProviderHint] = useState('');
 
   const [brief, setBrief] = useState<CommercialBrief | null>(null);
   const [briefLoading, setBriefLoading] = useState(false);
-  const [briefError, setBriefError] = useState('');
+  const [briefNotice, setBriefNotice] = useState('');
   const lastBriefFicheId = useRef<string | null>(null);
 
   const [insights, setInsights] = useState<PortfolioInsights | null>(null);
   const [insightsLoading, setInsightsLoading] = useState(false);
-  const [insightsError, setInsightsError] = useState('');
+  const [insightsNotice, setInsightsNotice] = useState('');
 
+  const serverSideBlockedUntilRef = useRef<number>(0);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
+
+  const canTryServerAi = () => {
+    if (!aiAvailable) return false;
+    if (isStaticHostingEnvironment()) return false;
+    if (Date.now() < serverSideBlockedUntilRef.current) return false;
+    return true;
+  };
+
+  const markServerAiUnavailable = (status: number, isStaticOrHtml: boolean) => {
+    if (isStaticOrHtml || status === 404 || status === 429 || status === 503 || status === 0) {
+      serverSideBlockedUntilRef.current = Date.now() + 90_000;
+    }
+  };
 
   useEffect(() => {
     if (open) {
@@ -141,13 +181,29 @@ export const AiCopilotDrawer: React.FC<AiCopilotDrawerProps> = ({
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, isSending]);
 
-  const loadBriefForFiche = async (fiche: FicheEntreprise) => {
+  const buildLocalFallbackNotice = (reason?: string): string => {
+    const cleanReason = (reason || '').trim();
+    const isGenericNoKey =
+      !cleanReason ||
+      /aucune clé ia/i.test(cleanReason) ||
+      /hébergement statique/i.test(cleanReason);
+    if (isGenericNoKey) {
+      return 'Analyse calculée localement sur votre portefeuille CRM (aucune clé IA externe active ou quota Gemini intégré atteint). Ajoutez n’importe quelle clé IA (Groq, Mistral, OpenRouter, OpenAI, DeepSeek, Claude, Gemini) dans le Hub API pour activer l’IA générative.';
+    }
+    return `Analyse calculée localement sur votre portefeuille CRM (${cleanReason}). Vous pouvez ajouter une autre clé dans le Hub API (détection automatique du distributeur).`;
+  };
+
+  const loadBriefForFiche = async (fiche: FicheEntreprise, forceServerRetry = false) => {
+    if (forceServerRetry) {
+      serverSideBlockedUntilRef.current = 0;
+    }
     lastBriefFicheId.current = fiche.id;
     setBrief(null);
-    setBriefError('');
+    setBriefNotice('');
     setBriefLoading(true);
     try {
       const reco = getOrangeProRecommendation(fiche);
+      const ficheInput = toCopilotFicheInput(fiche);
       const briefPayload = {
         societe: fiche.societe,
         secteur: SECTEURS_META[fiche.secteur].label,
@@ -161,133 +217,147 @@ export const AiCopilotDrawer: React.FC<AiCopilotDrawerProps> = ({
         maturite: computeMaturityScore(fiche),
       };
 
-      let fallbackErr = '';
-      if (!aiAvailable && onFallbackLlmPrompt) {
-        const fb = await onFallbackLlmPrompt(
+      const runExternalFallback = async () => {
+        if (!onFallbackLlmPrompt) return null;
+        return onFallbackLlmPrompt(
           buildFallbackBriefPrompt(briefPayload),
           'Tu es Directeur Commercial B2B Orange Pro Maroc. Retourne uniquement un objet JSON valide.'
         );
-        if (fb.ok && fb.text) {
-          const parsedBrief = normalizeCommercialBrief(parseJsonObjectFromLlmText(fb.text));
-          if (parsedBrief) {
-            setBrief(parsedBrief);
-            setActiveProviderHint(fb.sourceLabel || 'IA disponible');
-            return;
+      };
+
+      let lastErr = '';
+      const preferExternalFirst = !canTryServerAi() || hasConfiguredFallbackKeys;
+
+      if (preferExternalFirst) {
+        const fb = await runExternalFallback();
+        if (fb?.ok && fb.text.trim()) {
+          setBrief(buildCommercialBriefFromTextFallback(fb.text, ficheInput));
+          setActiveProviderHint(fb.sourceLabel || 'IA disponible');
+          return;
+        }
+        if (fb?.error) lastErr = fb.error;
+      }
+
+      if (canTryServerAi()) {
+        const res = await fetchJsonWithRetry<{
+          brief?: CommercialBrief;
+          model?: string;
+          error?: string;
+        }>(
+          '/api/ai/next-action',
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(briefPayload),
+          },
+          {
+            timeoutMs: 25000,
+            maxNetworkRetries: 1,
+            fallbackLabel: 'Service IA serveur momentanément indisponible',
           }
-        }
-        fallbackErr = fb.error || '';
-      }
-
-      const res = await fetchJsonWithRetry<{
-        brief?: CommercialBrief;
-        model?: string;
-        error?: string;
-      }>(
-        '/api/ai/next-action',
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(briefPayload),
-        },
-        {
-          timeoutMs: 28000,
-          maxNetworkRetries: 1,
-          fallbackLabel: 'Erreur réseau lors de l’appel au service Gemini IA',
-        }
-      );
-
-      if (res.ok && res.data?.brief) {
-        setBrief(res.data.brief);
-        setActiveProviderHint(res.data.model ? `Gemini · ${res.data.model}` : '');
-        return;
-      }
-
-      if (res.shouldFallback && onFallbackLlmPrompt) {
-        const fb = await onFallbackLlmPrompt(
-          buildFallbackBriefPrompt(briefPayload),
-          'Tu es Directeur Commercial B2B Orange Pro Maroc. Retourne uniquement un objet JSON valide.'
         );
-        if (fb.ok && fb.text) {
-          const parsedBrief = normalizeCommercialBrief(parseJsonObjectFromLlmText(fb.text));
-          if (parsedBrief) {
-            setBrief(parsedBrief);
+
+        if (res.ok && res.data?.brief) {
+          setBrief(res.data.brief);
+          setActiveProviderHint(res.data.model ? `Gemini · ${res.data.model}` : 'Gemini');
+          return;
+        }
+        markServerAiUnavailable(res.status, res.isStaticOrHtml);
+        if (res.error) lastErr = res.error;
+
+        if (!preferExternalFirst) {
+          const fb = await runExternalFallback();
+          if (fb?.ok && fb.text.trim()) {
+            setBrief(buildCommercialBriefFromTextFallback(fb.text, ficheInput));
             setActiveProviderHint(fb.sourceLabel || 'Fournisseur IA alternatif');
             return;
           }
+          if (fb?.error) lastErr = fb.error;
         }
-        if (fb.error) fallbackErr = fb.error;
       }
 
-      setBriefError(fallbackErr || res.error || 'Impossible de générer le Brief IA.');
+      // Repli transparent vers le calcul CRM local sur la fiche réelle
+      setBrief(buildLocalDeterministicBrief(ficheInput));
+      setActiveProviderHint('Calcul CRM local');
+      setBriefNotice(buildLocalFallbackNotice(lastErr));
     } finally {
       setBriefLoading(false);
     }
   };
 
-  const loadPortfolioInsights = async () => {
-    setInsightsError('');
+  const loadPortfolioInsights = async (forceServerRetry = false) => {
+    if (forceServerRetry) {
+      serverSideBlockedUntilRef.current = 0;
+    }
+    setInsightsNotice('');
     setInsightsLoading(true);
     try {
       const portfolioSummary = buildPortfolioAiSummary(fiches);
-      let fallbackErr = '';
+      const copilotFiches = fiches.map(toCopilotFicheInput);
 
-      if (!aiAvailable && onFallbackLlmPrompt) {
-        const fb = await onFallbackLlmPrompt(
+      const runExternalFallback = async () => {
+        if (!onFallbackLlmPrompt) return null;
+        return onFallbackLlmPrompt(
           buildFallbackInsightsPrompt(portfolioSummary),
           'Tu es Directeur des Ventes B2B Orange Pro Maroc. Retourne uniquement un objet JSON valide.'
         );
-        if (fb.ok && fb.text) {
-          const parsedInsights = normalizePortfolioInsights(parseJsonObjectFromLlmText(fb.text));
-          if (parsedInsights) {
-            setInsights(parsedInsights);
-            setActiveProviderHint(fb.sourceLabel || 'IA disponible');
-            return;
+      };
+
+      let lastErr = '';
+      const preferExternalFirst = !canTryServerAi() || hasConfiguredFallbackKeys;
+
+      if (preferExternalFirst) {
+        const fb = await runExternalFallback();
+        if (fb?.ok && fb.text.trim()) {
+          setInsights(buildPortfolioInsightsFromTextFallback(fb.text, copilotFiches));
+          setActiveProviderHint(fb.sourceLabel || 'IA disponible');
+          return;
+        }
+        if (fb?.error) lastErr = fb.error;
+      }
+
+      if (canTryServerAi()) {
+        const res = await fetchJsonWithRetry<{
+          insights?: PortfolioInsights;
+          model?: string;
+          error?: string;
+        }>(
+          '/api/ai/portfolio-insights',
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ portfolioSummary }),
+          },
+          {
+            timeoutMs: 25000,
+            maxNetworkRetries: 1,
+            fallbackLabel: 'Service IA serveur momentanément indisponible',
           }
-        }
-        fallbackErr = fb.error || '';
-      }
-
-      const res = await fetchJsonWithRetry<{
-        insights?: PortfolioInsights;
-        model?: string;
-        error?: string;
-      }>(
-        '/api/ai/portfolio-insights',
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ portfolioSummary }),
-        },
-        {
-          timeoutMs: 28000,
-          maxNetworkRetries: 1,
-          fallbackLabel: 'Erreur réseau lors du diagnostic du portefeuille',
-        }
-      );
-
-      if (res.ok && res.data?.insights) {
-        setInsights(res.data.insights);
-        setActiveProviderHint(res.data.model ? `Gemini · ${res.data.model}` : '');
-        return;
-      }
-
-      if (res.shouldFallback && onFallbackLlmPrompt) {
-        const fb = await onFallbackLlmPrompt(
-          buildFallbackInsightsPrompt(portfolioSummary),
-          'Tu es Directeur des Ventes B2B Orange Pro Maroc. Retourne uniquement un objet JSON valide.'
         );
-        if (fb.ok && fb.text) {
-          const parsedInsights = normalizePortfolioInsights(parseJsonObjectFromLlmText(fb.text));
-          if (parsedInsights) {
-            setInsights(parsedInsights);
+
+        if (res.ok && res.data?.insights) {
+          setInsights(res.data.insights);
+          setActiveProviderHint(res.data.model ? `Gemini · ${res.data.model}` : 'Gemini');
+          return;
+        }
+        markServerAiUnavailable(res.status, res.isStaticOrHtml);
+        if (res.error) lastErr = res.error;
+
+        if (!preferExternalFirst) {
+          const fb = await runExternalFallback();
+          if (fb?.ok && fb.text.trim()) {
+            setInsights(buildPortfolioInsightsFromTextFallback(fb.text, copilotFiches));
             setActiveProviderHint(fb.sourceLabel || 'Fournisseur IA alternatif');
             return;
           }
+          if (fb?.error) lastErr = fb.error;
         }
-        if (fb.error) fallbackErr = fb.error;
       }
 
-      setInsightsError(fallbackErr || res.error || 'Impossible de générer le Diagnostic IA.');
+      // Repli transparent vers le diagnostic CRM local en temps réel
+      setInsights(buildLocalDeterministicInsights(copilotFiches));
+      setActiveProviderHint('Calcul CRM local');
+      setInsightsNotice(buildLocalFallbackNotice(lastErr));
     } finally {
       setInsightsLoading(false);
     }
@@ -296,8 +366,11 @@ export const AiCopilotDrawer: React.FC<AiCopilotDrawerProps> = ({
   const handleSendChat = async (customText?: string, isRetry = false) => {
     const text = (customText ?? input).trim();
     if (!text || isSending) return;
-    setChatError('');
-    setLastFailedChatText('');
+    if (isRetry) {
+      serverSideBlockedUntilRef.current = 0;
+    }
+    setChatNotice('');
+    setLastChatQuery(text);
 
     const nextHistory: ChatMessage[] = isRetry
       ? messages
@@ -323,16 +396,23 @@ export const AiCopilotDrawer: React.FC<AiCopilotDrawerProps> = ({
         : '';
 
       const chatHistoryPayload = nextHistory
-        .filter((m) => m.id !== 'welcome')
+        .filter((m) => m.id !== 'welcome' && !m.isLocalFallback)
         .map((m) => ({ role: m.role, content: m.content }));
 
-      let fallbackErr = '';
-      if (!aiAvailable && onFallbackLlmPrompt) {
-        const fb = await onFallbackLlmPrompt(
+      const runExternalFallback = async () => {
+        if (!onFallbackLlmPrompt) return null;
+        return onFallbackLlmPrompt(
           buildFallbackChatPrompt(chatHistoryPayload, portfolioSummary, focusedSummary),
           'Tu es le Copilote Commercial B2B Orange Pro Maroc.'
         );
-        if (fb.ok && fb.text.trim()) {
+      };
+
+      let lastErr = '';
+      const preferExternalFirst = !canTryServerAi() || hasConfiguredFallbackKeys;
+
+      if (preferExternalFirst) {
+        const fb = await runExternalFallback();
+        if (fb?.ok && fb.text.trim()) {
           setActiveProviderHint(fb.sourceLabel || 'IA disponible');
           setMessages((prev) => [
             ...prev,
@@ -344,66 +424,82 @@ export const AiCopilotDrawer: React.FC<AiCopilotDrawerProps> = ({
           ]);
           return;
         }
-        fallbackErr = fb.error || '';
+        if (fb?.error) lastErr = fb.error;
       }
 
-      const res = await fetchJsonWithRetry<{
-        reply?: string;
-        model?: string;
-        error?: string;
-      }>(
-        '/api/ai/chat',
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            messages: chatHistoryPayload,
-            portfolioSummary,
-            focusedFiche: focusedSummary,
-          }),
-        },
-        {
-          timeoutMs: 28000,
-          maxNetworkRetries: 1,
-          fallbackLabel: 'Impossible de joindre le serveur IA local',
-        }
-      );
-
-      if (res.ok && res.data?.reply) {
-        setActiveProviderHint(res.data.model ? `Gemini · ${res.data.model}` : '');
-        setMessages((prev) => [
-          ...prev,
+      if (canTryServerAi()) {
+        const res = await fetchJsonWithRetry<{
+          reply?: string;
+          model?: string;
+          error?: string;
+        }>(
+          '/api/ai/chat',
           {
-            id: `a_${Date.now()}`,
-            role: 'assistant',
-            content: String(res.data?.reply || '').trim(),
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              messages: chatHistoryPayload,
+              portfolioSummary,
+              focusedFiche: focusedSummary,
+            }),
           },
-        ]);
-        return;
-      }
-
-      if (res.shouldFallback && onFallbackLlmPrompt) {
-        const fb = await onFallbackLlmPrompt(
-          buildFallbackChatPrompt(chatHistoryPayload, portfolioSummary, focusedSummary),
-          'Tu es le Copilote Commercial B2B Orange Pro Maroc.'
+          {
+            timeoutMs: 25000,
+            maxNetworkRetries: 1,
+            fallbackLabel: 'Service IA serveur momentanément indisponible',
+          }
         );
-        if (fb.ok && fb.text.trim()) {
-          setActiveProviderHint(fb.sourceLabel || 'Fournisseur IA alternatif');
+
+        if (res.ok && res.data?.reply) {
+          setActiveProviderHint(res.data.model ? `Gemini · ${res.data.model}` : 'Gemini');
           setMessages((prev) => [
             ...prev,
             {
               id: `a_${Date.now()}`,
               role: 'assistant',
-              content: fb.text.trim(),
+              content: String(res.data?.reply || '').trim(),
             },
           ]);
           return;
         }
-        if (fb.error) fallbackErr = fb.error;
+        markServerAiUnavailable(res.status, res.isStaticOrHtml);
+        if (res.error) lastErr = res.error;
+
+        if (!preferExternalFirst) {
+          const fb = await runExternalFallback();
+          if (fb?.ok && fb.text.trim()) {
+            setActiveProviderHint(fb.sourceLabel || 'Fournisseur IA alternatif');
+            setMessages((prev) => [
+              ...prev,
+              {
+                id: `a_${Date.now()}`,
+                role: 'assistant',
+                content: fb.text.trim(),
+              },
+            ]);
+            return;
+          }
+          if (fb?.error) lastErr = fb.error;
+        }
       }
 
-      setLastFailedChatText(text);
-      setChatError(fallbackErr || res.error || 'Le service IA a renvoyé une erreur.');
+      // Repli transparent vers la réponse CRM locale instantanée (zéro blocage utilisateur)
+      const localReply = buildLocalDeterministicChatReply(
+        text,
+        fiches.map(toCopilotFicheInput),
+        focusedFiche ? toCopilotFicheInput(focusedFiche) : null
+      );
+      setActiveProviderHint('Calcul CRM local');
+      setChatNotice(buildLocalFallbackNotice(lastErr));
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: `a_${Date.now()}`,
+          role: 'assistant',
+          content: localReply,
+          isLocalFallback: true,
+        },
+      ]);
     } finally {
       setIsSending(false);
     }
@@ -432,12 +528,14 @@ export const AiCopilotDrawer: React.FC<AiCopilotDrawerProps> = ({
               </h2>
               <p className="text-[11px] text-stone-500 truncate">
                 {activeProviderHint
-                  ? `Connecté · ${activeProviderHint}`
+                  ? activeProviderHint === 'Calcul CRM local'
+                    ? 'Mode CRM local actif · prêt pour clé IA externe'
+                    : `Connecté · ${activeProviderHint}`
                   : hasConfiguredFallbackKeys
                     ? `Multi-IA prêt (Hub API / Coffre${aiAvailable ? ` · ${aiModel}` : ''})`
                     : aiAvailable
                       ? `Gemini (${aiModel}) · bascule auto multi-IA active`
-                      : 'Ajoutez n’importe quelle clé IA dans le Hub API'}
+                      : 'Analyse CRM locale prête · ajoutez une clé IA dans le Hub API'}
               </p>
             </div>
           </div>
@@ -541,14 +639,14 @@ export const AiCopilotDrawer: React.FC<AiCopilotDrawerProps> = ({
                 </div>
               )}
 
-              {chatError && (
+              {chatNotice && (
                 <div
-                  role="alert"
-                  className="rounded-lg bg-red-50 border border-red-200 p-3 text-xs text-red-800 space-y-2"
+                  role="status"
+                  className="rounded-lg bg-amber-50 border border-amber-200 p-3 text-xs text-amber-950 space-y-2"
                 >
                   <div className="flex items-start gap-2 min-w-0">
-                    <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5 text-red-600" />
-                    <span>{chatError}</span>
+                    <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5 text-amber-600" />
+                    <span>{chatNotice}</span>
                   </div>
                   <div className="flex flex-wrap items-center gap-2 pl-6">
                     {onOpenApiHub && (
@@ -560,14 +658,14 @@ export const AiCopilotDrawer: React.FC<AiCopilotDrawerProps> = ({
                         Ajouter une clé dans le Hub API
                       </button>
                     )}
-                    {lastFailedChatText && (
+                    {lastChatQuery && (
                       <button
                         type="button"
                         disabled={isSending}
-                        onClick={() => void handleSendChat(lastFailedChatText, true)}
-                        className="px-2.5 py-1 rounded-md bg-white border border-red-300 text-red-800 hover:bg-red-100 text-[11px] font-semibold"
+                        onClick={() => void handleSendChat(lastChatQuery, true)}
+                        className="px-2.5 py-1 rounded-md bg-white border border-amber-300 text-amber-900 hover:bg-amber-100 text-[11px] font-semibold"
                       >
-                        Réessayer
+                        Réessayer IA
                       </button>
                     )}
                   </div>
@@ -619,7 +717,7 @@ export const AiCopilotDrawer: React.FC<AiCopilotDrawerProps> = ({
               <button
                 type="button"
                 disabled={insightsLoading || fiches.length === 0}
-                onClick={() => void loadPortfolioInsights()}
+                onClick={() => void loadPortfolioInsights(true)}
                 className="px-2.5 py-1.5 rounded-lg bg-stone-900 hover:bg-stone-800 disabled:opacity-50 text-white text-xs font-semibold flex items-center gap-1.5 shrink-0"
               >
                 <RefreshCw className={`w-3.5 h-3.5 ${insightsLoading ? 'animate-spin' : ''}`} />
@@ -631,19 +729,19 @@ export const AiCopilotDrawer: React.FC<AiCopilotDrawerProps> = ({
               <div className="py-10 text-center space-y-2">
                 <Sparkles className="w-5 h-5 text-orange-600 animate-spin mx-auto" />
                 <p className="text-xs text-stone-600 font-medium">
-                  Diagnostic commercial Gemini sur vos {fiches.length} comptes...
+                  Diagnostic commercial sur vos {fiches.length} comptes...
                 </p>
               </div>
             )}
 
-            {insightsError && (
+            {insightsNotice && (
               <div
-                role="alert"
-                className="rounded-lg bg-red-50 border border-red-200 p-3 text-xs text-red-800 space-y-2"
+                role="status"
+                className="rounded-lg bg-amber-50 border border-amber-200 p-3 text-xs text-amber-950 space-y-2"
               >
                 <div className="flex items-start gap-2 min-w-0">
-                  <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5 text-red-600" />
-                  <span>{insightsError}</span>
+                  <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5 text-amber-600" />
+                  <span>{insightsNotice}</span>
                 </div>
                 <div className="flex flex-wrap items-center gap-2 pl-6">
                   {onOpenApiHub && (
@@ -658,10 +756,10 @@ export const AiCopilotDrawer: React.FC<AiCopilotDrawerProps> = ({
                   <button
                     type="button"
                     disabled={insightsLoading || fiches.length === 0}
-                    onClick={() => void loadPortfolioInsights()}
-                    className="px-2.5 py-1 rounded-md bg-white border border-red-300 text-red-800 hover:bg-red-100 text-[11px] font-semibold"
+                    onClick={() => void loadPortfolioInsights(true)}
+                    className="px-2.5 py-1 rounded-md bg-white border border-amber-300 text-amber-900 hover:bg-amber-100 text-[11px] font-semibold"
                   >
-                    Réessayer
+                    Réessayer IA
                   </button>
                 </div>
               </div>
@@ -713,11 +811,11 @@ export const AiCopilotDrawer: React.FC<AiCopilotDrawerProps> = ({
               );
             })()}
 
-            {!insights && !insightsLoading && !insightsError && (
+            {!insights && !insightsLoading && !insightsNotice && (
               <div className="rounded-xl border border-dashed border-stone-300 p-5 text-center space-y-2">
                 <Activity className="w-6 h-6 text-stone-400 mx-auto" />
                 <p className="text-xs text-stone-600">
-                  Cliquez sur « Lancer Audit IA » pour obtenir une analyse stratégique Gemini et le plan d&apos;attaque chiffré sur vos {fiches.length} comptes.
+                  Cliquez sur « Lancer Audit IA » pour obtenir une analyse stratégique et le plan d&apos;attaque chiffré sur vos {fiches.length} comptes.
                 </p>
               </div>
             )}
@@ -845,7 +943,7 @@ export const AiCopilotDrawer: React.FC<AiCopilotDrawerProps> = ({
                     </div>
                     <button
                       type="button"
-                      onClick={() => void loadBriefForFiche(focusedFiche)}
+                      onClick={() => void loadBriefForFiche(focusedFiche, true)}
                       disabled={briefLoading}
                       aria-label="Régénérer le Brief IA"
                       className="px-2 py-1 rounded-lg border border-stone-300 bg-white hover:bg-stone-100 text-xs font-semibold text-stone-700 flex items-center gap-1 shrink-0"
@@ -889,19 +987,19 @@ export const AiCopilotDrawer: React.FC<AiCopilotDrawerProps> = ({
                   <div className="py-10 text-center space-y-2">
                     <Sparkles className="w-5 h-5 text-orange-600 animate-spin mx-auto" />
                     <p className="text-xs text-stone-600 font-medium">
-                      Préparation de la battlecard Orange Pro via Gemini...
+                      Préparation de la battlecard Orange Pro...
                     </p>
                   </div>
                 )}
 
-                {briefError && (
+                {briefNotice && (
                   <div
-                    role="alert"
-                    className="rounded-lg bg-red-50 border border-red-200 p-3 text-xs text-red-800 space-y-2"
+                    role="status"
+                    className="rounded-lg bg-amber-50 border border-amber-200 p-3 text-xs text-amber-950 space-y-2"
                   >
                     <div className="flex items-start gap-2 min-w-0">
-                      <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5 text-red-600" />
-                      <span>{briefError}</span>
+                      <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5 text-amber-600" />
+                      <span>{briefNotice}</span>
                     </div>
                     <div className="flex flex-wrap items-center gap-2 pl-6">
                       {onOpenApiHub && (
@@ -916,10 +1014,10 @@ export const AiCopilotDrawer: React.FC<AiCopilotDrawerProps> = ({
                       <button
                         type="button"
                         disabled={briefLoading}
-                        onClick={() => void loadBriefForFiche(focusedFiche)}
-                        className="px-2.5 py-1 rounded-md bg-white border border-red-300 text-red-800 hover:bg-red-100 text-[11px] font-semibold"
+                        onClick={() => void loadBriefForFiche(focusedFiche, true)}
+                        className="px-2.5 py-1 rounded-md bg-white border border-amber-300 text-amber-900 hover:bg-amber-100 text-[11px] font-semibold"
                       >
-                        Réessayer
+                        Réessayer IA
                       </button>
                     </div>
                   </div>

@@ -51,6 +51,11 @@ const SECURE_LLM_PROVIDERS: Record<string, { url: string; defaultModel: string; 
     defaultModel: 'deepseek-chat',
     label: 'DeepSeek',
   },
+  anthropic: {
+    url: 'https://api.anthropic.com/v1/messages',
+    defaultModel: 'claude-3-5-haiku-latest',
+    label: 'Anthropic Claude',
+  },
 };
 
 function loadFirebaseAppletConfig(): FirebaseAppletConfig | null {
@@ -768,23 +773,43 @@ Produis un audit structuré, actionnable immédiatement sur le terrain (Meknès 
       : [{ role: 'user', content: prompt }];
 
     try {
-      const upstream = await fetch(providerConfig.url, {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${apiKey}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          model,
-          messages,
-          temperature: 0.4,
-          max_tokens: 1400,
-        }),
-        signal: AbortSignal.timeout(25000),
-      });
+      let upstream: Response;
+      if (rawProvider === 'anthropic') {
+        upstream = await fetch(providerConfig.url, {
+          method: 'POST',
+          headers: {
+            'x-api-key': apiKey,
+            'anthropic-version': '2023-06-01',
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            model,
+            max_tokens: 1400,
+            ...(systemInstruction ? { system: systemInstruction } : {}),
+            messages: [{ role: 'user', content: prompt }],
+          }),
+          signal: AbortSignal.timeout(25000),
+        });
+      } else {
+        upstream = await fetch(providerConfig.url, {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${apiKey}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            model,
+            messages,
+            temperature: 0.4,
+            max_tokens: 1400,
+          }),
+          signal: AbortSignal.timeout(25000),
+        });
+      }
 
       const payload = (await upstream.json().catch(() => ({}))) as {
         choices?: Array<{ message?: { content?: string } }>;
+        content?: Array<{ text?: string }>;
         error?: { message?: string };
       };
 
@@ -798,7 +823,13 @@ Produis un audit structuré, actionnable immédiatement sur le terrain (Meknès 
         return;
       }
 
-      const reply = clampString(payload?.choices?.[0]?.message?.content, 8000);
+      const rawReply =
+        rawProvider === 'anthropic'
+          ? (Array.isArray(payload?.content)
+              ? payload.content.map((p) => p?.text || '').join('\n')
+              : '')
+          : payload?.choices?.[0]?.message?.content;
+      const reply = clampString(rawReply, 8000);
       if (!reply) {
         res.status(502).json({ error: `Réponse vide renvoyée par ${providerConfig.label}.` });
         return;

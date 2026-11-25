@@ -214,11 +214,11 @@ test('getAnyAvailableLlmKeys and mergeHubAndCloudKeys let any available AI handl
   const merged = mergeHubAndCloudKeys(localKeys, [
     { provider: 'mistral', label: 'Mistral Cloud', key: 'mis_cloud_1', active: true, updatedBy: 'admin-1' },
     { provider: 'groq', label: 'Groq Dup', key: 'gsk_1', active: true, updatedBy: 'admin-1' }, // duplicate secret ignored
-    { provider: 'anthropic', label: 'Anthropic', key: 'sk-ant-1', active: true, updatedBy: 'admin-1' }, // non-OpenAI client provider skipped in local pool
+    { provider: 'anthropic', label: 'Anthropic', key: 'sk-ant-1', active: true, updatedBy: 'admin-1' },
     { provider: 'deepseek', label: 'DeepSeek Off', key: 'sk-ds-1', active: false, updatedBy: 'admin-1' },
   ]);
 
   const emailOrder = getAnyAvailableLlmKeys(merged, 'email').map((k) => k.id);
-  // First: cloud_vault_mistral matches email scope='all' non-quota; next: groq ('extract'-scoped non-quota); last: openai (quota retry)
-  assert.deepEqual(emailOrder, ['cloud_vault_mistral', '2', '3']);
+  // First: cloud_vault_mistral (P100); next: groq ('extract'-scoped non-quota) or anthropic (P101); last: openai (quota retry)
+  assert.deepEqual(emailOrder, ['cloud_vault_mistral', 'cloud_vault_anthropic', '2', '3']);
 });
