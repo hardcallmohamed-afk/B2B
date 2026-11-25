@@ -21,8 +21,11 @@ import {
   adminCreateManagedUser,
   adminUpdateManagedUser,
   adminDeleteManagedUser,
+  adminUpsertApiKey,
+  adminDeleteApiKey,
   requestPasswordReset,
   setOrLinkAccountPassword,
+  type CloudApiKeyRecord,
 } from '../firebase';
 import {
   FIREBASE_PROJECT_ID,
@@ -33,12 +36,30 @@ import {
   type ManagedAppUser,
   type ManagedUserRole,
 } from '../utils/authAccess';
+import { RoleBadge } from './RoleBadge';
+
+const CLOUD_API_PROVIDERS = [
+  { id: 'groq', label: 'Groq (Llama / Mixtral)' },
+  { id: 'mistral', label: 'Mistral AI' },
+  { id: 'gemini', label: 'Google Gemini' },
+  { id: 'openrouter', label: 'OpenRouter' },
+  { id: 'openai', label: 'OpenAI' },
+  { id: 'anthropic', label: 'Anthropic Claude' },
+  { id: 'deepseek', label: 'DeepSeek' },
+] as const;
+
+function maskApiKey(raw: string): string {
+  const s = raw.trim();
+  if (s.length <= 8) return '••••••••';
+  return `${s.slice(0, 5)}••••••${s.slice(-4)}`;
+}
 
 interface AdminUsersPanelProps {
   adminUid: string;
   adminEmail: string;
   adminHasPasswordProvider: boolean;
   users: ManagedAppUser[];
+  cloudApiKeys?: CloudApiKeyRecord[];
   villesOptions: string[];
   onNotify: (msg: string, type?: 'ok' | 'warn' | 'err') => void;
 }
@@ -48,6 +69,7 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
   adminEmail,
   adminHasPasswordProvider,
   users,
+  cloudApiKeys = [],
   villesOptions,
   onNotify,
 }) => {
@@ -76,6 +98,13 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
   const [adminNewPwd, setAdminNewPwd] = useState('');
   const [adminPwdBusy, setAdminPwdBusy] = useState(false);
   const [copiedDomain, setCopiedDomain] = useState(false);
+
+  // Coffre Cloud /api_keys/{provider} (Super-Admin uniquement)
+  const [apiProvider, setApiProvider] = useState<string>('groq');
+  const [apiKeyInput, setApiKeyInput] = useState('');
+  const [showApiKeyInput, setShowApiKeyInput] = useState(false);
+  const [apiKeyBusy, setApiKeyBusy] = useState(false);
+  const [revealedProviders, setRevealedProviders] = useState<Record<string, boolean>>({});
 
   const currentHostname = typeof window !== 'undefined' ? window.location.hostname : 'hardcallmohamed-afk.github.io';
   const firebaseAuthSettingsUrl = `https://console.firebase.google.com/project/${FIREBASE_PROJECT_ID}/authentication/settings`;
@@ -249,6 +278,43 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
       window.setTimeout(() => setCopiedDomain(false), 2000);
     } catch {
       // ignore
+    }
+  };
+
+  const handleSaveCloudApiKey = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const trimmedKey = apiKeyInput.trim();
+    if (trimmedKey.length < 8) {
+      onNotify('Saisissez une clé API valide (au moins 8 caractères).', 'warn');
+      return;
+    }
+    const providerMeta = CLOUD_API_PROVIDERS.find((p) => p.id === apiProvider);
+    setApiKeyBusy(true);
+    try {
+      await adminUpsertApiKey(adminUid, {
+        provider: apiProvider,
+        label: providerMeta?.label || apiProvider.toUpperCase(),
+        key: trimmedKey,
+        active: true,
+      });
+      setApiKeyInput('');
+      onNotify(`Clé API "${providerMeta?.label || apiProvider}" sauvegardée dans Firestore (/api_keys/${apiProvider}).`);
+    } catch {
+      onNotify('Échec de sauvegarde de la clé API dans /api_keys (accès Super-Admin requis).', 'err');
+    } finally {
+      setApiKeyBusy(false);
+    }
+  };
+
+  const handleDeleteCloudApiKey = async (provider: string) => {
+    setApiKeyBusy(true);
+    try {
+      await adminDeleteApiKey(provider);
+      onNotify(`Clé API "${provider}" supprimée de Firestore.`);
+    } catch {
+      onNotify('Impossible de supprimer cette clé API.', 'err');
+    } finally {
+      setApiKeyBusy(false);
     }
   };
 
@@ -524,11 +590,9 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
           {/* Carte Super-Admin verrouillée */}
           <div className="rounded-lg border border-orange-200 bg-orange-50/60 p-3 flex flex-wrap items-center justify-between gap-2 text-xs">
             <div>
-              <div className="font-bold text-stone-900 flex items-center gap-2">
+              <div className="font-bold text-stone-900 flex items-center gap-2 flex-wrap">
                 <span>Administrateur Principal</span>
-                <span className="text-[10px] font-mono font-bold px-1.5 py-0.5 rounded bg-orange-600 text-white">
-                  SUPER ADMIN
-                </span>
+                <RoleBadge role="super_admin" />
               </div>
               <p className="text-[11px] text-stone-600">{SUPER_ADMIN_EMAIL} · Accès total &amp; création comptes</p>
             </div>
@@ -555,6 +619,7 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
                     <div className="min-w-0 space-y-0.5">
                       <div className="flex items-center gap-2 flex-wrap">
                         <span className="font-bold text-stone-900">{u.displayName}</span>
+                        <RoleBadge role={u.role} />
                         <span
                           className={`text-[10px] font-semibold px-1.5 py-0.5 rounded ${
                             u.active ? 'bg-emerald-100 text-emerald-800' : 'bg-red-100 text-red-800'
@@ -643,6 +708,132 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
             </div>
           )}
         </div>
+      </div>
+
+      {/* Coffre Clés API Cloud (/api_keys/{provider}) — Super-Admin uniquement */}
+      <div
+        data-testid="admin-api-keys-vault"
+        className="bg-white rounded-xl border border-stone-200 p-4 space-y-3.5"
+      >
+        <div className="flex flex-wrap items-start justify-between gap-2">
+          <div>
+            <h3 className="text-xs font-bold text-stone-900 flex items-center gap-1.5">
+              <KeyRound className="w-4 h-4 text-orange-600" />
+              Coffre Clés API Cloud (<code className="font-mono text-[11px] text-orange-700">/api_keys/&#123;provider&#125;</code>)
+            </h3>
+            <p className="text-[11px] text-stone-500 mt-0.5">
+              Protégé côté serveur par les règles Firestore (<code className="font-mono">isSuperAdmin()</code>). Seul votre compte Super-Admin peut lire ou modifier ces clés (Groq, Mistral, Gemini, etc.).
+            </p>
+          </div>
+          <span className="px-2 py-0.5 rounded-md bg-orange-50 border border-orange-200 text-[10px] font-bold text-orange-800">
+            {cloudApiKeys.length} clé{cloudApiKeys.length > 1 ? 's' : ''} en coffre Cloud
+          </span>
+        </div>
+
+        <form onSubmit={handleSaveCloudApiKey} className="grid grid-cols-1 sm:grid-cols-12 gap-2.5 items-end">
+          <div className="sm:col-span-3 space-y-1">
+            <label htmlFor="vault-provider" className="block text-[11px] font-semibold text-stone-700">
+              Fournisseur IA
+            </label>
+            <select
+              id="vault-provider"
+              value={apiProvider}
+              onChange={(e) => setApiProvider(e.target.value)}
+              className="w-full px-2.5 py-2 rounded-lg border border-stone-300 bg-white text-xs font-medium focus:outline-none focus:border-orange-600"
+            >
+              {CLOUD_API_PROVIDERS.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.label}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div className="sm:col-span-6 space-y-1">
+            <label htmlFor="vault-apikey" className="block text-[11px] font-semibold text-stone-700">
+              Clé API secrète (nouvelle ou mise à jour)
+            </label>
+            <div className="relative">
+              <input
+                id="vault-apikey"
+                type={showApiKeyInput ? 'text' : 'password'}
+                value={apiKeyInput}
+                onChange={(e) => setApiKeyInput(e.target.value)}
+                placeholder="Ex. gsk_... ou AIza..."
+                className="w-full pl-3 pr-9 py-2 rounded-lg border border-stone-300 font-mono text-xs focus:outline-none focus:border-orange-600"
+              />
+              <button
+                type="button"
+                onClick={() => setShowApiKeyInput((v) => !v)}
+                aria-label={showApiKeyInput ? 'Masquer la clé' : 'Afficher la clé'}
+                className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-stone-400 hover:text-stone-700"
+              >
+                {showApiKeyInput ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+              </button>
+            </div>
+          </div>
+
+          <div className="sm:col-span-3">
+            <button
+              type="submit"
+              disabled={apiKeyBusy || apiKeyInput.trim().length < 8}
+              className="w-full py-2 px-3 rounded-lg bg-stone-900 hover:bg-stone-800 disabled:opacity-50 text-white text-xs font-semibold flex items-center justify-center gap-1.5"
+            >
+              <Lock className="w-3.5 h-3.5" />
+              {apiKeyBusy ? 'Enregistrement...' : 'Sauvegarder en Cloud'}
+            </button>
+          </div>
+        </form>
+
+        {cloudApiKeys.length > 0 && (
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-2 pt-1">
+            {cloudApiKeys.map((item) => {
+              const revealed = Boolean(revealedProviders[item.provider]);
+              return (
+                <div
+                  key={item.provider}
+                  className="rounded-lg border border-stone-200 bg-stone-50/70 px-3 py-2 flex items-center justify-between gap-2 text-xs"
+                >
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-1.5">
+                      <span className="font-bold text-stone-900">{item.label}</span>
+                      <code className="text-[10px] px-1.5 py-0.5 rounded bg-white border border-stone-200 text-stone-600">
+                        /api_keys/{item.provider}
+                      </code>
+                    </div>
+                    <div className="font-mono text-[11px] text-stone-600 truncate mt-0.5">
+                      {revealed ? item.key : maskApiKey(item.key)}
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-1 shrink-0">
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setRevealedProviders((prev) => ({
+                          ...prev,
+                          [item.provider]: !prev[item.provider],
+                        }))
+                      }
+                      title={revealed ? 'Masquer' : 'Afficher'}
+                      className="p-1.5 rounded-lg border border-stone-200 bg-white hover:bg-stone-100 text-stone-600"
+                    >
+                      {revealed ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                    </button>
+                    <button
+                      type="button"
+                      disabled={apiKeyBusy}
+                      onClick={() => void handleDeleteCloudApiKey(item.provider)}
+                      title="Supprimer cette clé"
+                      className="p-1.5 rounded-lg border border-stone-200 bg-white hover:border-red-300 hover:bg-red-50 text-stone-500 hover:text-red-700"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
       </div>
     </section>
   );

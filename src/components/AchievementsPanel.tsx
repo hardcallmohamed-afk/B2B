@@ -30,12 +30,15 @@ import {
   type BadgeRarity,
   type CollaboratorMetrics,
   type EvaluatedAchievement,
+  type TeamRole,
   type TeamStatRecord,
 } from '../utils/gamification';
+import { RoleBadge } from './RoleBadge';
 
 interface AchievementsPanelProps {
   currentUserUid: string;
   currentUserName: string;
+  currentUserRole?: TeamRole;
   isSuperAdmin: boolean;
   myMetrics: CollaboratorMetrics;
   teamStats: TeamStatRecord[];
@@ -77,6 +80,7 @@ type SortMode = 'progress_desc' | 'xp_desc' | 'unlocked_first';
 export const AchievementsPanel: React.FC<AchievementsPanelProps> = ({
   currentUserUid,
   currentUserName,
+  currentUserRole,
   isSuperAdmin,
   myMetrics,
   teamStats,
@@ -122,6 +126,20 @@ export const AchievementsPanel: React.FC<AchievementsPanelProps> = ({
       ? currentUserName
       : selectedStat?.displayName || 'Collaborateur';
 
+  const viewedRole: TeamRole =
+    effectiveUid === currentUserUid
+      ? currentUserRole || (isSuperAdmin ? 'super_admin' : 'commercial')
+      : selectedStat?.role || 'commercial';
+
+  const roleDistinctionBadges = useMemo(
+    () => ADMIN_DISTINCTION_BADGES.filter((b) => b.category === 'role'),
+    []
+  );
+  const perfDistinctionBadges = useMemo(
+    () => ADMIN_DISTINCTION_BADGES.filter((b) => b.category !== 'role'),
+    []
+  );
+
   const handleToggleManualBadge = async (badgeId: string) => {
     if (!isSuperAdmin || !onAdminToggleManualBadge) return;
     const current = selectedStat?.manualBadges || [];
@@ -164,6 +182,7 @@ export const AchievementsPanel: React.FC<AchievementsPanelProps> = ({
             <div className="min-w-0 flex-1">
               <div className="flex flex-wrap items-center gap-2">
                 <h2 className="text-lg font-extrabold text-stone-900">Succès &amp; Badges</h2>
+                <RoleBadge role={viewedRole} size="sm" />
                 <span className="rounded-lg bg-orange-100 px-2 py-0.5 text-[11px] font-bold text-orange-800">
                   Rang {evaluated.rankNumber} · {evaluated.rankTitle}
                 </span>
@@ -339,61 +358,132 @@ export const AchievementsPanel: React.FC<AchievementsPanelProps> = ({
             </select>
           </div>
 
-          <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
-            {ADMIN_DISTINCTION_BADGES.map((badge) => {
-              const awarded = (selectedStat?.manualBadges || []).includes(badge.id);
-              const meta = RARITY_META[badge.rarity];
-              const Icon = ICON_MAP[badge.iconKey] || Award;
-              return (
-                <button
-                  key={badge.id}
-                  type="button"
-                  disabled={busyBadgeId === badge.id}
-                  onClick={() => void handleToggleManualBadge(badge.id)}
-                  className={`flex items-center justify-between gap-3 rounded-xl border p-3 text-left transition-all ${
-                    awarded
-                      ? 'border-violet-500 bg-violet-50 shadow-2xs'
-                      : 'border-stone-200 bg-white hover:border-violet-300'
-                  }`}
-                >
-                  <div className="flex items-center gap-2.5 min-w-0">
-                    <div
-                      className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br text-white ${RARITY_ICON_BG[badge.rarity]}`}
+          <div className="mt-4 space-y-4">
+            {/* Groupe 1 : Badges de Rôles & Responsabilités */}
+            <div>
+              <div className="mb-2 text-[11px] font-extrabold uppercase tracking-wide text-indigo-800">
+                Badges de Rôles &amp; Responsabilités
+              </div>
+              <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-4">
+                {roleDistinctionBadges.map((badge) => {
+                  const awarded = (selectedStat?.manualBadges || []).includes(badge.id);
+                  const meta = RARITY_META[badge.rarity];
+                  const Icon = ICON_MAP[badge.iconKey] || Award;
+                  return (
+                    <button
+                      key={badge.id}
+                      type="button"
+                      disabled={busyBadgeId === badge.id}
+                      onClick={() => void handleToggleManualBadge(badge.id)}
+                      className={`flex items-center justify-between gap-2.5 rounded-xl border p-2.5 text-left transition-all ${
+                        awarded
+                          ? 'border-indigo-500 bg-indigo-50 shadow-2xs'
+                          : 'border-stone-200 bg-white hover:border-indigo-300'
+                      }`}
                     >
-                      <Icon className="h-4 w-4" />
-                    </div>
-                    <div className="min-w-0">
-                      <div className="truncate text-xs font-bold text-stone-900">
-                        {badge.title}
-                      </div>
-                      <div className="flex items-center gap-1.5 text-[10px] text-stone-500">
-                        <span
-                          className={`rounded-xs px-1.5 py-0.2 font-bold ${meta.pillBg} ${meta.pillText}`}
+                      <div className="flex items-center gap-2 min-w-0">
+                        <div
+                          className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br text-white ${RARITY_ICON_BG[badge.rarity]}`}
                         >
-                          {meta.label}
-                        </span>
-                        <span>+{badge.xpBoost} XP</span>
+                          <Icon className="h-4 w-4" />
+                        </div>
+                        <div className="min-w-0">
+                          <div className="truncate text-xs font-bold text-stone-900">
+                            {badge.title}
+                          </div>
+                          <div className="flex items-center gap-1 text-[10px] text-stone-500">
+                            <span
+                              className={`rounded-xs px-1 py-0.2 font-bold ${meta.pillBg} ${meta.pillText}`}
+                            >
+                              {meta.label}
+                            </span>
+                            <span>+{badge.xpBoost} XP</span>
+                          </div>
+                        </div>
                       </div>
-                    </div>
-                  </div>
-                  <span
-                    className={`inline-flex shrink-0 items-center gap-1 rounded-lg px-2.5 py-1 text-[11px] font-bold ${
-                      awarded
-                        ? 'bg-violet-600 text-white'
-                        : 'border border-stone-300 bg-stone-50 text-stone-700'
-                    }`}
-                  >
-                    {awarded ? (
-                      <>
-                        <Check className="h-3 w-3" /> Attribué
-                      </>
-                    ) : (
-                      'Attribuer'
-                    )}
-                  </span>
-                </button>
-              );
-            })}
+                      <span
+                        className={`inline-flex shrink-0 items-center gap-1 rounded-lg px-2 py-1 text-[10px] font-bold ${
+                          awarded
+                            ? 'bg-indigo-600 text-white'
+                            : 'border border-stone-300 bg-stone-50 text-stone-700'
+                        }`}
+                      >
+                        {awarded ? (
+                          <>
+                            <Check className="h-3 w-3" /> Actif
+                          </>
+                        ) : (
+                          'Attribuer'
+                        )}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* Groupe 2 : Distinctions de Performance */}
+            <div>
+              <div className="mb-2 text-[11px] font-extrabold uppercase tracking-wide text-violet-800">
+                Distinctions de Performance
+              </div>
+              <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                {perfDistinctionBadges.map((badge) => {
+                  const awarded = (selectedStat?.manualBadges || []).includes(badge.id);
+                  const meta = RARITY_META[badge.rarity];
+                  const Icon = ICON_MAP[badge.iconKey] || Award;
+                  return (
+                    <button
+                      key={badge.id}
+                      type="button"
+                      disabled={busyBadgeId === badge.id}
+                      onClick={() => void handleToggleManualBadge(badge.id)}
+                      className={`flex items-center justify-between gap-3 rounded-xl border p-3 text-left transition-all ${
+                        awarded
+                          ? 'border-violet-500 bg-violet-50 shadow-2xs'
+                          : 'border-stone-200 bg-white hover:border-violet-300'
+                      }`}
+                    >
+                      <div className="flex items-center gap-2.5 min-w-0">
+                        <div
+                          className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br text-white ${RARITY_ICON_BG[badge.rarity]}`}
+                        >
+                          <Icon className="h-4 w-4" />
+                        </div>
+                        <div className="min-w-0">
+                          <div className="truncate text-xs font-bold text-stone-900">
+                            {badge.title}
+                          </div>
+                          <div className="flex items-center gap-1.5 text-[10px] text-stone-500">
+                            <span
+                              className={`rounded-xs px-1.5 py-0.2 font-bold ${meta.pillBg} ${meta.pillText}`}
+                            >
+                              {meta.label}
+                            </span>
+                            <span>+{badge.xpBoost} XP</span>
+                          </div>
+                        </div>
+                      </div>
+                      <span
+                        className={`inline-flex shrink-0 items-center gap-1 rounded-lg px-2.5 py-1 text-[11px] font-bold ${
+                          awarded
+                            ? 'bg-violet-600 text-white'
+                            : 'border border-stone-300 bg-stone-50 text-stone-700'
+                        }`}
+                      >
+                        {awarded ? (
+                          <>
+                            <Check className="h-3 w-3" /> Attribué
+                          </>
+                        ) : (
+                          'Attribuer'
+                        )}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
           </div>
         </div>
       )}

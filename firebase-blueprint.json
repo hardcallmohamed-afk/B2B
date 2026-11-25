@@ -508,9 +508,64 @@
         "createdAt",
         "updatedAt"
       ]
+    },
+    "ApiKeyConfig": {
+      "title": "ApiKeyConfig",
+      "description": "Clé API externe sécurisée stockée dans /api_keys/{provider}, strictement réservée en lecture et écriture au Super-Admin.",
+      "type": "object",
+      "properties": {
+        "provider": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[a-z0-9_\\-]+$"
+        },
+        "key": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "label": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "active": {
+          "type": "boolean"
+        },
+        "updatedBy": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "provider",
+        "key",
+        "label",
+        "active",
+        "updatedBy",
+        "createdAt",
+        "updatedAt"
+      ]
     }
   },
   "firestore": {
+    "/api_keys/{provider}": {
+      "schema": {
+        "$ref": "#/entities/ApiKeyConfig"
+      },
+      "description": "Coffre des clés API externes (Groq, Mistral, Gemini, etc.) accessible exclusivement au Super-Admin."
+    },
     "/app_users/{userId}": {
       "schema": {
         "$ref": "#/entities/AppUser"

@@ -23,6 +23,9 @@ service cloud.firestore {
     function isValidId(id) {
       return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
     }
+    function isValidProviderId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 64 && id.matches('^[a-z0-9_\\-]+$');
+    }
     function isValidNumeroFiche(val) {
       return val is string && val.size() >= 1 && val.size() <= 32 && val.matches('^[A-Z0-9_\\-]+$');
     }
@@ -93,6 +96,26 @@ service cloud.firestore {
         && data.active is bool
         && data.createdBy is string
         && isValidId(data.createdBy)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidApiKeyConfig(data, provider) {
+      return data.keys().hasAll([
+          'provider', 'label', 'key', 'active', 'updatedBy', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'provider', 'label', 'key', 'active', 'updatedBy', 'createdAt', 'updatedAt'
+        ])
+        && data.provider is string
+        && data.provider == provider
+        && isValidProviderId(data.provider)
+        && data.label is string && data.label.size() >= 1 && data.label.size() <= 120
+        && data.key is string && data.key.size() >= 1 && data.key.size() <= 512
+        && data.active is bool
+        && data.updatedBy is string
+        && isValidId(data.updatedBy)
+        && data.updatedBy == request.auth.uid
         && data.createdAt is timestamp
         && data.updatedAt is timestamp;
     }
@@ -252,7 +275,37 @@ service cloud.firestore {
         && data.updatedAt is timestamp;
     }
 
-    // 4. Collection: /app_users/{userId} (Admin-Managed Authorized Users Directory)
+    // 4. Collection: /api_keys/{provider} (Super-Admin-Only Cloud API Keys Vault)
+    match /api_keys/{provider} {
+      // Strictly Super-Admin only; collaborators can NEVER read or write API keys.
+      allow get: if isSuperAdmin() && isValidProviderId(provider);
+
+      // Query MUST filter by updatedBy == request.auth.uid (no get()/exists() in list).
+      allow list: if isSuperAdmin() && resource.data.updatedBy == request.auth.uid;
+
+      allow create: if isSuperAdmin()
+        && isValidProviderId(provider)
+        && isValidApiKeyConfig(incoming(), provider)
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+
+      allow update: if isSuperAdmin()
+        && isValidProviderId(provider)
+        && isValidApiKeyConfig(incoming(), provider)
+        && incoming().provider == existing().provider
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          // Action: Super-Admin rotates API key, label, or active state
+          incoming().diff(existing()).affectedKeys().hasOnly([
+            'label', 'key', 'active', 'updatedBy', 'updatedAt'
+          ])
+        );
+
+      allow delete: if isSuperAdmin() && isValidProviderId(provider);
+    }
+
+    // 5. Collection: /app_users/{userId} (Admin-Managed Authorized Users Directory)
     match /app_users/{userId} {
       // Super-Admin can inspect any user; a signed-in user can only check their own authorization doc.
       allow get: if isValidId(userId) && (
@@ -288,7 +341,7 @@ service cloud.firestore {
       allow delete: if isSuperAdmin() && isValidId(userId);
     }
 
-    // 5. Collection: /team_stats/{userId} (Non-PII Team Leaderboard, XP, Badges & Monthly Trends)
+    // 6. Collection: /team_stats/{userId} (Non-PII Team Leaderboard, XP, Badges & Monthly Trends)
     match /team_stats/{userId} {
       allow get: if isValidId(userId)
         && (isSuperAdmin() || isApprovedMember(request.auth.uid))
@@ -348,7 +401,7 @@ service cloud.firestore {
       allow delete: if isSuperAdmin() && isValidId(userId);
     }
 
-    // 6. Collection: /signed_contracts/{contractId} (Signed Contracts & Commission Payout Ledger — No Client PII)
+    // 7. Collection: /signed_contracts/{contractId} (Signed Contracts & Commission Payout Ledger — No Client PII)
     match /signed_contracts/{contractId} {
       allow get: if isValidId(contractId) && (
         isSuperAdmin()
@@ -392,7 +445,7 @@ service cloud.firestore {
       allow delete: if isSuperAdmin() && isValidId(contractId);
     }
 
-    // 7. Collection: /users/{userId} (Workspace Settings)
+    // 8. Collection: /users/{userId} (Workspace Settings)
     match /users/{userId} {
       allow get: if isValidId(userId) && isOwner(userId)
         && (resource == null || existing().ownerId == request.auth.uid);
@@ -421,7 +474,7 @@ service cloud.firestore {
 
       allow delete: if isValidId(userId) && isOwner(userId) && existing().ownerId == request.auth.uid;
 
-      // 8. Subcollection: /users/{userId}/fiches/{ficheId} (B2B CRM Prospects — Locked after Signing for Collaborators)
+      // 9. Subcollection: /users/{userId}/fiches/{ficheId} (B2B CRM Prospects — Locked after Signing for Collaborators)
       match /fiches/{ficheId} {
         allow get: if isValidId(userId) && isValidId(ficheId) && isOwner(userId)
           && (resource == null || existing().ownerId == request.auth.uid)
@@ -471,7 +524,7 @@ service cloud.firestore {
           && exists(/databases/$(database)/documents/users/$(userId));
       }
 
-      // 9. Subcollection: /users/{userId}/skills/{skillId} (Email Studio Skills)
+      // 10. Subcollection: /users/{userId}/skills/{skillId} (Email Studio Skills)
       match /skills/{skillId} {
         allow get: if isValidId(userId) && isValidId(skillId) && isOwner(userId)
           && (resource == null || existing().ownerId == request.auth.uid);

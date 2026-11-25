@@ -29,17 +29,22 @@ test('evaluateAchievements unlocks milestones across rarity tiers, awards XP, an
       highMaturityFiches: 8,
       distinctCities: 4,
     },
-    ['admin_mvp_mois']
+    ['admin_mvp_mois', 'role_chef_equipe']
   );
 
   assert.ok(res.unlockedCount >= 10);
-  assert.equal(res.totalCount, 30); // 24 auto + 6 admin distinction badges
+  assert.equal(res.totalCount, 34); // 24 auto + 6 admin distinctions + 4 role badges
   assert.ok(res.totalXp > 1500);
   assert.equal(res.nextToUnlock.length, 3);
   // Admin manual badge unlocked
   const mvp = res.items.find((i) => i.id === 'admin_mvp_mois');
   assert.equal(mvp?.unlocked, true);
   assert.equal(mvp?.isManualAdminBadge, true);
+  assert.equal(mvp?.xpType, 'Distinction Admin');
+  // Role badge unlocked
+  const roleBadge = res.items.find((i) => i.id === 'role_chef_equipe');
+  assert.equal(roleBadge?.unlocked, true);
+  assert.equal(roleBadge?.xpType, 'Badge de Rôle');
   // Rare Grand Compte unlocked
   assert.equal(res.items.find((i) => i.id === 'first_gc')?.unlocked, true);
   // Legendary still locked

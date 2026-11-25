@@ -192,9 +192,80 @@ export interface ManualBadgeDefinition {
   rarity: BadgeRarity;
   xpBoost: number;
   iconKey: string;
+  category?: 'distinction' | 'role';
 }
 
+export type TeamRole = 'super_admin' | 'manager' | 'commercial';
+
+export const ROLE_BADGE_META: Record<
+  TeamRole,
+  {
+    label: string;
+    shortLabel: string;
+    description: string;
+    className: string;
+  }
+> = {
+  super_admin: {
+    label: 'Super-Admin',
+    shortLabel: 'SUPER-ADMIN',
+    description: 'Direction & accès total (utilisateurs, payouts, clés API, badges)',
+    className:
+      'bg-gradient-to-r from-orange-600 to-amber-500 text-white border border-orange-500 shadow-2xs',
+  },
+  manager: {
+    label: 'Superviseur / Manager',
+    shortLabel: 'MANAGER',
+    description: 'Pilotage commercial & suivi d’équipe Orange Pro',
+    className: 'bg-violet-100 text-violet-900 border border-violet-300',
+  },
+  commercial: {
+    label: 'Commercial B2B',
+    shortLabel: 'COMMERCIAL',
+    description: 'Prospection terrain, qualification & signature Orange Pro',
+    className: 'bg-sky-100 text-sky-900 border border-sky-300',
+  },
+};
+
 export const ADMIN_DISTINCTION_BADGES: ManualBadgeDefinition[] = [
+  // Badges de Rôles & Fonctions (attribuables par le Super-Admin)
+  {
+    id: 'role_chef_equipe',
+    title: 'Rôle : Chef d’Équipe',
+    description: 'Badge de rôle officiel reconnaissant la coordination d’une escouade terrain.',
+    rarity: 'epique',
+    xpBoost: 500,
+    iconKey: 'crown',
+    category: 'role',
+  },
+  {
+    id: 'role_expert_gc',
+    title: 'Rôle : Expert Grand Compte',
+    description: 'Badge de rôle dédié aux négociations Fibre Dédiée & flottes corporate.',
+    rarity: 'rare',
+    xpBoost: 400,
+    iconKey: 'briefcase',
+    category: 'role',
+  },
+  {
+    id: 'role_responsable_zone',
+    title: 'Rôle : Responsable de Zone',
+    description: 'Badge de rôle attribué au référent territorial (Meknès, Fès, Ifrane, Région).',
+    rarity: 'rare',
+    xpBoost: 350,
+    iconKey: 'map',
+    category: 'role',
+  },
+  {
+    id: 'role_mentor_b2b',
+    title: 'Rôle : Mentor Commercial',
+    description: 'Badge de rôle décerné aux collaborateurs qui forment et accompagnent les recrues.',
+    rarity: 'peu_commun',
+    xpBoost: 200,
+    iconKey: 'shield',
+    category: 'role',
+  },
+  // Distinctions de Performance (attribuables par le Super-Admin)
   {
     id: 'admin_mvp_mois',
     title: 'MVP du Mois',
@@ -202,6 +273,7 @@ export const ADMIN_DISTINCTION_BADGES: ManualBadgeDefinition[] = [
     rarity: 'epique',
     xpBoost: 600,
     iconKey: 'crown',
+    category: 'distinction',
   },
   {
     id: 'admin_best_closer',
@@ -210,6 +282,7 @@ export const ADMIN_DISTINCTION_BADGES: ManualBadgeDefinition[] = [
     rarity: 'rare',
     xpBoost: 350,
     iconKey: 'flame',
+    category: 'distinction',
   },
   {
     id: 'admin_fibre_champion',
@@ -218,6 +291,7 @@ export const ADMIN_DISTINCTION_BADGES: ManualBadgeDefinition[] = [
     rarity: 'rare',
     xpBoost: 300,
     iconKey: 'zap',
+    category: 'distinction',
   },
   {
     id: 'admin_crm_quality',
@@ -226,6 +300,7 @@ export const ADMIN_DISTINCTION_BADGES: ManualBadgeDefinition[] = [
     rarity: 'peu_commun',
     xpBoost: 150,
     iconKey: 'shield',
+    category: 'distinction',
   },
   {
     id: 'admin_team_spirit',
@@ -234,6 +309,7 @@ export const ADMIN_DISTINCTION_BADGES: ManualBadgeDefinition[] = [
     rarity: 'commun',
     xpBoost: 100,
     iconKey: 'heart',
+    category: 'distinction',
   },
   {
     id: 'admin_legend_hall',
@@ -242,6 +318,7 @@ export const ADMIN_DISTINCTION_BADGES: ManualBadgeDefinition[] = [
     rarity: 'legendaire',
     xpBoost: 1500,
     iconKey: 'trophy',
+    category: 'distinction',
   },
 ];
 
@@ -612,7 +689,7 @@ export function evaluateAchievements(
       description: def.description,
       rarity: def.rarity,
       xpBoost: def.xpBoost,
-      xpType: 'Distinction Admin',
+      xpType: def.category === 'role' ? 'Badge de Rôle' : 'Distinction Admin',
       iconKey: def.iconKey,
       unlocked,
       isManualAdminBadge: true,

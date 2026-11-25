@@ -51,6 +51,7 @@ import { LoginScreen, AccessGateNotice } from './components/LoginScreen';
 import { AdminUsersPanel } from './components/AdminUsersPanel';
 import { TeamPerformancePanel } from './components/TeamPerformancePanel';
 import { AchievementsPanel } from './components/AchievementsPanel';
+import { RoleBadge } from './components/RoleBadge';
 import { SignContractModal, type SignContractTarget } from './components/SignContractModal';
 import { moveFicheToStatut } from './utils/analytics';
 import { findSmartDuplicateGroups } from './utils/deduplication';
@@ -66,6 +67,7 @@ import {
   type OrangeProTier,
   type PayoutStatus,
   type SignedContractRecord,
+  type TeamRole,
   type TeamStatRecord,
 } from './utils/gamification';
 import {
@@ -82,6 +84,7 @@ import {
   db,
   signOutUser,
   ensureUserWorkspace,
+  fetchInitialUserCollectionDocs,
   syncWorkspaceToFirestore,
   syncFichesDiffToFirestore,
   syncSkillsDiffToFirestore,
@@ -89,6 +92,7 @@ import {
   getUserSkillsCollection,
   fetchAppUserProfile,
   getAppUsersQuery,
+  getAdminApiKeysQuery,
   getTeamStatsQuery,
   getSignedContractsQuery,
   syncMyTeamStat,
@@ -97,6 +101,7 @@ import {
   adminUpdateSignedContract,
   handleFirestoreError,
   OperationType,
+  type CloudApiKeyRecord,
 } from './firebase';
 import {
   sanitizeFichePayload,
@@ -2703,6 +2708,7 @@ export default function App() {
   const [appUserProfile, setAppUserProfile] = useState<ManagedAppUser | null>(null);
   const [profileChecked, setProfileChecked] = useState(false);
   const [managedUsers, setManagedUsers] = useState<ManagedAppUser[]>([]);
+  const [cloudApiKeys, setCloudApiKeys] = useState<CloudApiKeyRecord[]>([]);
   const [cloudSynced, setCloudSynced] = useState(false);
   const [cloudBusy, setCloudBusy] = useState(false);
 
@@ -2721,6 +2727,7 @@ export default function App() {
         setAppUserProfile(null);
         setProfileChecked(true);
         setManagedUsers([]);
+        setCloudApiKeys([]);
         setTeamStats([]);
         setSignedContracts([]);
         knownCloudFichesRef.current = new Map();
@@ -2781,6 +2788,17 @@ export default function App() {
 
   const isSuperAdmin = accessDecision?.status === 'allowed' && accessDecision.isAdmin;
   const canAccessWorkspace = accessDecision?.status === 'allowed';
+  const currentUserRole: TeamRole = isSuperAdmin
+    ? 'super_admin'
+    : appUserProfile?.role === 'manager'
+      ? 'manager'
+      : 'commercial';
+
+  const extractShortCloudError = (err: unknown): string => {
+    const raw = err instanceof Error ? err.message : String(err || '');
+    const m = raw.match(/(permission-denied|unauthenticated|failed-precondition|unavailable|not-found)/i);
+    return m ? ` (${m[1]})` : '';
+  };
 
   // Empêche tout non-admin d'accéder à l'onglet Utilisateurs & Accès
   useEffect(() => {
@@ -2818,7 +2836,42 @@ export default function App() {
         try {
           handleFirestoreError(err, OperationType.LIST, 'app_users');
         } catch {
-          notify('Impossible de charger la liste des utilisateurs.', 'err');
+          notify(`Impossible de charger la liste des utilisateurs${extractShortCloudError(err)}.`, 'err');
+        }
+      }
+    );
+    return () => unsub();
+  }, [authReady, cloudUser, isSuperAdmin]);
+
+  // Liste temps réel /api_keys réservée exclusivement au Super-Admin (filtrée par updatedBy == adminUid)
+  useEffect(() => {
+    if (!authReady || !cloudUser || !isSuperAdmin) {
+      setCloudApiKeys([]);
+      return;
+    }
+    const unsub = onSnapshot(
+      getAdminApiKeysQuery(cloudUser.uid),
+      (snap) => {
+        const list: CloudApiKeyRecord[] = [];
+        snap.forEach((docSnap) => {
+          const d = docSnap.data();
+          list.push({
+            provider: docSnap.id,
+            label: typeof d.label === 'string' ? d.label : docSnap.id.toUpperCase(),
+            key: typeof d.key === 'string' ? d.key : '',
+            active: typeof d.active === 'boolean' ? d.active : true,
+            updatedBy: typeof d.updatedBy === 'string' ? d.updatedBy : '',
+            updatedAt: d.updatedAt?.toDate ? d.updatedAt.toDate().toISOString() : undefined,
+          });
+        });
+        list.sort((a, b) => a.provider.localeCompare(b.provider));
+        setCloudApiKeys(list);
+      },
+      (err) => {
+        try {
+          handleFirestoreError(err, OperationType.LIST, 'api_keys');
+        } catch {
+          // Non-fatal fallback
         }
       }
     );
@@ -2918,12 +2971,147 @@ export default function App() {
   useEffect(() => {
     if (!authReady || !cloudUser || !canAccessWorkspace) return;
     let cancelled = false;
+    let enableSyncTimer: number | null = null;
     let unsubUser: (() => void) | null = null;
     let unsubFiches: (() => void) | null = null;
     let unsubSkills: (() => void) | null = null;
 
     const uid = cloudUser.uid;
     setCloudBusy(true);
+
+    const applyWorkspaceDoc = (data: Record<string, unknown>) => {
+      const cleanWs = sanitizeWorkspacePayload(uid, {
+        villesAll: Array.isArray(data.villesAll) ? (data.villesAll as string[]) : DEFAULT_VILLES_MEKNES,
+        villesActive: Array.isArray(data.villesActive) ? (data.villesActive as string[]) : DEFAULT_VILLES_MEKNES,
+        modeVille: data.modeVille === 'filter' ? 'filter' : 'default',
+        defaultVille: typeof data.defaultVille === 'string' ? data.defaultVille : 'Meknès',
+        emailSignature: typeof data.emailSignature === 'string' ? data.emailSignature : '',
+        seeded: Boolean(data.seeded),
+      });
+      const nextHash = serializeDocCanonical(cleanWs as unknown as Record<string, unknown>);
+      if (nextHash !== knownCloudWorkspaceHashRef.current) {
+        knownCloudWorkspaceHashRef.current = nextHash;
+        setVillesState({
+          all: cleanWs.villesAll.length > 0 ? cleanWs.villesAll : DEFAULT_VILLES_MEKNES,
+          active: cleanWs.villesActive,
+          mode: cleanWs.modeVille,
+          defaultVille: cleanWs.defaultVille,
+        });
+        setEmailSignature(cleanWs.emailSignature);
+      }
+    };
+
+    const parseFichesSnapshot = (snap: { forEach: (cb: (d: { id: string; data: () => Record<string, unknown> }) => void) => void }) => {
+      const remoteFiches: FicheEntreprise[] = [];
+      const nextKnown = new Map<string, { hash: string; doc: SanitizedFicheDoc }>();
+
+      snap.forEach((docSnap) => {
+        const d = docSnap.data();
+        const clean = sanitizeFichePayload(uid, {
+          id: docSnap.id,
+          numeroFiche: typeof d.numeroFiche === 'string' ? d.numeroFiche : undefined,
+          societe: typeof d.societe === 'string' ? d.societe : '',
+          secteur: typeof d.secteur === 'string' ? d.secteur : 'pme',
+          ville: typeof d.ville === 'string' ? d.ville : '',
+          telephone: typeof d.telephone === 'string' ? d.telephone : '',
+          telephonesSupplementaires: Array.isArray(d.telephonesSupplementaires)
+            ? (d.telephonesSupplementaires as string[])
+            : undefined,
+          email: typeof d.email === 'string' ? d.email : '',
+          emailsSupplementaires: Array.isArray(d.emailsSupplementaires)
+            ? (d.emailsSupplementaires as string[])
+            : undefined,
+          contact: typeof d.contact === 'string' ? d.contact : '',
+          role: typeof d.role === 'string' ? d.role : '',
+          source: typeof d.source === 'string' ? d.source : '',
+          effectif: typeof d.effectif === 'string' ? d.effectif : '',
+          statut: typeof d.statut === 'string' ? d.statut : 'À contacter',
+          siteWeb: typeof d.siteWeb === 'string' ? d.siteWeb : undefined,
+          verifieWeb: typeof d.verifieWeb === 'boolean' ? d.verifieWeb : undefined,
+          pistesEnrichissement: Array.isArray(d.pistesEnrichissement)
+            ? (d.pistesEnrichissement as string[])
+            : undefined,
+          dateAjout: typeof d.dateAjout === 'string' ? d.dateAjout : new Date().toISOString(),
+        });
+        nextKnown.set(clean.id, {
+          hash: serializeDocCanonical(clean as unknown as Record<string, unknown>),
+          doc: clean,
+        });
+        remoteFiches.push({
+          id: clean.id,
+          ...(clean.numeroFiche !== undefined ? { numeroFiche: clean.numeroFiche } : {}),
+          societe: clean.societe,
+          secteur: clean.secteur as SecteurCode,
+          ville: clean.ville,
+          telephone: clean.telephone,
+          ...(clean.telephonesSupplementaires !== undefined
+            ? { telephonesSupplementaires: clean.telephonesSupplementaires }
+            : {}),
+          email: clean.email,
+          ...(clean.emailsSupplementaires !== undefined
+            ? { emailsSupplementaires: clean.emailsSupplementaires }
+            : {}),
+          contact: clean.contact,
+          role: clean.role,
+          source: clean.source,
+          effectif: clean.effectif,
+          statut: clean.statut as StatutCRM,
+          ...(clean.siteWeb !== undefined ? { siteWeb: clean.siteWeb } : {}),
+          ...(clean.verifieWeb !== undefined ? { verifieWeb: clean.verifieWeb } : {}),
+          ...(clean.pistesEnrichissement !== undefined
+            ? { pistesEnrichissement: clean.pistesEnrichissement }
+            : {}),
+          dateAjout: clean.dateAjout,
+        });
+      });
+
+      remoteFiches.sort((a, b) => (b.dateAjout || '').localeCompare(a.dateAjout || ''));
+      return { remoteFiches, nextKnown };
+    };
+
+    const parseSkillsSnapshot = (snap: { forEach: (cb: (d: { id: string; data: () => Record<string, unknown> }) => void) => void }) => {
+      const remoteSkills: EmailSkill[] = [];
+      const nextKnown = new Map<string, { hash: string; doc: SanitizedEmailSkillDoc }>();
+
+      snap.forEach((docSnap) => {
+        const d = docSnap.data();
+        const clean = sanitizeSkillPayload(uid, {
+          id: docSnap.id,
+          nom: typeof d.nom === 'string' ? d.nom : '',
+          description: typeof d.description === 'string' ? d.description : '',
+          role: typeof d.role === 'string' ? d.role : '',
+          regles: typeof d.regles === 'string' ? d.regles : '',
+          ctaStyle: typeof d.ctaStyle === 'string' ? d.ctaStyle : '',
+          isBuiltin: typeof d.isBuiltin === 'boolean' ? d.isBuiltin : undefined,
+        });
+        nextKnown.set(clean.id, {
+          hash: serializeDocCanonical(clean as unknown as Record<string, unknown>),
+          doc: clean,
+        });
+        remoteSkills.push({
+          id: clean.id,
+          nom: clean.nom,
+          description: clean.description,
+          role: clean.role,
+          regles: clean.regles,
+          ctaStyle: clean.ctaStyle,
+          ...(clean.isBuiltin !== undefined ? { isBuiltin: clean.isBuiltin } : {}),
+        });
+      });
+
+      return { remoteSkills, nextKnown };
+    };
+
+    const mapsHaveSameHashes = (
+      prev: Map<string, { hash: string }>,
+      next: Map<string, { hash: string }>
+    ): boolean => {
+      if (prev.size !== next.size) return false;
+      for (const [k, v] of next.entries()) {
+        if (prev.get(k)?.hash !== v.hash) return false;
+      }
+      return true;
+    };
 
     (async () => {
       try {
@@ -2976,53 +3164,38 @@ export default function App() {
             });
           }
           knownCloudSkillsRef.current = skillsMap;
-        }
+        } else {
+          // Hydratation atomique avant d'activer la synchro sortante (évite les faux diffs cache/batch)
+          const { userSnap, fichesSnap, skillsSnap } = await fetchInitialUserCollectionDocs(uid);
+          if (cancelled) return;
 
-        // Gate outbound sync until all 3 initial snapshots have hydrated knownCloud*Ref
-        // (eliminates the race condition that previously triggered batch.set overwriting createdAt on existing docs).
-        let userHydrated = created;
-        let fichesHydrated = created;
-        let skillsHydrated = created;
-        const maybeEnableOutboundSync = () => {
-          if (!cancelled && userHydrated && fichesHydrated && skillsHydrated) {
-            setCloudSynced(true);
-            setCloudBusy(false);
+          if (userSnap.exists()) {
+            applyWorkspaceDoc(userSnap.data() as Record<string, unknown>);
           }
-        };
+
+          const parsedFiches = parseFichesSnapshot(fichesSnap as unknown as { forEach: (cb: (d: { id: string; data: () => Record<string, unknown> }) => void) => void });
+          knownCloudFichesRef.current = parsedFiches.nextKnown;
+          setFiches(parsedFiches.remoteFiches);
+
+          const parsedSkills = parseSkillsSnapshot(skillsSnap as unknown as { forEach: (cb: (d: { id: string; data: () => Record<string, unknown> }) => void) => void });
+          knownCloudSkillsRef.current = parsedSkills.nextKnown;
+          if (parsedSkills.remoteSkills.length > 0) {
+            setEmailSkills(parsedSkills.remoteSkills);
+          }
+        }
 
         unsubUser = onSnapshot(
           doc(db, 'users', uid),
           (snap) => {
             if (snap.exists()) {
-              const data = snap.data();
-              const cleanWs = sanitizeWorkspacePayload(uid, {
-                villesAll: Array.isArray(data.villesAll) ? data.villesAll : DEFAULT_VILLES_MEKNES,
-                villesActive: Array.isArray(data.villesActive) ? data.villesActive : DEFAULT_VILLES_MEKNES,
-                modeVille: data.modeVille === 'filter' ? 'filter' : 'default',
-                defaultVille: typeof data.defaultVille === 'string' ? data.defaultVille : 'Meknès',
-                emailSignature: typeof data.emailSignature === 'string' ? data.emailSignature : '',
-                seeded: Boolean(data.seeded),
-              });
-              const nextHash = serializeDocCanonical(cleanWs as unknown as Record<string, unknown>);
-              if (nextHash !== knownCloudWorkspaceHashRef.current) {
-                knownCloudWorkspaceHashRef.current = nextHash;
-                setVillesState({
-                  all: cleanWs.villesAll.length > 0 ? cleanWs.villesAll : DEFAULT_VILLES_MEKNES,
-                  active: cleanWs.villesActive,
-                  mode: cleanWs.modeVille,
-                  defaultVille: cleanWs.defaultVille,
-                });
-                setEmailSignature(cleanWs.emailSignature);
-              }
+              applyWorkspaceDoc(snap.data() as Record<string, unknown>);
             }
-            userHydrated = true;
-            maybeEnableOutboundSync();
           },
           (err) => {
             try {
               handleFirestoreError(err, OperationType.GET, `users/${uid}`);
             } catch {
-              notify('Erreur de lecture de la configuration Cloud.', 'err');
+              notify(`Erreur de lecture de la configuration Cloud${extractShortCloudError(err)}.`, 'err');
             }
           }
         );
@@ -3030,95 +3203,23 @@ export default function App() {
         unsubFiches = onSnapshot(
           query(getUserFichesCollection(uid), where('ownerId', '==', uid)),
           (snap) => {
-            const remoteFiches: FicheEntreprise[] = [];
-            const nextKnown = new Map<string, { hash: string; doc: SanitizedFicheDoc }>();
-
-            snap.forEach((docSnap) => {
-              const d = docSnap.data();
-              const clean = sanitizeFichePayload(uid, {
-                id: docSnap.id,
-                numeroFiche: typeof d.numeroFiche === 'string' ? d.numeroFiche : undefined,
-                societe: typeof d.societe === 'string' ? d.societe : '',
-                secteur: typeof d.secteur === 'string' ? d.secteur : 'pme',
-                ville: typeof d.ville === 'string' ? d.ville : '',
-                telephone: typeof d.telephone === 'string' ? d.telephone : '',
-                telephonesSupplementaires: Array.isArray(d.telephonesSupplementaires)
-                  ? d.telephonesSupplementaires
-                  : undefined,
-                email: typeof d.email === 'string' ? d.email : '',
-                emailsSupplementaires: Array.isArray(d.emailsSupplementaires)
-                  ? d.emailsSupplementaires
-                  : undefined,
-                contact: typeof d.contact === 'string' ? d.contact : '',
-                role: typeof d.role === 'string' ? d.role : '',
-                source: typeof d.source === 'string' ? d.source : '',
-                effectif: typeof d.effectif === 'string' ? d.effectif : '',
-                statut: typeof d.statut === 'string' ? d.statut : 'À contacter',
-                siteWeb: typeof d.siteWeb === 'string' ? d.siteWeb : undefined,
-                verifieWeb: typeof d.verifieWeb === 'boolean' ? d.verifieWeb : undefined,
-                pistesEnrichissement: Array.isArray(d.pistesEnrichissement) ? d.pistesEnrichissement : undefined,
-                dateAjout: typeof d.dateAjout === 'string' ? d.dateAjout : new Date().toISOString(),
-              });
-              nextKnown.set(clean.id, {
-                hash: serializeDocCanonical(clean as unknown as Record<string, unknown>),
-                doc: clean,
-              });
-              remoteFiches.push({
-                id: clean.id,
-                ...(clean.numeroFiche !== undefined ? { numeroFiche: clean.numeroFiche } : {}),
-                societe: clean.societe,
-                secteur: clean.secteur as SecteurCode,
-                ville: clean.ville,
-                telephone: clean.telephone,
-                ...(clean.telephonesSupplementaires !== undefined
-                  ? { telephonesSupplementaires: clean.telephonesSupplementaires }
-                  : {}),
-                email: clean.email,
-                ...(clean.emailsSupplementaires !== undefined
-                  ? { emailsSupplementaires: clean.emailsSupplementaires }
-                  : {}),
-                contact: clean.contact,
-                role: clean.role,
-                source: clean.source,
-                effectif: clean.effectif,
-                statut: clean.statut as StatutCRM,
-                ...(clean.siteWeb !== undefined ? { siteWeb: clean.siteWeb } : {}),
-                ...(clean.verifieWeb !== undefined ? { verifieWeb: clean.verifieWeb } : {}),
-                ...(clean.pistesEnrichissement !== undefined
-                  ? { pistesEnrichissement: clean.pistesEnrichissement }
-                  : {}),
-                dateAjout: clean.dateAjout,
-              });
-            });
-
-            remoteFiches.sort((a, b) => (b.dateAjout || '').localeCompare(a.dateAjout || ''));
-
-            const prevKnown = knownCloudFichesRef.current;
-            let same = prevKnown.size === nextKnown.size;
-            if (same) {
-              for (const [k, v] of nextKnown.entries()) {
-                if (prevKnown.get(k)?.hash !== v.hash) {
-                  same = false;
-                  break;
-                }
-              }
+            if (snap.metadata.fromCache && snap.empty && knownCloudFichesRef.current.size > 0) {
+              return;
             }
+            const { remoteFiches, nextKnown } = parseFichesSnapshot(
+              snap as unknown as { forEach: (cb: (d: { id: string; data: () => Record<string, unknown> }) => void) => void }
+            );
+            const same = mapsHaveSameHashes(knownCloudFichesRef.current, nextKnown);
             knownCloudFichesRef.current = nextKnown;
-            if (!same || !fichesHydrated) {
-              // Avoid mutating already-signed fiches for non-Super-Admin collaborators (locked in firestore.rules)
-              const hydratedList = isSuperAdmin
-                ? ensureUniqueNumeroFiches(remoteFiches)
-                : remoteFiches;
-              setFiches(hydratedList);
+            if (!same) {
+              setFiches(remoteFiches);
             }
-            fichesHydrated = true;
-            maybeEnableOutboundSync();
           },
           (err) => {
             try {
               handleFirestoreError(err, OperationType.LIST, `users/${uid}/fiches`);
             } catch {
-              notify('Erreur de synchronisation des fiches Cloud.', 'err');
+              notify(`Erreur de synchronisation des fiches Cloud${extractShortCloudError(err)}.`, 'err');
             }
           }
         );
@@ -3126,65 +3227,37 @@ export default function App() {
         unsubSkills = onSnapshot(
           query(getUserSkillsCollection(uid), where('ownerId', '==', uid)),
           (snap) => {
-            const remoteSkills: EmailSkill[] = [];
-            const nextKnown = new Map<string, { hash: string; doc: SanitizedEmailSkillDoc }>();
-
-            snap.forEach((docSnap) => {
-              const d = docSnap.data();
-              const clean = sanitizeSkillPayload(uid, {
-                id: docSnap.id,
-                nom: typeof d.nom === 'string' ? d.nom : '',
-                description: typeof d.description === 'string' ? d.description : '',
-                role: typeof d.role === 'string' ? d.role : '',
-                regles: typeof d.regles === 'string' ? d.regles : '',
-                ctaStyle: typeof d.ctaStyle === 'string' ? d.ctaStyle : '',
-                isBuiltin: typeof d.isBuiltin === 'boolean' ? d.isBuiltin : undefined,
-              });
-              nextKnown.set(clean.id, {
-                hash: serializeDocCanonical(clean as unknown as Record<string, unknown>),
-                doc: clean,
-              });
-              remoteSkills.push({
-                id: clean.id,
-                nom: clean.nom,
-                description: clean.description,
-                role: clean.role,
-                regles: clean.regles,
-                ctaStyle: clean.ctaStyle,
-                ...(clean.isBuiltin !== undefined ? { isBuiltin: clean.isBuiltin } : {}),
-              });
-            });
-
-            const prevKnown = knownCloudSkillsRef.current;
-            let same = prevKnown.size === nextKnown.size;
-            if (same) {
-              for (const [k, v] of nextKnown.entries()) {
-                if (prevKnown.get(k)?.hash !== v.hash) {
-                  same = false;
-                  break;
-                }
-              }
+            if (snap.metadata.fromCache && snap.empty && knownCloudSkillsRef.current.size > 0) {
+              return;
             }
+            const { remoteSkills, nextKnown } = parseSkillsSnapshot(
+              snap as unknown as { forEach: (cb: (d: { id: string; data: () => Record<string, unknown> }) => void) => void }
+            );
+            const same = mapsHaveSameHashes(knownCloudSkillsRef.current, nextKnown);
             knownCloudSkillsRef.current = nextKnown;
-            if ((!same || !skillsHydrated) && remoteSkills.length > 0) {
+            if (!same && remoteSkills.length > 0) {
               setEmailSkills(remoteSkills);
             }
-            skillsHydrated = true;
-            maybeEnableOutboundSync();
           },
           (err) => {
             try {
               handleFirestoreError(err, OperationType.LIST, `users/${uid}/skills`);
             } catch {
-              notify('Erreur de synchronisation des skills Cloud.', 'err');
+              notify(`Erreur de synchronisation des skills Cloud${extractShortCloudError(err)}.`, 'err');
             }
           }
         );
 
-        maybeEnableOutboundSync();
-      } catch {
+        // Laisse React commiter l'état hydraté avant d'activer la synchro sortante
+        enableSyncTimer = window.setTimeout(() => {
+          if (!cancelled) {
+            setCloudSynced(true);
+            setCloudBusy(false);
+          }
+        }, 60);
+      } catch (err) {
         if (!cancelled) {
-          notify('Impossible d’initialiser la synchronisation Cloud Firestore.', 'err');
+          notify(`Impossible d’initialiser la synchronisation Cloud Firestore${extractShortCloudError(err)}.`, 'err');
           setCloudBusy(false);
         }
       }
@@ -3192,12 +3265,13 @@ export default function App() {
 
     return () => {
       cancelled = true;
+      if (enableSyncTimer !== null) window.clearTimeout(enableSyncTimer);
       setCloudSynced(false);
       unsubUser?.();
       unsubFiches?.();
       unsubSkills?.();
     };
-  }, [authReady, cloudUser, canAccessWorkspace, isSuperAdmin]);
+  }, [authReady, cloudUser, canAccessWorkspace]);
 
   // Synchroniser automatiquement toute modification de fiches vers Firestore
   useEffect(() => {
@@ -3220,8 +3294,11 @@ export default function App() {
     }
     knownCloudFichesRef.current = nextKnown;
 
-    syncFichesDiffToFirestore(uid, diff).catch(() => {
-      notify('Échec de sauvegarde Cloud sur certaines fiches (copie locale conservée).', 'err');
+    syncFichesDiffToFirestore(uid, diff).catch((err) => {
+      notify(
+        `Échec de sauvegarde Cloud sur certaines fiches${extractShortCloudError(err)} (copie locale conservée).`,
+        'err'
+      );
     });
   }, [fiches, cloudUser, cloudSynced]);
 
@@ -3246,8 +3323,8 @@ export default function App() {
     }
     knownCloudSkillsRef.current = nextKnown;
 
-    syncSkillsDiffToFirestore(uid, diff).catch(() => {
-      notify('Échec de sauvegarde Cloud des skills Email.', 'err');
+    syncSkillsDiffToFirestore(uid, diff).catch((err) => {
+      notify(`Échec de sauvegarde Cloud des skills Email${extractShortCloudError(err)}.`, 'err');
     });
   }, [emailSkills, cloudUser, cloudSynced]);
 
@@ -3268,8 +3345,8 @@ export default function App() {
 
     const timer = window.setTimeout(() => {
       knownCloudWorkspaceHashRef.current = nextHash;
-      syncWorkspaceToFirestore(uid, payload).catch(() => {
-        notify('Échec de sauvegarde Cloud de la configuration.', 'err');
+      syncWorkspaceToFirestore(uid, payload).catch((err) => {
+        notify(`Échec de sauvegarde Cloud de la configuration${extractShortCloudError(err)}.`, 'err');
       });
     }, 450);
 
@@ -5463,13 +5540,7 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
                     'Connecté'}
               </span>
               {accessDecision?.status === 'allowed' && (
-                <span
-                  className={`hidden sm:inline-block text-[10px] font-bold px-1.5 py-0.5 rounded ${
-                    isSuperAdmin ? 'bg-orange-600 text-white' : 'bg-emerald-200/80 text-emerald-950'
-                  }`}
-                >
-                  {accessDecision.roleLabel}
-                </span>
+                <RoleBadge role={currentUserRole} showShort className="hidden sm:inline-flex" />
               )}
               <button
                 type="button"
@@ -7324,6 +7395,7 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
           <AchievementsPanel
             currentUserUid={cloudUser.uid}
             currentUserName={currentUserDisplayName}
+            currentUserRole={currentUserRole}
             isSuperAdmin={isSuperAdmin}
             myMetrics={myCollaboratorMetrics}
             teamStats={teamStats}
@@ -7341,6 +7413,7 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
             adminEmail={cloudUser.email || ''}
             adminHasPasswordProvider={cloudUser.providerData.some((p) => p.providerId === 'password')}
             users={managedUsers}
+            cloudApiKeys={cloudApiKeys}
             villesOptions={villesState.all}
             onNotify={notify}
           />

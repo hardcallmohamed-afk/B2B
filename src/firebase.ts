@@ -21,6 +21,7 @@ import {
   query,
   where,
   getDoc,
+  getDocs,
   getDocFromServer,
   setDoc,
   updateDoc,
@@ -37,11 +38,14 @@ import {
   sanitizeAppUserPayload,
   sanitizeTeamStatPayload,
   sanitizeSignedContractPayload,
+  sanitizeApiKeyConfigPayload,
+  sanitizeProviderId,
   type FicheLike,
   type EmailSkillLike,
   type WorkspaceLike,
   type TeamStatLike,
   type SignedContractLike,
+  type ApiKeyConfigLike,
   type SanitizedFicheDoc,
   type SanitizedEmailSkillDoc,
   type SanitizedSignedContractDoc,
@@ -212,6 +216,66 @@ export function getSignedContractsQuery(uid: string, isSuperAdmin: boolean) {
     return query(collection(db, 'signed_contracts'), where('orgScope', '==', 'orange_pro_team'));
   }
   return query(collection(db, 'signed_contracts'), where('ownerId', '==', uid));
+}
+
+export interface CloudApiKeyRecord {
+  provider: string;
+  label: string;
+  key: string;
+  active: boolean;
+  updatedBy: string;
+  updatedAt?: string;
+}
+
+export function getAdminApiKeysQuery(adminUid: string) {
+  return query(collection(db, 'api_keys'), where('updatedBy', '==', adminUid));
+}
+
+export async function adminUpsertApiKey(
+  adminUid: string,
+  input: Omit<ApiKeyConfigLike, 'updatedBy'>
+): Promise<CloudApiKeyRecord> {
+  const clean = sanitizeApiKeyConfigPayload({
+    ...input,
+    updatedBy: adminUid,
+  });
+  const path = `api_keys/${clean.provider}`;
+  const ref = doc(db, 'api_keys', clean.provider);
+
+  try {
+    const snap = await getDoc(ref);
+    if (!snap.exists()) {
+      await setDoc(ref, {
+        ...clean,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+    } else {
+      await updateDoc(ref, {
+        label: clean.label,
+        key: clean.key,
+        active: clean.active,
+        updatedBy: clean.updatedBy,
+        updatedAt: serverTimestamp(),
+      });
+    }
+    return {
+      ...clean,
+      updatedAt: new Date().toISOString(),
+    };
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, path);
+  }
+}
+
+export async function adminDeleteApiKey(provider: string): Promise<void> {
+  const cleanProvider = sanitizeProviderId(provider);
+  const path = `api_keys/${cleanProvider}`;
+  try {
+    await deleteDoc(doc(db, 'api_keys', cleanProvider));
+  } catch (error) {
+    handleFirestoreError(error, OperationType.DELETE, path);
+  }
 }
 
 /**
@@ -619,11 +683,63 @@ export async function syncWorkspaceToFirestore(
   }
 }
 
+async function upsertFicheResilient(
+  uid: string,
+  ficheDoc: SanitizedFicheDoc,
+  statusOnly = false
+): Promise<void> {
+  const ref = doc(db, 'users', uid, 'fiches', ficheDoc.id);
+  const snap = await getDoc(ref);
+  if (snap.exists()) {
+    if (statusOnly) {
+      await updateDoc(ref, {
+        statut: ficheDoc.statut,
+        updatedAt: serverTimestamp(),
+      });
+    } else {
+      const mutable = stripImmutableFicheKeys(ficheDoc);
+      await updateDoc(ref, {
+        ...mutable,
+        updatedAt: serverTimestamp(),
+      });
+    }
+  } else {
+    await setDoc(ref, {
+      ...ficheDoc,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    });
+  }
+}
+
+async function upsertSkillResilient(
+  uid: string,
+  skillDoc: SanitizedEmailSkillDoc
+): Promise<void> {
+  const ref = doc(db, 'users', uid, 'skills', skillDoc.id);
+  const snap = await getDoc(ref);
+  if (snap.exists()) {
+    const mutable = stripImmutableSkillKeys(skillDoc);
+    await updateDoc(ref, {
+      ...mutable,
+      updatedAt: serverTimestamp(),
+    });
+  } else {
+    await setDoc(ref, {
+      ...skillDoc,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    });
+  }
+}
+
 export async function syncFichesDiffToFirestore(
   uid: string,
   diff: SyncDiff<SanitizedFicheDoc>
 ): Promise<void> {
-  const tasks: Array<() => void> = [];
+  const totalOps = diff.toCreate.length + diff.toUpdate.length + diff.toDelete.length;
+  if (totalOps === 0) return;
+
   const batches: ReturnType<typeof writeBatch>[] = [];
   let currentBatch = writeBatch(db);
   let count = 0;
@@ -636,7 +752,6 @@ export async function syncFichesDiffToFirestore(
     }
     fn(currentBatch);
     count++;
-    tasks.push(() => {});
   };
 
   for (const created of diff.toCreate) {
@@ -679,13 +794,37 @@ export async function syncFichesDiffToFirestore(
     batches.push(currentBatch);
   }
 
-  if (tasks.length === 0) return;
-
-  for (const batch of batches) {
-    try {
+  try {
+    for (const batch of batches) {
       await batch.commit();
-    } catch (error) {
-      handleFirestoreError(error, OperationType.WRITE, `users/${uid}/fiches`);
+    }
+    return;
+  } catch {
+    // Fallback: resilient per-document upsert so one existing/stale/locked doc never aborts the whole sync
+    let firstError: unknown = null;
+    for (const created of diff.toCreate) {
+      try {
+        await upsertFicheResilient(uid, created, false);
+      } catch (err) {
+        if (!firstError) firstError = err;
+      }
+    }
+    for (const upd of diff.toUpdate) {
+      try {
+        await upsertFicheResilient(uid, upd.next, upd.statusOnly);
+      } catch (err) {
+        if (!firstError) firstError = err;
+      }
+    }
+    for (const deletedId of diff.toDelete) {
+      try {
+        await deleteDoc(doc(db, 'users', uid, 'fiches', deletedId));
+      } catch (err) {
+        if (!firstError) firstError = err;
+      }
+    }
+    if (firstError) {
+      handleFirestoreError(firstError, OperationType.WRITE, `users/${uid}/fiches`);
     }
   }
 }
@@ -694,6 +833,9 @@ export async function syncSkillsDiffToFirestore(
   uid: string,
   diff: SyncDiff<SanitizedEmailSkillDoc>
 ): Promise<void> {
+  const totalOps = diff.toCreate.length + diff.toUpdate.length + diff.toDelete.length;
+  if (totalOps === 0) return;
+
   const batches: ReturnType<typeof writeBatch>[] = [];
   let currentBatch = writeBatch(db);
   let count = 0;
@@ -739,13 +881,52 @@ export async function syncSkillsDiffToFirestore(
     batches.push(currentBatch);
   }
 
-  for (const batch of batches) {
-    try {
+  try {
+    for (const batch of batches) {
       await batch.commit();
-    } catch (error) {
-      handleFirestoreError(error, OperationType.WRITE, `users/${uid}/skills`);
+    }
+    return;
+  } catch {
+    // Fallback: resilient per-document upsert (prevents existing doc / createdAt immutability collisions)
+    let firstError: unknown = null;
+    for (const created of diff.toCreate) {
+      try {
+        await upsertSkillResilient(uid, created);
+      } catch (err) {
+        if (!firstError) firstError = err;
+      }
+    }
+    for (const upd of diff.toUpdate) {
+      try {
+        await upsertSkillResilient(uid, upd.next);
+      } catch (err) {
+        if (!firstError) firstError = err;
+      }
+    }
+    for (const deletedId of diff.toDelete) {
+      try {
+        await deleteDoc(doc(db, 'users', uid, 'skills', deletedId));
+      } catch (err) {
+        if (!firstError) firstError = err;
+      }
+    }
+    if (firstError) {
+      handleFirestoreError(firstError, OperationType.WRITE, `users/${uid}/skills`);
     }
   }
+}
+
+export async function fetchInitialUserCollectionDocs(uid: string): Promise<{
+  userSnap: Awaited<ReturnType<typeof getDoc>>;
+  fichesSnap: Awaited<ReturnType<typeof getDocs>>;
+  skillsSnap: Awaited<ReturnType<typeof getDocs>>;
+}> {
+  const [userSnap, fichesSnap, skillsSnap] = await Promise.all([
+    getDoc(doc(db, 'users', uid)),
+    getDocs(query(collection(db, 'users', uid, 'fiches'), where('ownerId', '==', uid))),
+    getDocs(query(collection(db, 'users', uid, 'skills'), where('ownerId', '==', uid))),
+  ]);
+  return { userSnap, fichesSnap, skillsSnap };
 }
 
 export function getUserFichesCollection(uid: string) {

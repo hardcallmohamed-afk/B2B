@@ -414,6 +414,47 @@ export function sanitizeSignedContractPayload(
   };
 }
 
+export interface ApiKeyConfigLike {
+  provider: string;
+  key: string;
+  label?: string;
+  active?: boolean;
+  updatedBy: string;
+}
+
+export interface SanitizedApiKeyConfigDoc {
+  provider: string;
+  key: string;
+  label: string;
+  active: boolean;
+  updatedBy: string;
+}
+
+export function sanitizeProviderId(raw: unknown): string {
+  const base = typeof raw === 'string' ? raw.trim().toLowerCase() : '';
+  const cleaned = base
+    .replace(/[^a-z0-9_-]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .slice(0, 64);
+  return cleaned.length >= 1 ? cleaned : 'custom';
+}
+
+export function sanitizeApiKeyConfigPayload(input: ApiKeyConfigLike): SanitizedApiKeyConfigDoc {
+  const provider = sanitizeProviderId(input.provider);
+  const cleanKey = clampString((input.key || '').trim(), 512);
+  const rawLabel = clampString((input.label || '').trim(), 120);
+  const label = rawLabel.length >= 1 ? rawLabel : provider.toUpperCase();
+  const updatedBy = sanitizeDocId(input.updatedBy, 'admin');
+
+  return {
+    provider,
+    key: cleanKey,
+    label,
+    active: input.active !== false,
+    updatedBy,
+  };
+}
+
 export function serializeDocCanonical(doc: Record<string, unknown>): string {
   const keys = Object.keys(doc).sort();
   const normalized: Record<string, unknown> = {};

@@ -219,3 +219,24 @@ test('sanitizeSignedContractPayload strips invalid enums and enforces numeric bo
   assert.equal('email' in out, false);
 });
 
+test('sanitizeProviderId & sanitizeApiKeyConfigPayload normalize provider IDs and clamp API key fields', async () => {
+  const { sanitizeProviderId, sanitizeApiKeyConfigPayload } = await import('./firestoreSanitize');
+  assert.equal(sanitizeProviderId(' Groq / API! '), 'groq_api');
+  assert.equal(sanitizeProviderId('   '), 'custom');
+
+  const out = sanitizeApiKeyConfigPayload({
+    provider: 'Groq',
+    label: '  Groq Production Key  ',
+    key: '  gsk_live_test_1234567890  ',
+    active: true,
+    updatedBy: 'admin_uid_1',
+  });
+
+  assert.equal(out.provider, 'groq');
+  assert.equal(out.label, 'Groq Production Key');
+  assert.equal(out.key, 'gsk_live_test_1234567890');
+  assert.equal(out.active, true);
+  assert.equal(out.updatedBy, 'admin_uid_1');
+});
+
+

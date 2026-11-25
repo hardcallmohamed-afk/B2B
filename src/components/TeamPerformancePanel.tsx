@@ -25,6 +25,7 @@ import {
   type SignedContractRecord,
   type TeamStatRecord,
 } from '../utils/gamification';
+import { RoleBadge } from './RoleBadge';
 
 interface TeamPerformancePanelProps {
   currentUserUid: string;
@@ -389,7 +390,7 @@ export const TeamPerformancePanel: React.FC<TeamPerformancePanelProps> = ({
                         </span>
                       </td>
                       <td className="px-4 py-3">
-                        <div className="flex items-center gap-2">
+                        <div className="flex items-center gap-1.5 flex-wrap">
                           <span className="font-bold text-stone-900">{row.displayName}</span>
                           {isMe && (
                             <span className="rounded-md bg-orange-100 px-1.5 py-0.5 text-[10px] font-bold text-orange-800">
@@ -397,13 +398,9 @@ export const TeamPerformancePanel: React.FC<TeamPerformancePanelProps> = ({
                             </span>
                           )}
                         </div>
-                        <div className="text-[11px] text-stone-500">
-                          {row.role === 'super_admin'
-                            ? 'Super-Admin'
-                            : row.role === 'manager'
-                              ? 'Manager'
-                              : 'Commercial'}{' '}
-                          · {row.zone || 'Meknès'}
+                        <div className="mt-1 flex items-center gap-1.5 flex-wrap">
+                          <RoleBadge role={row.role} showShort />
+                          <span className="text-[11px] text-stone-500">· {row.zone || 'Meknès'}</span>
                         </div>
                       </td>
                       <td className="px-4 py-3 text-right text-sm font-extrabold text-stone-900 tabular-nums">
