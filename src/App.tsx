@@ -6656,8 +6656,8 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
                           )}
                         </div>
                         <div className="min-w-0 flex-1">
-                          <div className="flex flex-wrap items-center gap-1.5">
-                            <span className="text-xs font-extrabold text-stone-900 truncate max-w-[130px]">
+                          <div className="flex items-center gap-1.5 min-w-0">
+                            <span className="text-xs font-extrabold text-stone-900 truncate min-w-0">
                               {currentUserDisplayName}
                             </span>
                             <RoleBadge role={currentUserRole} showShort />

@@ -408,8 +408,8 @@ export const CrmSidebar: React.FC<CrmSidebarProps> = ({
                   )}
                 </div>
                 <div className="min-w-0 flex-1">
-                  <div className="flex flex-wrap items-center gap-1.5">
-                    <span className="text-xs font-bold text-stone-100 truncate max-w-[105px] group-hover:text-orange-300 transition-colors">
+                  <div className="flex items-center gap-1.5 min-w-0">
+                    <span className="text-xs font-bold text-stone-100 truncate min-w-0 group-hover:text-orange-300 transition-colors">
                       {user.displayName}
                     </span>
                     <RoleBadge role={user.role} showShort />

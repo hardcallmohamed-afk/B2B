@@ -146,3 +146,13 @@ test('buildTeamMonthlyEvolution filters cleanly between global team and single c
 
   assert.deepEqual(buildMonthlyHistoryStrings(contracts), ['2026-11:2:5500']);
 });
+
+test('ROLE_BADGE_META defines distinct Admin, Commercial, and team role labels and visual classes', async () => {
+  const { ROLE_BADGE_META, TEAM_ROLE_ORDER } = await import('./gamification');
+  assert.equal(ROLE_BADGE_META.super_admin.shortLabel, 'Admin');
+  assert.equal(ROLE_BADGE_META.commercial.shortLabel, 'Commercial');
+  const shortLabels = new Set(TEAM_ROLE_ORDER.map((r) => ROLE_BADGE_META[r].shortLabel));
+  const classes = new Set(TEAM_ROLE_ORDER.map((r) => ROLE_BADGE_META[r].className));
+  assert.equal(shortLabels.size, TEAM_ROLE_ORDER.length);
+  assert.equal(classes.size, TEAM_ROLE_ORDER.length);
+});
