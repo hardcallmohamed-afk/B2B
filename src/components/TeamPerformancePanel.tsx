@@ -1,0 +1,646 @@
+import React, { useMemo, useState } from 'react';
+import {
+  Award,
+  CheckCircle2,
+  Crown,
+  Filter,
+  Lock,
+  Medal,
+  Package,
+  TrendingUp,
+  Users,
+  Wallet,
+  Sparkles,
+  Pencil,
+  Check,
+  X,
+} from 'lucide-react';
+import {
+  ADMIN_DISTINCTION_BADGES,
+  buildTeamLeaderboard,
+  buildTeamMonthlyEvolution,
+  formatMad,
+  type OrangeProTier,
+  type PayoutStatus,
+  type SignedContractRecord,
+  type TeamStatRecord,
+} from '../utils/gamification';
+
+interface TeamPerformancePanelProps {
+  currentUserUid: string;
+  isSuperAdmin: boolean;
+  teamStats: TeamStatRecord[];
+  signedContracts: SignedContractRecord[];
+  onAdminUpdateContract?: (
+    contractId: string,
+    updates: {
+      produitOrangePro: string;
+      tier: OrangeProTier;
+      payoutMad: number;
+      payoutStatus: PayoutStatus;
+    }
+  ) => Promise<void>;
+  onJumpToBadges?: (targetUid: string) => void;
+}
+
+const PAYOUT_STATUS_STYLES: Record<PayoutStatus, string> = {
+  'En attente': 'border-amber-200 bg-amber-50 text-amber-800',
+  Validé: 'border-sky-200 bg-sky-50 text-sky-800',
+  Versé: 'border-emerald-200 bg-emerald-50 text-emerald-800',
+};
+
+export const TeamPerformancePanel: React.FC<TeamPerformancePanelProps> = ({
+  currentUserUid,
+  isSuperAdmin,
+  teamStats,
+  signedContracts,
+  onAdminUpdateContract,
+  onJumpToBadges,
+}) => {
+  const [selectedUid, setSelectedUid] = useState<string>('all');
+  const [editingContractId, setEditingContractId] = useState<string | null>(null);
+  const [editPayout, setEditPayout] = useState<number>(0);
+  const [editStatus, setEditStatus] = useState<PayoutStatus>('En attente');
+  const [savingContractId, setSavingContractId] = useState<string | null>(null);
+
+  const leaderboard = useMemo(
+    () => buildTeamLeaderboard(teamStats, signedContracts),
+    [teamStats, signedContracts]
+  );
+
+  const selectedMember = useMemo(
+    () => (selectedUid === 'all' ? null : leaderboard.find((m) => m.uid === selectedUid) || null),
+    [leaderboard, selectedUid]
+  );
+
+  const monthlyEvolution = useMemo(
+    () => buildTeamMonthlyEvolution(teamStats, signedContracts, selectedUid),
+    [teamStats, signedContracts, selectedUid]
+  );
+
+  const maxMonthContracts = useMemo(
+    () => Math.max(1, ...monthlyEvolution.map((m) => m.contracts)),
+    [monthlyEvolution]
+  );
+
+  const maxMonthPayout = useMemo(
+    () => Math.max(1, ...monthlyEvolution.map((m) => m.payoutMad)),
+    [monthlyEvolution]
+  );
+
+  // Scoped KPIs (Global Team vs Selected Collaborator)
+  const kpis = useMemo(() => {
+    if (selectedMember) {
+      return {
+        contracts: selectedMember.contractsCount,
+        payoutMad: selectedMember.payoutMad,
+        qualified: selectedMember.qualifiedCount,
+        xp: selectedMember.xp,
+        badges: selectedMember.badgesCount,
+        conversionPct: selectedMember.conversionPct,
+      };
+    }
+    const contracts = leaderboard.reduce((s, r) => s + r.contractsCount, 0);
+    const payoutMad = leaderboard.reduce((s, r) => s + r.payoutMad, 0);
+    const qualified = leaderboard.reduce((s, r) => s + r.qualifiedCount, 0);
+    const prospects = leaderboard.reduce((s, r) => s + r.prospectsCount, 0);
+    const xp = leaderboard.reduce((s, r) => s + r.xp, 0);
+    const badges = leaderboard.reduce((s, r) => s + r.badgesCount, 0);
+    const conversionPct = Math.min(
+      100,
+      Math.round((contracts / Math.max(1, prospects + contracts)) * 100)
+    );
+    return { contracts, payoutMad, qualified, xp, badges, conversionPct };
+  }, [leaderboard, selectedMember]);
+
+  // Signed Contracts Ledger:
+  // - Super-Admin sees all (filtered by selectedUid if chosen)
+  // - Collaborator sees ONLY their own signed contracts (without client phone/email PII)
+  const visibleContracts = useMemo(() => {
+    const base = isSuperAdmin
+      ? selectedUid === 'all'
+        ? signedContracts
+        : signedContracts.filter((c) => c.ownerId === selectedUid)
+      : signedContracts.filter((c) => c.ownerId === currentUserUid);
+    return [...base].sort((a, b) => (b.signedAt || '').localeCompare(a.signedAt || ''));
+  }, [signedContracts, isSuperAdmin, selectedUid, currentUserUid]);
+
+  const payoutBreakdown = useMemo(() => {
+    let enAttente = 0;
+    let valide = 0;
+    let verse = 0;
+    for (const c of visibleContracts) {
+      if (c.payoutStatus === 'Versé') verse += c.payoutMad;
+      else if (c.payoutStatus === 'Validé') valide += c.payoutMad;
+      else enAttente += c.payoutMad;
+    }
+    return { enAttente, valide, verse, total: enAttente + valide + verse };
+  }, [visibleContracts]);
+
+  const badgeTitleById = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const b of ADMIN_DISTINCTION_BADGES) m.set(b.id, b.title);
+    return m;
+  }, []);
+
+  const startEditContract = (c: SignedContractRecord) => {
+    setEditingContractId(c.id);
+    setEditPayout(c.payoutMad);
+    setEditStatus(c.payoutStatus);
+  };
+
+  const saveEditContract = async (c: SignedContractRecord) => {
+    if (!onAdminUpdateContract) return;
+    setSavingContractId(c.id);
+    try {
+      await onAdminUpdateContract(c.id, {
+        produitOrangePro: c.produitOrangePro,
+        tier: c.tier,
+        payoutMad: Math.max(0, Math.round(Number(editPayout) || 0)),
+        payoutStatus: editStatus,
+      });
+      setEditingContractId(null);
+    } finally {
+      setSavingContractId(null);
+    }
+  };
+
+  return (
+    <div className="space-y-5">
+      {/* Header & Collaborator Scope Filter */}
+      <div className="flex flex-col gap-3 rounded-2xl border border-stone-200 bg-white p-4 shadow-xs sm:flex-row sm:items-center sm:justify-between">
+        <div>
+          <div className="flex items-center gap-2">
+            <Users className="h-5 w-5 text-orange-600" />
+            <h2 className="text-base font-bold text-stone-900">
+              Classement Équipe, Évolution &amp; Payouts
+            </h2>
+          </div>
+          <p className="mt-0.5 text-xs text-stone-500">
+            {selectedMember
+              ? `Résultats individuels de ${selectedMember.displayName} (${selectedMember.zone || 'Meknès'})`
+              : `Vue globale de toute l’équipe commerciale (${leaderboard.length} membre${leaderboard.length > 1 ? 's' : ''})`}
+          </p>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-2">
+          <div className="flex items-center gap-1.5 rounded-xl border border-stone-300 bg-stone-50 px-3 py-2">
+            <Filter className="h-3.5 w-3.5 text-stone-500" />
+            <select
+              aria-label="Filtrer par collaborateur"
+              value={selectedUid}
+              onChange={(e) => setSelectedUid(e.target.value)}
+              className="bg-transparent text-xs font-semibold text-stone-800 focus:outline-none"
+            >
+              <option value="all">Vue Globale Équipe (Tous)</option>
+              {leaderboard.map((m) => (
+                <option key={m.uid} value={m.uid}>
+                  #{m.rank} {m.displayName} ({m.contractsCount} contrats)
+                </option>
+              ))}
+            </select>
+          </div>
+          {selectedUid !== 'all' && (
+            <button
+              type="button"
+              onClick={() => setSelectedUid('all')}
+              className="rounded-xl border border-orange-200 bg-orange-50 px-3 py-2 text-xs font-semibold text-orange-700 hover:bg-orange-100"
+            >
+              Retour Vue Globale
+            </button>
+          )}
+        </div>
+      </div>
+
+      {/* 4 Executive KPI Cards */}
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
+        <div className="rounded-2xl border border-stone-200 bg-white p-4 shadow-xs">
+          <div className="flex items-center justify-between text-xs font-semibold text-stone-500">
+            <span>Contrats Signés</span>
+            <CheckCircle2 className="h-4 w-4 text-emerald-600" />
+          </div>
+          <div className="mt-2 text-2xl font-extrabold text-stone-900 tabular-nums">
+            {kpis.contracts}
+          </div>
+          <div className="mt-1 text-[11px] text-stone-500">
+            Taux de conversion : <strong className="text-emerald-700">{kpis.conversionPct}%</strong>
+          </div>
+        </div>
+
+        <div className="rounded-2xl border border-emerald-200 bg-gradient-to-br from-emerald-50/70 to-white p-4 shadow-xs">
+          <div className="flex items-center justify-between text-xs font-semibold text-emerald-800">
+            <span>Payout Commissions</span>
+            <Wallet className="h-4 w-4 text-emerald-600" />
+          </div>
+          <div className="mt-2 text-2xl font-extrabold text-emerald-900 tabular-nums">
+            {formatMad(kpis.payoutMad)}
+          </div>
+          <div className="mt-1 flex flex-wrap gap-x-2 text-[11px] text-stone-600">
+            <span>Versé : {formatMad(payoutBreakdown.verse)}</span>
+            <span>·</span>
+            <span>En attente : {formatMad(payoutBreakdown.enAttente)}</span>
+          </div>
+        </div>
+
+        <div className="rounded-2xl border border-stone-200 bg-white p-4 shadow-xs">
+          <div className="flex items-center justify-between text-xs font-semibold text-stone-500">
+            <span>Pipeline Qualifié</span>
+            <TrendingUp className="h-4 w-4 text-orange-600" />
+          </div>
+          <div className="mt-2 text-2xl font-extrabold text-stone-900 tabular-nums">
+            {kpis.qualified}
+          </div>
+          <div className="mt-1 text-[11px] text-stone-500">
+            RDV pris, Devis envoyés &amp; Signés
+          </div>
+        </div>
+
+        <div className="rounded-2xl border border-stone-200 bg-white p-4 shadow-xs">
+          <div className="flex items-center justify-between text-xs font-semibold text-stone-500">
+            <span>XP &amp; Succès Débloqués</span>
+            <Sparkles className="h-4 w-4 text-amber-500" />
+          </div>
+          <div className="mt-2 text-2xl font-extrabold text-stone-900 tabular-nums">
+            {kpis.xp.toLocaleString('fr-FR')} <span className="text-sm font-semibold text-stone-500">XP</span>
+          </div>
+          <div className="mt-1 text-[11px] text-stone-500">
+            {kpis.badges} badge{kpis.badges > 1 ? 's' : ''} débloqué{kpis.badges > 1 ? 's' : ''}
+          </div>
+        </div>
+      </div>
+
+      {/* 6-Month Sales & Payout Evolution Chart */}
+      <div className="rounded-2xl border border-stone-200 bg-white p-5 shadow-xs">
+        <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <h3 className="text-sm font-bold text-stone-900">
+              Évolution des ventes &amp; payouts sur 6 mois
+            </h3>
+            <p className="text-xs text-stone-500">
+              {selectedMember
+                ? `Courbe mensuelle de ${selectedMember.displayName}`
+                : 'Progression consolidée de toute l’équipe Orange Pro'}
+            </p>
+          </div>
+          <div className="flex items-center gap-4 text-[11px] font-semibold text-stone-600">
+            <span className="inline-flex items-center gap-1.5">
+              <span className="h-2.5 w-2.5 rounded-xs bg-orange-500" />
+              Contrats signés
+            </span>
+            <span className="inline-flex items-center gap-1.5">
+              <span className="h-2.5 w-2.5 rounded-xs bg-emerald-500" />
+              Payout (MAD)
+            </span>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-6 gap-2 sm:gap-4">
+          {monthlyEvolution.map((pt) => {
+            const cHeight = Math.max(6, Math.round((pt.contracts / maxMonthContracts) * 100));
+            const pHeight = Math.max(6, Math.round((pt.payoutMad / maxMonthPayout) * 100));
+            return (
+              <div key={pt.ym} className="flex flex-col items-center">
+                <div className="mb-1 text-[10px] font-bold text-stone-700 tabular-nums">
+                  {pt.contracts > 0 ? `${pt.contracts} ctr` : '0'}
+                </div>
+                <div className="flex h-32 w-full items-end justify-center gap-1.5 rounded-xl bg-stone-50 px-2 pb-2 pt-3">
+                  <div
+                    className="w-3.5 rounded-t-md bg-orange-500 transition-all sm:w-5"
+                    style={{ height: `${pt.contracts === 0 ? 4 : cHeight}%` }}
+                    title={`${pt.label} : ${pt.contracts} contrat(s)`}
+                  />
+                  <div
+                    className="w-3.5 rounded-t-md bg-emerald-500 transition-all sm:w-5"
+                    style={{ height: `${pt.payoutMad === 0 ? 4 : pHeight}%` }}
+                    title={`${pt.label} : ${formatMad(pt.payoutMad)}`}
+                  />
+                </div>
+                <div className="mt-1.5 text-[11px] font-semibold text-stone-700">{pt.label}</div>
+                <div className="text-[10px] font-medium text-emerald-700 tabular-nums">
+                  {pt.payoutMad > 0 ? `${pt.payoutMad.toLocaleString('fr-FR')} DH` : '—'}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Team Leaderboard Table */}
+      <div className="overflow-hidden rounded-2xl border border-stone-200 bg-white shadow-xs">
+        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-stone-200 px-5 py-3.5">
+          <div className="flex items-center gap-2">
+            <Crown className="h-4 w-4 text-amber-500" />
+            <h3 className="text-sm font-bold text-stone-900">Classement Commercial de l’Équipe</h3>
+          </div>
+          <span className="text-xs text-stone-500">
+            Cliquez sur un collaborateur pour filtrer son évolution et ses contrats
+          </span>
+        </div>
+
+        <div className="overflow-x-auto">
+          <table className="w-full min-w-[740px] border-collapse text-left text-xs">
+            <thead>
+              <tr className="border-b border-stone-200 bg-stone-50 text-[11px] font-semibold uppercase tracking-wide text-stone-500">
+                <th className="px-4 py-3">Rang</th>
+                <th className="px-4 py-3">Collaborateur</th>
+                <th className="px-4 py-3 text-right">Contrats</th>
+                <th className="px-4 py-3 text-right">Payout Total</th>
+                <th className="px-4 py-3 text-right">Qualifiés</th>
+                <th className="px-4 py-3 text-right">Conversion</th>
+                <th className="px-4 py-3 text-right">XP &amp; Badges</th>
+                <th className="px-4 py-3">Distinctions Admin</th>
+                <th className="px-4 py-3 text-right">Actions</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-stone-100">
+              {leaderboard.length === 0 ? (
+                <tr>
+                  <td colSpan={9} className="px-4 py-8 text-center text-stone-500">
+                    Les statistiques d’équipe se synchronisent dès la première activité.
+                  </td>
+                </tr>
+              ) : (
+                leaderboard.map((row) => {
+                  const isMe = row.uid === currentUserUid;
+                  const isSelected = selectedUid === row.uid;
+                  const rankBadge =
+                    row.rank === 1
+                      ? 'bg-amber-100 text-amber-800 border-amber-300'
+                      : row.rank === 2
+                        ? 'bg-stone-200 text-stone-800 border-stone-300'
+                        : row.rank === 3
+                          ? 'bg-orange-100 text-orange-800 border-orange-300'
+                          : 'bg-stone-50 text-stone-600 border-stone-200';
+                  return (
+                    <tr
+                      key={row.uid}
+                      onClick={() => setSelectedUid(isSelected ? 'all' : row.uid)}
+                      className={`cursor-pointer transition-colors ${
+                        isSelected
+                          ? 'bg-orange-50/70'
+                          : 'hover:bg-stone-50/80'
+                      }`}
+                    >
+                      <td className="px-4 py-3">
+                        <span
+                          className={`inline-flex h-7 w-7 items-center justify-center rounded-lg border text-xs font-extrabold tabular-nums ${rankBadge}`}
+                        >
+                          #{row.rank}
+                        </span>
+                      </td>
+                      <td className="px-4 py-3">
+                        <div className="flex items-center gap-2">
+                          <span className="font-bold text-stone-900">{row.displayName}</span>
+                          {isMe && (
+                            <span className="rounded-md bg-orange-100 px-1.5 py-0.5 text-[10px] font-bold text-orange-800">
+                              Vous
+                            </span>
+                          )}
+                        </div>
+                        <div className="text-[11px] text-stone-500">
+                          {row.role === 'super_admin'
+                            ? 'Super-Admin'
+                            : row.role === 'manager'
+                              ? 'Manager'
+                              : 'Commercial'}{' '}
+                          · {row.zone || 'Meknès'}
+                        </div>
+                      </td>
+                      <td className="px-4 py-3 text-right text-sm font-extrabold text-stone-900 tabular-nums">
+                        {row.contractsCount}
+                      </td>
+                      <td className="px-4 py-3 text-right font-bold text-emerald-700 tabular-nums">
+                        {formatMad(row.payoutMad)}
+                      </td>
+                      <td className="px-4 py-3 text-right font-semibold text-stone-700 tabular-nums">
+                        {row.qualifiedCount}
+                      </td>
+                      <td className="px-4 py-3 text-right font-semibold text-stone-700 tabular-nums">
+                        {row.conversionPct}%
+                      </td>
+                      <td className="px-4 py-3 text-right tabular-nums">
+                        <div className="font-bold text-stone-900">
+                          {row.xp.toLocaleString('fr-FR')} XP
+                        </div>
+                        <div className="text-[10px] text-stone-500">
+                          {row.badgesCount} succès
+                        </div>
+                      </td>
+                      <td className="px-4 py-3">
+                        {row.manualBadges.length === 0 ? (
+                          <span className="text-[11px] text-stone-400">—</span>
+                        ) : (
+                          <div className="flex flex-wrap gap-1">
+                            {row.manualBadges.slice(0, 2).map((bid) => (
+                              <span
+                                key={bid}
+                                className="inline-flex items-center gap-1 rounded-md border border-violet-200 bg-violet-50 px-1.5 py-0.5 text-[10px] font-semibold text-violet-800"
+                              >
+                                <Medal className="h-3 w-3" />
+                                {badgeTitleById.get(bid) || bid}
+                              </span>
+                            ))}
+                            {row.manualBadges.length > 2 && (
+                              <span className="text-[10px] font-semibold text-violet-700">
+                                +{row.manualBadges.length - 2}
+                              </span>
+                            )}
+                          </div>
+                        )}
+                      </td>
+                      <td
+                        className="px-4 py-3 text-right"
+                        onClick={(e) => e.stopPropagation()}
+                      >
+                        <div className="inline-flex items-center gap-1.5">
+                          <button
+                            type="button"
+                            onClick={() => setSelectedUid(isSelected ? 'all' : row.uid)}
+                            className={`rounded-lg border px-2.5 py-1 text-[11px] font-semibold ${
+                              isSelected
+                                ? 'border-orange-500 bg-orange-600 text-white'
+                                : 'border-stone-300 bg-white text-stone-700 hover:bg-stone-100'
+                            }`}
+                          >
+                            {isSelected ? 'Filtré' : 'Filtrer'}
+                          </button>
+                          {isSuperAdmin && onJumpToBadges && (
+                            <button
+                              type="button"
+                              onClick={() => onJumpToBadges(row.uid)}
+                              className="inline-flex items-center gap-1 rounded-lg border border-violet-200 bg-violet-50 px-2 py-1 text-[11px] font-semibold text-violet-800 hover:bg-violet-100"
+                              title="Attribuer des badges à ce collaborateur"
+                            >
+                              <Award className="h-3 w-3" />
+                              Badges
+                            </button>
+                          )}
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {/* Signed Contracts & Payouts Ledger (Post-Signing Privacy Lock for Collaborators) */}
+      <div className="overflow-hidden rounded-2xl border border-stone-200 bg-white shadow-xs">
+        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-stone-200 px-5 py-3.5">
+          <div>
+            <div className="flex items-center gap-2">
+              <Package className="h-4 w-4 text-orange-600" />
+              <h3 className="text-sm font-bold text-stone-900">
+                {isSuperAdmin
+                  ? `Contrats Signés & Gestion des Payouts (${visibleContracts.length})`
+                  : `Mes Contrats Signés & Payouts (${visibleContracts.length})`}
+              </h3>
+            </div>
+            <p className="mt-0.5 text-xs text-stone-500">
+              {isSuperAdmin
+                ? 'Ajustez les commissions MAD et validez le versement de chaque contrat signé.'
+                : 'Après signature, les fiches clients sont verrouillées. Vous suivez ici votre nombre de contrats, le produit Orange Pro et votre payout.'}
+            </p>
+          </div>
+          {!isSuperAdmin && (
+            <span className="inline-flex items-center gap-1.5 rounded-lg border border-stone-200 bg-stone-50 px-2.5 py-1 text-[11px] font-semibold text-stone-700">
+              <Lock className="h-3.5 w-3.5 text-amber-600" />
+              Fiches clients verrouillées après signature
+            </span>
+          )}
+        </div>
+
+        <div className="overflow-x-auto">
+          <table className="w-full min-w-[740px] border-collapse text-left text-xs">
+            <thead>
+              <tr className="border-b border-stone-200 bg-stone-50 text-[11px] font-semibold uppercase tracking-wide text-stone-500">
+                <th className="px-4 py-3">Date</th>
+                {isSuperAdmin && <th className="px-4 py-3">Collaborateur</th>}
+                <th className="px-4 py-3">Dossier / Entreprise</th>
+                <th className="px-4 py-3">Produit Orange Pro</th>
+                <th className="px-4 py-3">Gamme</th>
+                <th className="px-4 py-3 text-right">Payout (MAD)</th>
+                <th className="px-4 py-3">Statut Paiement</th>
+                {isSuperAdmin && <th className="px-4 py-3 text-right">Admin</th>}
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-stone-100">
+              {visibleContracts.length === 0 ? (
+                <tr>
+                  <td colSpan={isSuperAdmin ? 8 : 6} className="px-4 py-8 text-center text-stone-500">
+                    Aucun contrat signé enregistré pour cette sélection. Passez une fiche en statut{' '}
+                    <strong>« Signé Orange Pro »</strong> pour calculer automatiquement le payout.
+                  </td>
+                </tr>
+              ) : (
+                visibleContracts.map((c) => {
+                  const isEditing = editingContractId === c.id;
+                  const dateLabel = c.signedAt
+                    ? new Date(c.signedAt).toLocaleDateString('fr-FR')
+                    : '—';
+                  return (
+                    <tr key={c.id} className="hover:bg-stone-50/70">
+                      <td className="px-4 py-3 font-medium text-stone-600 tabular-nums">
+                        {dateLabel}
+                      </td>
+                      {isSuperAdmin && (
+                        <td className="px-4 py-3 font-semibold text-stone-800">{c.ownerName}</td>
+                      )}
+                      <td className="px-4 py-3">
+                        <div className="flex items-center gap-1.5 font-bold text-stone-900">
+                          {!isSuperAdmin && <Lock className="h-3 w-3 text-stone-400" />}
+                          <span>{c.societe}</span>
+                        </div>
+                        <div className="text-[11px] text-stone-500">
+                          {c.numeroFiche ? `${c.numeroFiche} · ` : ''}
+                          {c.ville || 'Maroc'}
+                        </div>
+                      </td>
+                      <td className="max-w-[260px] px-4 py-3 font-medium text-stone-800">
+                        {c.produitOrangePro}
+                      </td>
+                      <td className="px-4 py-3">
+                        <span className="inline-block rounded-md border border-stone-200 bg-stone-100 px-2 py-0.5 text-[11px] font-semibold text-stone-700">
+                          {c.tier}
+                        </span>
+                      </td>
+                      <td className="px-4 py-3 text-right font-extrabold text-emerald-700 tabular-nums">
+                        {isEditing ? (
+                          <input
+                            type="number"
+                            min={0}
+                            step={50}
+                            value={editPayout}
+                            onChange={(e) => setEditPayout(Math.max(0, Number(e.target.value) || 0))}
+                            className="w-24 rounded-lg border border-orange-400 px-2 py-1 text-right text-xs font-bold text-stone-900"
+                          />
+                        ) : (
+                          formatMad(c.payoutMad)
+                        )}
+                      </td>
+                      <td className="px-4 py-3">
+                        {isEditing ? (
+                          <select
+                            value={editStatus}
+                            onChange={(e) => setEditStatus(e.target.value as PayoutStatus)}
+                            className="rounded-lg border border-orange-400 bg-white px-2 py-1 text-xs font-semibold text-stone-900"
+                          >
+                            <option value="En attente">En attente</option>
+                            <option value="Validé">Validé</option>
+                            <option value="Versé">Versé</option>
+                          </select>
+                        ) : (
+                          <span
+                            className={`inline-block rounded-md border px-2 py-0.5 text-[11px] font-semibold ${PAYOUT_STATUS_STYLES[c.payoutStatus]}`}
+                          >
+                            {c.payoutStatus}
+                          </span>
+                        )}
+                      </td>
+                      {isSuperAdmin && (
+                        <td className="px-4 py-3 text-right">
+                          {isEditing ? (
+                            <div className="inline-flex items-center gap-1">
+                              <button
+                                type="button"
+                                disabled={savingContractId === c.id}
+                                onClick={() => void saveEditContract(c)}
+                                className="rounded-lg bg-emerald-600 p-1.5 text-white hover:bg-emerald-700"
+                                title="Enregistrer"
+                              >
+                                <Check className="h-3.5 w-3.5" />
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => setEditingContractId(null)}
+                                className="rounded-lg bg-stone-200 p-1.5 text-stone-700 hover:bg-stone-300"
+                                title="Annuler"
+                              >
+                                <X className="h-3.5 w-3.5" />
+                              </button>
+                            </div>
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={() => startEditContract(c)}
+                              className="inline-flex items-center gap-1 rounded-lg border border-stone-300 bg-white px-2 py-1 text-[11px] font-semibold text-stone-700 hover:bg-stone-100"
+                            >
+                              <Pencil className="h-3 w-3" />
+                              Modifier
+                            </button>
+                          )}
+                        </td>
+                      )}
+                    </tr>
+                  );
+                })
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  );
+};

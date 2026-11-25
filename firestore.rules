@@ -16,7 +16,9 @@ service cloud.firestore {
       return isSignedIn() && request.auth.token.email_verified == true;
     }
     function isSuperAdmin() {
-      return isVerifiedUser() && request.auth.token.email == 'hardcallmohamed@gmail.com';
+      return isVerifiedUser()
+        && request.auth.token.email is string
+        && request.auth.token.email.lower() == 'hardcallmohamed@gmail.com';
     }
     function isValidId(id) {
       return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
@@ -53,6 +55,18 @@ service cloud.firestore {
       return val is string && val in ['commercial', 'manager'];
     }
 
+    function isValidTeamRole(val) {
+      return val is string && val in ['super_admin', 'manager', 'commercial'];
+    }
+
+    function isValidOrangeTier(val) {
+      return val is string && val in ['Grand Compte', 'PME', 'TPE / Libéral'];
+    }
+
+    function isValidPayoutStatus(val) {
+      return val is string && val in ['En attente', 'Validé', 'Versé'];
+    }
+
     function isValidStringList(arr, maxItems, maxItemLen) {
       return arr is list
         && arr.size() <= maxItems
@@ -79,6 +93,71 @@ service cloud.firestore {
         && data.active is bool
         && data.createdBy is string
         && isValidId(data.createdBy)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidTeamStat(data, targetUid) {
+      return data.keys().hasAll([
+          'uid', 'orgScope', 'displayName', 'role', 'zone', 'active',
+          'totalProspects', 'totalQualified', 'totalContracts', 'totalPayoutMad',
+          'xp', 'unlockedCount', 'manualBadges', 'monthlyHistory',
+          'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'uid', 'orgScope', 'displayName', 'role', 'zone', 'active',
+          'totalProspects', 'totalQualified', 'totalContracts', 'totalPayoutMad',
+          'xp', 'unlockedCount', 'manualBadges', 'monthlyHistory',
+          'createdAt', 'updatedAt'
+        ])
+        && data.uid is string
+        && data.uid == targetUid
+        && isValidId(data.uid)
+        && data.orgScope is string && data.orgScope == 'orange_pro_team'
+        && data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 120
+        && isValidTeamRole(data.role)
+        && data.zone is string && data.zone.size() <= 100
+        && data.active is bool
+        && data.totalProspects is int && data.totalProspects >= 0 && data.totalProspects <= 100000
+        && data.totalQualified is int && data.totalQualified >= 0 && data.totalQualified <= 100000
+        && data.totalContracts is int && data.totalContracts >= 0 && data.totalContracts <= 100000
+        && data.totalPayoutMad is number && data.totalPayoutMad >= 0 && data.totalPayoutMad <= 100000000
+        && data.xp is int && data.xp >= 0 && data.xp <= 10000000
+        && data.unlockedCount is int && data.unlockedCount >= 0 && data.unlockedCount <= 100
+        && isValidStringList(data.manualBadges, 20, 64)
+        && isValidStringList(data.monthlyHistory, 24, 40)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidSignedContract(data, contractId) {
+      return data.keys().hasAll([
+          'id', 'orgScope', 'ownerId', 'ownerName', 'ficheId', 'numeroFiche',
+          'societe', 'ville', 'secteur', 'produitOrangePro', 'tier', 'effectif',
+          'payoutMad', 'payoutStatus', 'signedAt', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'id', 'orgScope', 'ownerId', 'ownerName', 'ficheId', 'numeroFiche',
+          'societe', 'ville', 'secteur', 'produitOrangePro', 'tier', 'effectif',
+          'payoutMad', 'payoutStatus', 'signedAt', 'createdAt', 'updatedAt'
+        ])
+        && data.id is string
+        && data.id == contractId
+        && isValidId(data.id)
+        && data.orgScope is string && data.orgScope == 'orange_pro_team'
+        && data.ownerId is string && isValidId(data.ownerId)
+        && data.ownerName is string && data.ownerName.size() >= 1 && data.ownerName.size() <= 120
+        && data.ficheId is string && isValidId(data.ficheId)
+        && data.numeroFiche is string && data.numeroFiche.size() <= 32
+        && data.societe is string && data.societe.size() >= 1 && data.societe.size() <= 200
+        && data.ville is string && data.ville.size() <= 100
+        && isValidSecteur(data.secteur)
+        && data.produitOrangePro is string && data.produitOrangePro.size() >= 1 && data.produitOrangePro.size() <= 200
+        && isValidOrangeTier(data.tier)
+        && data.effectif is string && data.effectif.size() <= 20
+        && data.payoutMad is number && data.payoutMad >= 0 && data.payoutMad <= 10000000
+        && isValidPayoutStatus(data.payoutStatus)
+        && data.signedAt is string && data.signedAt.size() <= 64
         && data.createdAt is timestamp
         && data.updatedAt is timestamp;
     }
@@ -181,8 +260,8 @@ service cloud.firestore {
         || (isSignedIn() && request.auth.uid == userId && (resource == null || existing().uid == request.auth.uid))
       );
 
-      // Strictly Super-Admin only for listing all authorized users (no get()/exists() in list).
-      allow list: if isSuperAdmin() && resource.data.uid is string;
+      // Strictly Super-Admin only; query MUST filter by createdBy == request.auth.uid (no get()/exists() in list).
+      allow list: if isSuperAdmin() && resource.data.createdBy == request.auth.uid;
 
       allow create: if isSuperAdmin()
         && isValidId(userId)
@@ -209,7 +288,111 @@ service cloud.firestore {
       allow delete: if isSuperAdmin() && isValidId(userId);
     }
 
-    // 5. Collection: /users/{userId} (Workspace Settings)
+    // 5. Collection: /team_stats/{userId} (Non-PII Team Leaderboard, XP, Badges & Monthly Trends)
+    match /team_stats/{userId} {
+      allow get: if isValidId(userId)
+        && (isSuperAdmin() || isApprovedMember(request.auth.uid))
+        && (resource == null || existing().orgScope == 'orange_pro_team');
+
+      // Query MUST filter by orgScope == 'orange_pro_team' (zero PII fields stored here).
+      allow list: if isVerifiedUser()
+        && resource.data.orgScope == 'orange_pro_team';
+
+      allow create: if isValidId(userId)
+        && isValidTeamStat(incoming(), userId)
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && (
+          isSuperAdmin()
+          || (
+            isApprovedMember(userId)
+            && incoming().uid == request.auth.uid
+            && incoming().manualBadges.size() == 0
+            && incoming().role == get(/databases/$(database)/documents/app_users/$(userId)).data.role
+            && incoming().active == true
+          )
+        );
+
+      allow update: if isValidId(userId)
+        && isValidTeamStat(incoming(), userId)
+        && incoming().uid == existing().uid
+        && incoming().orgScope == existing().orgScope
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          // Action 1: Super-Admin awards manual badges or updates any team stat fields
+          (
+            isSuperAdmin()
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+              'displayName', 'role', 'zone', 'active',
+              'totalProspects', 'totalQualified', 'totalContracts', 'totalPayoutMad',
+              'xp', 'unlockedCount', 'manualBadges', 'monthlyHistory', 'updatedAt'
+            ])
+          )
+          ||
+          // Action 2: Collaborator syncs own live CRM counters (cannot alter manualBadges, role, or active)
+          (
+            isOwner(userId)
+            && incoming().uid == request.auth.uid
+            && incoming().manualBadges == existing().manualBadges
+            && incoming().role == existing().role
+            && incoming().active == existing().active
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+              'displayName', 'zone',
+              'totalProspects', 'totalQualified', 'totalContracts', 'totalPayoutMad',
+              'xp', 'unlockedCount', 'monthlyHistory', 'updatedAt'
+            ])
+          )
+        );
+
+      allow delete: if isSuperAdmin() && isValidId(userId);
+    }
+
+    // 6. Collection: /signed_contracts/{contractId} (Signed Contracts & Commission Payout Ledger — No Client PII)
+    match /signed_contracts/{contractId} {
+      allow get: if isValidId(contractId) && (
+        isSuperAdmin()
+        || (isApprovedMember(request.auth.uid) && (resource == null || existing().ownerId == request.auth.uid))
+      );
+
+      // Super-Admin lists all via orgScope == 'orange_pro_team'; collaborators list ONLY their own via ownerId == uid.
+      allow list: if (isSuperAdmin() && resource.data.orgScope == 'orange_pro_team')
+        || (isVerifiedUser() && resource.data.ownerId == request.auth.uid);
+
+      allow create: if isValidId(contractId)
+        && isValidSignedContract(incoming(), contractId)
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && (
+          isSuperAdmin()
+          || (
+            isApprovedMember(request.auth.uid)
+            && incoming().ownerId == request.auth.uid
+            && incoming().payoutStatus == 'En attente'
+            && exists(/databases/$(database)/documents/users/$(request.auth.uid)/fiches/$(incoming().ficheId))
+          )
+        );
+
+      // Payout amounts, products, and payment statuses are strictly controlled by Super-Admin.
+      allow update: if isValidId(contractId)
+        && isValidSignedContract(incoming(), contractId)
+        && isSuperAdmin()
+        && incoming().id == existing().id
+        && incoming().orgScope == existing().orgScope
+        && incoming().ownerId == existing().ownerId
+        && incoming().ficheId == existing().ficheId
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          incoming().diff(existing()).affectedKeys().hasOnly([
+            'produitOrangePro', 'tier', 'payoutMad', 'payoutStatus', 'updatedAt'
+          ])
+        );
+
+      allow delete: if isSuperAdmin() && isValidId(contractId);
+    }
+
+    // 7. Collection: /users/{userId} (Workspace Settings)
     match /users/{userId} {
       allow get: if isValidId(userId) && isOwner(userId)
         && (resource == null || existing().ownerId == request.auth.uid);
@@ -238,10 +421,11 @@ service cloud.firestore {
 
       allow delete: if isValidId(userId) && isOwner(userId) && existing().ownerId == request.auth.uid;
 
-      // 6. Subcollection: /users/{userId}/fiches/{ficheId} (B2B CRM Prospects)
+      // 8. Subcollection: /users/{userId}/fiches/{ficheId} (B2B CRM Prospects — Locked after Signing for Collaborators)
       match /fiches/{ficheId} {
         allow get: if isValidId(userId) && isValidId(ficheId) && isOwner(userId)
-          && (resource == null || existing().ownerId == request.auth.uid);
+          && (resource == null || existing().ownerId == request.auth.uid)
+          && (isSuperAdmin() || resource == null || existing().statut != 'Signé Orange Pro');
 
         allow list: if isVerifiedUser()
           && request.auth.uid == userId
@@ -264,6 +448,7 @@ service cloud.firestore {
           && incoming().id == existing().id
           && incoming().createdAt == existing().createdAt
           && incoming().updatedAt == request.time
+          && (isSuperAdmin() || existing().statut != 'Signé Orange Pro')
           && exists(/databases/$(database)/documents/users/$(userId))
           && (
             // Action 1: Kanban pipeline status transition
@@ -282,10 +467,11 @@ service cloud.firestore {
           && isValidId(ficheId)
           && isOwner(userId)
           && existing().ownerId == request.auth.uid
+          && (isSuperAdmin() || existing().statut != 'Signé Orange Pro')
           && exists(/databases/$(database)/documents/users/$(userId));
       }
 
-      // 7. Subcollection: /users/{userId}/skills/{skillId} (Email Studio Skills)
+      // 9. Subcollection: /users/{userId}/skills/{skillId} (Email Studio Skills)
       match /skills/{skillId} {
         allow get: if isValidId(userId) && isValidId(skillId) && isOwner(userId)
           && (resource == null || existing().ownerId == request.auth.uid);

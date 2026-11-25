@@ -18,6 +18,8 @@ import {
   getFirestore,
   doc,
   collection,
+  query,
+  where,
   getDoc,
   getDocFromServer,
   setDoc,
@@ -33,11 +35,16 @@ import {
   sanitizeSkillPayload,
   sanitizeWorkspacePayload,
   sanitizeAppUserPayload,
+  sanitizeTeamStatPayload,
+  sanitizeSignedContractPayload,
   type FicheLike,
   type EmailSkillLike,
   type WorkspaceLike,
+  type TeamStatLike,
+  type SignedContractLike,
   type SanitizedFicheDoc,
   type SanitizedEmailSkillDoc,
+  type SanitizedSignedContractDoc,
   type SyncDiff,
 } from './utils/firestoreSanitize';
 import type { ManagedAppUser, ManagedUserRole } from './utils/authAccess';
@@ -192,8 +199,19 @@ export async function fetchAppUserProfile(uid: string): Promise<ManagedAppUser |
   }
 }
 
-export function getAppUsersCollection() {
-  return collection(db, 'app_users');
+export function getAppUsersQuery(adminUid: string) {
+  return query(collection(db, 'app_users'), where('createdBy', '==', adminUid));
+}
+
+export function getTeamStatsQuery() {
+  return query(collection(db, 'team_stats'), where('orgScope', '==', 'orange_pro_team'));
+}
+
+export function getSignedContractsQuery(uid: string, isSuperAdmin: boolean) {
+  if (isSuperAdmin) {
+    return query(collection(db, 'signed_contracts'), where('orgScope', '==', 'orange_pro_team'));
+  }
+  return query(collection(db, 'signed_contracts'), where('ownerId', '==', uid));
 }
 
 /**
@@ -257,6 +275,32 @@ export async function adminCreateManagedUser(params: {
     handleFirestoreError(error, OperationType.CREATE, targetPath);
   }
 
+  // Seed initial /team_stats/{uid} record so the collaborator immediately appears in Team Leaderboard & Badges.
+  try {
+    const initialStat = sanitizeTeamStatPayload({
+      uid: sanitized.uid,
+      displayName: sanitized.displayName,
+      role: sanitized.role,
+      zone: sanitized.zone,
+      active: sanitized.active,
+      totalProspects: 0,
+      totalQualified: 0,
+      totalContracts: 0,
+      totalPayoutMad: 0,
+      xp: 0,
+      unlockedCount: 0,
+      manualBadges: [],
+      monthlyHistory: [],
+    });
+    await setDoc(doc(db, 'team_stats', sanitized.uid), {
+      ...initialStat,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    });
+  } catch {
+    // Non-fatal; will also be created automatically on collaborator's first workspace sync
+  }
+
   return {
     ...sanitized,
     createdAt: new Date().toISOString(),
@@ -275,16 +319,34 @@ export async function adminUpdateManagedUser(
   const targetPath = `app_users/${uid}`;
   const cleanName = updates.displayName.trim().slice(0, 120) || 'Utilisateur';
   const cleanZone = updates.zone.trim().slice(0, 100);
+  const cleanRole: ManagedUserRole = updates.role === 'manager' ? 'manager' : 'commercial';
   try {
     await updateDoc(doc(db, 'app_users', uid), {
       displayName: cleanName,
-      role: updates.role === 'manager' ? 'manager' : 'commercial',
+      role: cleanRole,
       zone: cleanZone,
       active: Boolean(updates.active),
       updatedAt: serverTimestamp(),
     });
   } catch (error) {
     handleFirestoreError(error, OperationType.UPDATE, targetPath);
+  }
+
+  // Keep /team_stats/{uid} metadata in sync if it exists
+  try {
+    const statRef = doc(db, 'team_stats', uid);
+    const snap = await getDoc(statRef);
+    if (snap.exists()) {
+      await updateDoc(statRef, {
+        displayName: cleanName,
+        role: cleanRole,
+        zone: cleanZone,
+        active: Boolean(updates.active),
+        updatedAt: serverTimestamp(),
+      });
+    }
+  } catch {
+    // Non-fatal
   }
 }
 
@@ -294,6 +356,160 @@ export async function adminDeleteManagedUser(uid: string): Promise<void> {
     await deleteDoc(doc(db, 'app_users', uid));
   } catch (error) {
     handleFirestoreError(error, OperationType.DELETE, targetPath);
+  }
+  try {
+    await deleteDoc(doc(db, 'team_stats', uid));
+  } catch {
+    // Non-fatal if stat doc does not exist
+  }
+}
+
+export async function syncMyTeamStat(
+  uid: string,
+  input: TeamStatLike,
+  isSuperAdmin: boolean
+): Promise<void> {
+  const path = `team_stats/${uid}`;
+  const ref = doc(db, 'team_stats', uid);
+  const clean = sanitizeTeamStatPayload({ ...input, uid });
+
+  try {
+    const snap = await getDoc(ref);
+    if (!snap.exists()) {
+      await setDoc(ref, {
+        ...clean,
+        manualBadges: isSuperAdmin ? clean.manualBadges : [],
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+      return;
+    }
+
+    if (isSuperAdmin) {
+      await updateDoc(ref, {
+        displayName: clean.displayName,
+        role: clean.role,
+        zone: clean.zone,
+        active: clean.active,
+        totalProspects: clean.totalProspects,
+        totalQualified: clean.totalQualified,
+        totalContracts: clean.totalContracts,
+        totalPayoutMad: clean.totalPayoutMad,
+        xp: clean.xp,
+        unlockedCount: clean.unlockedCount,
+        monthlyHistory: clean.monthlyHistory,
+        updatedAt: serverTimestamp(),
+      });
+    } else {
+      // Strictly respect Action 2 in firestore.rules: collaborator never touches manualBadges, role, or active
+      await updateDoc(ref, {
+        displayName: clean.displayName,
+        zone: clean.zone,
+        totalProspects: clean.totalProspects,
+        totalQualified: clean.totalQualified,
+        totalContracts: clean.totalContracts,
+        totalPayoutMad: clean.totalPayoutMad,
+        xp: clean.xp,
+        unlockedCount: clean.unlockedCount,
+        monthlyHistory: clean.monthlyHistory,
+        updatedAt: serverTimestamp(),
+      });
+    }
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, path);
+  }
+}
+
+export async function adminUpdateUserManualBadges(
+  targetUid: string,
+  manualBadges: string[],
+  fallbackProfile?: {
+    displayName: string;
+    role: 'super_admin' | 'manager' | 'commercial';
+    zone: string;
+    active: boolean;
+  }
+): Promise<void> {
+  const path = `team_stats/${targetUid}`;
+  const ref = doc(db, 'team_stats', targetUid);
+  const cleanBadges = Array.from(
+    new Set(manualBadges.filter((b) => typeof b === 'string' && b.trim().length > 0).map((b) => b.trim().slice(0, 64)))
+  ).slice(0, 20);
+
+  try {
+    const snap = await getDoc(ref);
+    if (!snap.exists()) {
+      const seed = sanitizeTeamStatPayload({
+        uid: targetUid,
+        displayName: fallbackProfile?.displayName || 'Collaborateur',
+        role: fallbackProfile?.role || 'commercial',
+        zone: fallbackProfile?.zone || 'Meknès',
+        active: fallbackProfile?.active ?? true,
+        totalProspects: 0,
+        totalQualified: 0,
+        totalContracts: 0,
+        totalPayoutMad: 0,
+        xp: 0,
+        unlockedCount: cleanBadges.length,
+        manualBadges: cleanBadges,
+        monthlyHistory: [],
+      });
+      await setDoc(ref, {
+        ...seed,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+      return;
+    }
+
+    await updateDoc(ref, {
+      manualBadges: cleanBadges,
+      updatedAt: serverTimestamp(),
+    });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.UPDATE, path);
+  }
+}
+
+export async function createSignedContract(
+  input: SignedContractLike
+): Promise<SanitizedSignedContractDoc> {
+  const clean = sanitizeSignedContractPayload(input);
+  const path = `signed_contracts/${clean.id}`;
+  try {
+    await setDoc(doc(db, 'signed_contracts', clean.id), {
+      ...clean,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    });
+    return clean;
+  } catch (error) {
+    handleFirestoreError(error, OperationType.CREATE, path);
+  }
+}
+
+export async function adminUpdateSignedContract(
+  contractId: string,
+  updates: {
+    produitOrangePro: string;
+    tier: 'Grand Compte' | 'PME' | 'TPE / Libéral';
+    payoutMad: number;
+    payoutStatus: 'En attente' | 'Validé' | 'Versé';
+  }
+): Promise<void> {
+  const path = `signed_contracts/${contractId}`;
+  const cleanProduit = updates.produitOrangePro.trim().slice(0, 200) || 'Pack Orange Pro';
+  const cleanPayout = Math.min(10000000, Math.max(0, Math.round(Number(updates.payoutMad) || 0)));
+  try {
+    await updateDoc(doc(db, 'signed_contracts', contractId), {
+      produitOrangePro: cleanProduit,
+      tier: updates.tier,
+      payoutMad: cleanPayout,
+      payoutStatus: updates.payoutStatus,
+      updatedAt: serverTimestamp(),
+    });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.UPDATE, path);
   }
 }
 

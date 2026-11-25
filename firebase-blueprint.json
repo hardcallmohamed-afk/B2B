@@ -307,6 +307,207 @@
         "createdAt",
         "updatedAt"
       ]
+    },
+    "TeamStat": {
+      "title": "TeamStat",
+      "description": "Indicateurs de performance non-PII, classement équipe, XP et badges attribués par collaborateur.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "orgScope": {
+          "type": "string",
+          "enum": ["orange_pro_team"]
+        },
+        "displayName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "role": {
+          "type": "string",
+          "enum": ["super_admin", "manager", "commercial"]
+        },
+        "zone": {
+          "type": "string",
+          "maxLength": 100
+        },
+        "active": {
+          "type": "boolean"
+        },
+        "totalProspects": {
+          "type": "integer"
+        },
+        "totalQualified": {
+          "type": "integer"
+        },
+        "totalContracts": {
+          "type": "integer"
+        },
+        "totalPayoutMad": {
+          "type": "number"
+        },
+        "xp": {
+          "type": "integer"
+        },
+        "unlockedCount": {
+          "type": "integer"
+        },
+        "manualBadges": {
+          "type": "array",
+          "description": "Identifiants des badges de distinction attribués exclusivement par le Super-Admin (max 20)."
+        },
+        "monthlyHistory": {
+          "type": "array",
+          "description": "Historique mensuel agrégé YYYY-MM:contrats:payout (max 24)."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "uid",
+        "orgScope",
+        "displayName",
+        "role",
+        "zone",
+        "active",
+        "totalProspects",
+        "totalQualified",
+        "totalContracts",
+        "totalPayoutMad",
+        "xp",
+        "unlockedCount",
+        "manualBadges",
+        "monthlyHistory",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "SignedContract": {
+      "title": "SignedContract",
+      "description": "Registre des contrats Orange Pro signés et payouts commissions (sans PII client — téléphone/email exclus).",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "orgScope": {
+          "type": "string",
+          "enum": ["orange_pro_team"]
+        },
+        "ownerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "ownerName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "ficheId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "numeroFiche": {
+          "type": "string",
+          "maxLength": 32
+        },
+        "societe": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "ville": {
+          "type": "string",
+          "maxLength": 100
+        },
+        "secteur": {
+          "type": "string",
+          "enum": [
+            "fiduciaire",
+            "clinique",
+            "notaire",
+            "immobilier",
+            "riad_hotellerie",
+            "auto_ecole",
+            "pme",
+            "industrie",
+            "btp",
+            "gros",
+            "enseignement",
+            "liberal",
+            "commerce"
+          ]
+        },
+        "produitOrangePro": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "tier": {
+          "type": "string",
+          "enum": ["Grand Compte", "PME", "TPE / Libéral"]
+        },
+        "effectif": {
+          "type": "string",
+          "maxLength": 20
+        },
+        "payoutMad": {
+          "type": "number"
+        },
+        "payoutStatus": {
+          "type": "string",
+          "enum": ["En attente", "Validé", "Versé"]
+        },
+        "signedAt": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "orgScope",
+        "ownerId",
+        "ownerName",
+        "ficheId",
+        "numeroFiche",
+        "societe",
+        "ville",
+        "secteur",
+        "produitOrangePro",
+        "tier",
+        "effectif",
+        "payoutMad",
+        "payoutStatus",
+        "signedAt",
+        "createdAt",
+        "updatedAt"
+      ]
     }
   },
   "firestore": {
@@ -315,6 +516,18 @@
         "$ref": "#/entities/AppUser"
       },
       "description": "Répertoire des comptes utilisateurs autorisés, administré exclusivement par le Super-Admin."
+    },
+    "/team_stats/{userId}": {
+      "schema": {
+        "$ref": "#/entities/TeamStat"
+      },
+      "description": "Classement d'équipe non-PII, XP, badges et évolution mensuelle des collaborateurs."
+    },
+    "/signed_contracts/{contractId}": {
+      "schema": {
+        "$ref": "#/entities/SignedContract"
+      },
+      "description": "Contrats Orange Pro signés avec produit et payout MAD (accès fiche client verrouillé pour les collaborateurs après signature)."
     },
     "/users/{userId}": {
       "schema": {

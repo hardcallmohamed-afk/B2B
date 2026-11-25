@@ -39,6 +39,8 @@ import {
   LogOut,
   ClipboardPaste,
   Users,
+  Trophy,
+  Award,
 } from 'lucide-react';
 import { onAuthStateChanged, type User } from 'firebase/auth';
 import { doc, onSnapshot, query, where } from 'firebase/firestore';
@@ -47,6 +49,9 @@ import { KanbanBoard } from './components/KanbanBoard';
 import { AiCopilotDrawer } from './components/AiCopilotDrawer';
 import { LoginScreen, AccessGateNotice } from './components/LoginScreen';
 import { AdminUsersPanel } from './components/AdminUsersPanel';
+import { TeamPerformancePanel } from './components/TeamPerformancePanel';
+import { AchievementsPanel } from './components/AchievementsPanel';
+import { SignContractModal, type SignContractTarget } from './components/SignContractModal';
 import { moveFicheToStatut } from './utils/analytics';
 import { findSmartDuplicateGroups } from './utils/deduplication';
 import {
@@ -54,6 +59,15 @@ import {
   isSuperAdminEmail,
   type ManagedAppUser,
 } from './utils/authAccess';
+import {
+  buildMonthlyHistoryStrings,
+  evaluateAchievements,
+  type CollaboratorMetrics,
+  type OrangeProTier,
+  type PayoutStatus,
+  type SignedContractRecord,
+  type TeamStatRecord,
+} from './utils/gamification';
 import {
   extractAllFromAssistedPaste,
   extractAllMoroccanPhones,
@@ -74,7 +88,13 @@ import {
   getUserFichesCollection,
   getUserSkillsCollection,
   fetchAppUserProfile,
-  getAppUsersCollection,
+  getAppUsersQuery,
+  getTeamStatsQuery,
+  getSignedContractsQuery,
+  syncMyTeamStat,
+  adminUpdateUserManualBadges,
+  createSignedContract,
+  adminUpdateSignedContract,
   handleFirestoreError,
   OperationType,
 } from './firebase';
@@ -2485,8 +2505,16 @@ export default function App() {
     [apiKeys]
   );
 
-  // 4. Navigation, Vue Kanban, Copilote IA intégré & Filtres Portefeuille
-  const [activeTab, setActiveTab] = useState<'portefeuille' | 'kanban' | 'crawler' | 'paste' | 'dedup' | 'admin'>('portefeuille');
+  // 4. Navigation, Vue Kanban, Équipe/Payouts, Succès/Badges, Copilote IA & Filtres Portefeuille
+  const [activeTab, setActiveTab] = useState<
+    'portefeuille' | 'kanban' | 'team' | 'badges' | 'crawler' | 'paste' | 'dedup' | 'admin'
+  >('portefeuille');
+  const [teamStats, setTeamStats] = useState<TeamStatRecord[]>([]);
+  const [signedContracts, setSignedContracts] = useState<SignedContractRecord[]>([]);
+  const [signContractTarget, setSignContractTarget] = useState<SignContractTarget | null>(null);
+  const [signingContractBusy, setSigningContractBusy] = useState(false);
+  const [badgesFocusUid, setBadgesFocusUid] = useState<string | null>(null);
+  const lastTeamStatHashRef = useRef<string>('');
   const [includePhoneOnlyDedup, setIncludePhoneOnlyDedup] = useState(false);
   const [dismissedDedupKeys, setDismissedDedupKeys] = useState<string[]>([]);
   const [crmViewMode, setCrmViewMode] = useState<'table' | 'kanban'>('table');
@@ -2693,10 +2721,14 @@ export default function App() {
         setAppUserProfile(null);
         setProfileChecked(true);
         setManagedUsers([]);
+        setTeamStats([]);
+        setSignedContracts([]);
         knownCloudFichesRef.current = new Map();
         knownCloudSkillsRef.current = new Map();
         knownCloudWorkspaceHashRef.current = '';
+        lastTeamStatHashRef.current = '';
       } else {
+        setCloudSynced(false);
         setProfileChecked(false);
       }
     });
@@ -2757,14 +2789,14 @@ export default function App() {
     }
   }, [isSuperAdmin, activeTab]);
 
-  // Liste temps réel /app_users réservée exclusivement au Super-Admin
+  // Liste temps réel /app_users réservée exclusivement au Super-Admin (filtrée par createdBy == adminUid)
   useEffect(() => {
     if (!authReady || !cloudUser || !isSuperAdmin) {
       setManagedUsers([]);
       return;
     }
     const unsub = onSnapshot(
-      getAppUsersCollection(),
+      getAppUsersQuery(cloudUser.uid),
       (snap) => {
         const list: ManagedAppUser[] = [];
         snap.forEach((docSnap) => {
@@ -2792,6 +2824,96 @@ export default function App() {
     );
     return () => unsub();
   }, [authReady, cloudUser, isSuperAdmin]);
+
+  // Liste temps réel /team_stats (classement équipe, XP, badges, évolution mensuelle)
+  useEffect(() => {
+    if (!authReady || !cloudUser || !canAccessWorkspace) {
+      setTeamStats([]);
+      return;
+    }
+    const unsub = onSnapshot(
+      getTeamStatsQuery(),
+      (snap) => {
+        const list: TeamStatRecord[] = [];
+        snap.forEach((docSnap) => {
+          const d = docSnap.data();
+          list.push({
+            uid: docSnap.id,
+            orgScope: 'orange_pro_team',
+            displayName: typeof d.displayName === 'string' ? d.displayName : 'Collaborateur',
+            role:
+              d.role === 'super_admin' || d.role === 'manager' ? d.role : 'commercial',
+            zone: typeof d.zone === 'string' ? d.zone : 'Meknès',
+            active: typeof d.active === 'boolean' ? d.active : true,
+            totalProspects: Number(d.totalProspects) || 0,
+            totalQualified: Number(d.totalQualified) || 0,
+            totalContracts: Number(d.totalContracts) || 0,
+            totalPayoutMad: Number(d.totalPayoutMad) || 0,
+            xp: Number(d.xp) || 0,
+            unlockedCount: Number(d.unlockedCount) || 0,
+            manualBadges: Array.isArray(d.manualBadges) ? d.manualBadges : [],
+            monthlyHistory: Array.isArray(d.monthlyHistory) ? d.monthlyHistory : [],
+          });
+        });
+        setTeamStats(list);
+      },
+      (err) => {
+        try {
+          handleFirestoreError(err, OperationType.LIST, 'team_stats');
+        } catch {
+          // Non-fatal fallback
+        }
+      }
+    );
+    return () => unsub();
+  }, [authReady, cloudUser, canAccessWorkspace]);
+
+  // Liste temps réel /signed_contracts (Super-Admin: toute l'équipe; Collaborateur: ses contrats + payouts sans PII)
+  useEffect(() => {
+    if (!authReady || !cloudUser || !canAccessWorkspace) {
+      setSignedContracts([]);
+      return;
+    }
+    const unsub = onSnapshot(
+      getSignedContractsQuery(cloudUser.uid, isSuperAdmin),
+      (snap) => {
+        const list: SignedContractRecord[] = [];
+        snap.forEach((docSnap) => {
+          const d = docSnap.data();
+          list.push({
+            id: docSnap.id,
+            orgScope: 'orange_pro_team',
+            ownerId: typeof d.ownerId === 'string' ? d.ownerId : '',
+            ownerName: typeof d.ownerName === 'string' ? d.ownerName : 'Collaborateur',
+            ficheId: typeof d.ficheId === 'string' ? d.ficheId : '',
+            numeroFiche: typeof d.numeroFiche === 'string' ? d.numeroFiche : '',
+            societe: typeof d.societe === 'string' ? d.societe : '',
+            ville: typeof d.ville === 'string' ? d.ville : '',
+            secteur: typeof d.secteur === 'string' ? d.secteur : 'pme',
+            produitOrangePro: typeof d.produitOrangePro === 'string' ? d.produitOrangePro : '',
+            tier:
+              d.tier === 'Grand Compte' || d.tier === 'TPE / Libéral' ? d.tier : 'PME',
+            effectif: typeof d.effectif === 'string' ? d.effectif : '',
+            payoutMad: Number(d.payoutMad) || 0,
+            payoutStatus:
+              d.payoutStatus === 'Validé' || d.payoutStatus === 'Versé'
+                ? d.payoutStatus
+                : 'En attente',
+            signedAt: typeof d.signedAt === 'string' ? d.signedAt : '',
+          });
+        });
+        setSignedContracts(list);
+      },
+      (err) => {
+        try {
+          handleFirestoreError(err, OperationType.LIST, 'signed_contracts');
+        } catch {
+          // Non-fatal fallback
+        }
+      }
+    );
+    return () => unsub();
+  }, [authReady, cloudUser, canAccessWorkspace, isSuperAdmin]);
 
   useEffect(() => {
     if (!authReady || !cloudUser || !canAccessWorkspace) return;
@@ -2856,30 +2978,45 @@ export default function App() {
           knownCloudSkillsRef.current = skillsMap;
         }
 
+        // Gate outbound sync until all 3 initial snapshots have hydrated knownCloud*Ref
+        // (eliminates the race condition that previously triggered batch.set overwriting createdAt on existing docs).
+        let userHydrated = created;
+        let fichesHydrated = created;
+        let skillsHydrated = created;
+        const maybeEnableOutboundSync = () => {
+          if (!cancelled && userHydrated && fichesHydrated && skillsHydrated) {
+            setCloudSynced(true);
+            setCloudBusy(false);
+          }
+        };
+
         unsubUser = onSnapshot(
           doc(db, 'users', uid),
           (snap) => {
-            if (!snap.exists()) return;
-            const data = snap.data();
-            const cleanWs = sanitizeWorkspacePayload(uid, {
-              villesAll: Array.isArray(data.villesAll) ? data.villesAll : DEFAULT_VILLES_MEKNES,
-              villesActive: Array.isArray(data.villesActive) ? data.villesActive : DEFAULT_VILLES_MEKNES,
-              modeVille: data.modeVille === 'filter' ? 'filter' : 'default',
-              defaultVille: typeof data.defaultVille === 'string' ? data.defaultVille : 'Meknès',
-              emailSignature: typeof data.emailSignature === 'string' ? data.emailSignature : '',
-              seeded: Boolean(data.seeded),
-            });
-            const nextHash = serializeDocCanonical(cleanWs as unknown as Record<string, unknown>);
-            if (nextHash === knownCloudWorkspaceHashRef.current) return;
-            knownCloudWorkspaceHashRef.current = nextHash;
-
-            setVillesState({
-              all: cleanWs.villesAll.length > 0 ? cleanWs.villesAll : DEFAULT_VILLES_MEKNES,
-              active: cleanWs.villesActive,
-              mode: cleanWs.modeVille,
-              defaultVille: cleanWs.defaultVille,
-            });
-            setEmailSignature(cleanWs.emailSignature);
+            if (snap.exists()) {
+              const data = snap.data();
+              const cleanWs = sanitizeWorkspacePayload(uid, {
+                villesAll: Array.isArray(data.villesAll) ? data.villesAll : DEFAULT_VILLES_MEKNES,
+                villesActive: Array.isArray(data.villesActive) ? data.villesActive : DEFAULT_VILLES_MEKNES,
+                modeVille: data.modeVille === 'filter' ? 'filter' : 'default',
+                defaultVille: typeof data.defaultVille === 'string' ? data.defaultVille : 'Meknès',
+                emailSignature: typeof data.emailSignature === 'string' ? data.emailSignature : '',
+                seeded: Boolean(data.seeded),
+              });
+              const nextHash = serializeDocCanonical(cleanWs as unknown as Record<string, unknown>);
+              if (nextHash !== knownCloudWorkspaceHashRef.current) {
+                knownCloudWorkspaceHashRef.current = nextHash;
+                setVillesState({
+                  all: cleanWs.villesAll.length > 0 ? cleanWs.villesAll : DEFAULT_VILLES_MEKNES,
+                  active: cleanWs.villesActive,
+                  mode: cleanWs.modeVille,
+                  defaultVille: cleanWs.defaultVille,
+                });
+                setEmailSignature(cleanWs.emailSignature);
+              }
+            }
+            userHydrated = true;
+            maybeEnableOutboundSync();
           },
           (err) => {
             try {
@@ -2967,9 +3104,15 @@ export default function App() {
               }
             }
             knownCloudFichesRef.current = nextKnown;
-            if (!same) {
-              setFiches(ensureUniqueNumeroFiches(remoteFiches));
+            if (!same || !fichesHydrated) {
+              // Avoid mutating already-signed fiches for non-Super-Admin collaborators (locked in firestore.rules)
+              const hydratedList = isSuperAdmin
+                ? ensureUniqueNumeroFiches(remoteFiches)
+                : remoteFiches;
+              setFiches(hydratedList);
             }
+            fichesHydrated = true;
+            maybeEnableOutboundSync();
           },
           (err) => {
             try {
@@ -3023,9 +3166,11 @@ export default function App() {
               }
             }
             knownCloudSkillsRef.current = nextKnown;
-            if (!same && remoteSkills.length > 0) {
+            if ((!same || !skillsHydrated) && remoteSkills.length > 0) {
               setEmailSkills(remoteSkills);
             }
+            skillsHydrated = true;
+            maybeEnableOutboundSync();
           },
           (err) => {
             try {
@@ -3036,23 +3181,23 @@ export default function App() {
           }
         );
 
-        setCloudSynced(true);
+        maybeEnableOutboundSync();
       } catch {
         if (!cancelled) {
           notify('Impossible d’initialiser la synchronisation Cloud Firestore.', 'err');
+          setCloudBusy(false);
         }
-      } finally {
-        if (!cancelled) setCloudBusy(false);
       }
     })();
 
     return () => {
       cancelled = true;
+      setCloudSynced(false);
       unsubUser?.();
       unsubFiches?.();
       unsubSkills?.();
     };
-  }, [authReady, cloudUser, canAccessWorkspace]);
+  }, [authReady, cloudUser, canAccessWorkspace, isSuperAdmin]);
 
   // Synchroniser automatiquement toute modification de fiches vers Firestore
   useEffect(() => {
@@ -3130,6 +3275,116 @@ export default function App() {
 
     return () => window.clearTimeout(timer);
   }, [villesState, emailSignature, cloudUser, cloudSynced]);
+
+  // Calcul des métriques personnelles, badges automatiques et synchronisation /team_stats/{uid}
+  const mySignedContracts = useMemo(() => {
+    if (!cloudUser) return [];
+    return signedContracts.filter((c) => c.ownerId === cloudUser.uid);
+  }, [signedContracts, cloudUser]);
+
+  const myTeamStatRecord = useMemo(() => {
+    if (!cloudUser) return null;
+    return teamStats.find((s) => s.uid === cloudUser.uid) || null;
+  }, [teamStats, cloudUser]);
+
+  const myCollaboratorMetrics = useMemo<CollaboratorMetrics>(() => {
+    const signedFichesCount = fiches.filter((f) => f.statut === 'Signé Orange Pro').length;
+    const contractsCount = Math.max(signedFichesCount, mySignedContracts.length);
+    const qualifiedCount = fiches.filter(
+      (f) =>
+        f.statut === 'RDV pris' ||
+        f.statut === 'Devis envoyé' ||
+        f.statut === 'Signé Orange Pro'
+    ).length;
+    const grandCompteContracts = mySignedContracts.filter(
+      (c) => c.tier === 'Grand Compte'
+    ).length;
+    const pmeContracts = mySignedContracts.filter((c) => c.tier === 'PME').length;
+    const totalPayoutMad = mySignedContracts.reduce((sum, c) => sum + (Number(c.payoutMad) || 0), 0);
+    const multiContactFiches = fiches.filter(
+      (f) =>
+        (f.telephonesSupplementaires?.length || 0) > 0 ||
+        (f.emailsSupplementaires?.length || 0) > 0
+    ).length;
+    const highMaturityFiches = fiches.filter((f) => computeMaturityScore(f) >= 85).length;
+    const distinctCities = new Set(
+      fiches.map((f) => (f.ville || '').trim().toLowerCase()).filter(Boolean)
+    ).size;
+
+    return {
+      totalProspects: fiches.length,
+      qualifiedCount,
+      contractsCount,
+      grandCompteContracts,
+      pmeContracts,
+      totalPayoutMad,
+      multiContactFiches,
+      highMaturityFiches,
+      distinctCities,
+    };
+  }, [fiches, mySignedContracts]);
+
+  const myAchievementSummary = useMemo(
+    () => evaluateAchievements(myCollaboratorMetrics, myTeamStatRecord?.manualBadges || []),
+    [myCollaboratorMetrics, myTeamStatRecord]
+  );
+
+  const currentUserDisplayName = useMemo(() => {
+    if (appUserProfile?.displayName) return appUserProfile.displayName;
+    if (cloudUser?.displayName) return cloudUser.displayName;
+    if (cloudUser?.email) return cloudUser.email.split('@')[0];
+    return 'Collaborateur';
+  }, [appUserProfile, cloudUser]);
+
+  useEffect(() => {
+    if (!cloudUser || !cloudSynced || !canAccessWorkspace) return;
+    const uid = cloudUser.uid;
+    const role: 'super_admin' | 'manager' | 'commercial' = isSuperAdmin
+      ? 'super_admin'
+      : appUserProfile?.role === 'manager'
+        ? 'manager'
+        : 'commercial';
+    const zone = appUserProfile?.zone || villesState.defaultVille || 'Meknès';
+    const monthlyHistory = buildMonthlyHistoryStrings(mySignedContracts);
+    const payload = {
+      uid,
+      displayName: currentUserDisplayName,
+      role,
+      zone,
+      active: true,
+      totalProspects: myCollaboratorMetrics.totalProspects,
+      totalQualified: myCollaboratorMetrics.qualifiedCount,
+      totalContracts: myCollaboratorMetrics.contractsCount,
+      totalPayoutMad: myCollaboratorMetrics.totalPayoutMad,
+      xp: myAchievementSummary.totalXp,
+      unlockedCount: myAchievementSummary.unlockedCount,
+      manualBadges: myTeamStatRecord?.manualBadges || [],
+      monthlyHistory,
+    };
+    const nextHash = serializeDocCanonical(payload as unknown as Record<string, unknown>);
+    if (nextHash === lastTeamStatHashRef.current) return;
+
+    const timer = window.setTimeout(() => {
+      lastTeamStatHashRef.current = nextHash;
+      syncMyTeamStat(uid, payload, isSuperAdmin).catch(() => {
+        // Silent retry on next activity change
+      });
+    }, 800);
+
+    return () => window.clearTimeout(timer);
+  }, [
+    cloudUser,
+    cloudSynced,
+    canAccessWorkspace,
+    isSuperAdmin,
+    appUserProfile,
+    villesState.defaultVille,
+    currentUserDisplayName,
+    myCollaboratorMetrics,
+    myAchievementSummary,
+    mySignedContracts,
+    myTeamStatRecord,
+  ]);
 
   const handleGoogleSignOut = async () => {
     try {
@@ -3305,10 +3560,16 @@ export default function App() {
     }
   }, [pasteInput, pasteSource, activeVilles, modeVille, defaultVille]);
 
+  // Pour les collaborateurs non-admin, les fiches signées sont automatiquement verrouillées et masquées du portefeuille
+  const accessibleFiches = useMemo(
+    () => (isSuperAdmin ? fiches : fiches.filter((f) => f.statut !== 'Signé Orange Pro')),
+    [fiches, isSuperAdmin]
+  );
+
   // Données dérivées : doublons (priorité stricte au nom de société), KPIs, filtres
   const allDetectedDuplicateGroups = useMemo(
-    () => findDuplicateGroups(fiches, { includePhoneOnly: includePhoneOnlyDedup }),
-    [fiches, includePhoneOnlyDedup]
+    () => findDuplicateGroups(accessibleFiches, { includePhoneOnly: includePhoneOnlyDedup }),
+    [accessibleFiches, includePhoneOnlyDedup]
   );
   const duplicateGroups = useMemo(
     () =>
@@ -3326,12 +3587,12 @@ export default function App() {
 
   const kpiByColor = useMemo(() => {
     const map: Record<SegmentCouleur, number> = { bleu: 0, vert: 0, orange: 0, jaune: 0, violet: 0, cyan: 0 };
-    fiches.forEach((f) => {
+    accessibleFiches.forEach((f) => {
       const col = SECTEURS_META[f.secteur]?.couleur || 'violet';
       map[col]++;
     });
     return map;
-  }, [fiches]);
+  }, [accessibleFiches]);
 
   const kpiByStatut = useMemo(() => {
     const map: Record<StatutCRM, number> = {
@@ -3402,7 +3663,7 @@ export default function App() {
 
   const filteredFiches = useMemo(() => {
     const q = stripAccents(search);
-    const list = fiches.filter((f) => {
+    const list = accessibleFiches.filter((f) => {
       if (couleurFilter && SECTEURS_META[f.secteur]?.couleur !== couleurFilter) return false;
       if (secteurFilter && f.secteur !== secteurFilter) return false;
       if (villeFilter && stripAccents(f.ville) !== stripAccents(villeFilter)) return false;
@@ -3452,7 +3713,7 @@ export default function App() {
     });
     return list;
   }, [
-    fiches, search, couleurFilter, secteurFilter, villeFilter, tierFilter,
+    accessibleFiches, search, couleurFilter, secteurFilter, villeFilter, tierFilter,
     effectifFilter, completudeFilter, sourceFilter, statutFilter, onlyReadyToCall,
     sortField, sortDir,
   ]);
@@ -4898,7 +5159,109 @@ Réponds UNIQUEMENT en JSON strict : {"telephone":"","email":"","contact":"","ro
     e.target.value = '';
   };
 
+  const openSignContractModal = (f: FicheEntreprise) => {
+    const reco = getOrangeProRecommendation(f);
+    setSignContractTarget({
+      id: f.id,
+      numeroFiche: f.numeroFiche,
+      societe: f.societe,
+      ville: f.ville,
+      secteur: f.secteur,
+      effectif: f.effectif,
+      suggestedTier: reco.tier,
+      suggestedProduit: reco.offre,
+    });
+  };
+
+  const handleConfirmSignContract = async (payload: {
+    produitOrangePro: string;
+    tier: OrangeProTier;
+    payoutMad: number;
+  }) => {
+    if (!signContractTarget || !cloudUser) return;
+    setSigningContractBusy(true);
+    try {
+      const contractId = `ctr_${signContractTarget.id}_${Date.now().toString(36)}`;
+      await createSignedContract({
+        id: contractId,
+        ownerId: cloudUser.uid,
+        ownerName: currentUserDisplayName,
+        ficheId: signContractTarget.id,
+        numeroFiche: signContractTarget.numeroFiche || '',
+        societe: signContractTarget.societe,
+        ville: signContractTarget.ville,
+        secteur: signContractTarget.secteur,
+        produitOrangePro: payload.produitOrangePro,
+        tier: payload.tier,
+        effectif: signContractTarget.effectif,
+        payoutMad: payload.payoutMad,
+        payoutStatus: isSuperAdmin ? 'Validé' : 'En attente',
+        signedAt: new Date().toISOString(),
+      });
+
+      setFiches((prev) =>
+        prev.map((x) =>
+          x.id === signContractTarget.id ? { ...x, statut: 'Signé Orange Pro' } : x
+        )
+      );
+      setSignContractTarget(null);
+      notify(
+        isSuperAdmin
+          ? `Contrat « ${signContractTarget.societe} » signé (${payload.payoutMad.toLocaleString('fr-FR')} MAD).`
+          : `Contrat signé ! La fiche est verrouillée et votre payout (${payload.payoutMad.toLocaleString('fr-FR')} MAD) est visible dans Équipe & Payouts.`
+      );
+    } catch {
+      notify('Erreur lors de l’enregistrement du contrat signé.', 'err');
+    } finally {
+      setSigningContractBusy(false);
+    }
+  };
+
+  const handleAdminUpdateContract = async (
+    contractId: string,
+    updates: {
+      produitOrangePro: string;
+      tier: OrangeProTier;
+      payoutMad: number;
+      payoutStatus: PayoutStatus;
+    }
+  ) => {
+    try {
+      await adminUpdateSignedContract(contractId, updates);
+      notify('Payout et statut de paiement mis à jour.');
+    } catch {
+      notify('Impossible de mettre à jour le payout.', 'err');
+    }
+  };
+
+  const handleAdminToggleManualBadge = async (targetUid: string, nextBadges: string[]) => {
+    try {
+      const targetUser = managedUsers.find((u) => u.uid === targetUid);
+      await adminUpdateUserManualBadges(
+        targetUid,
+        nextBadges,
+        targetUser
+          ? {
+              displayName: targetUser.displayName,
+              role: targetUser.role,
+              zone: targetUser.zone,
+              active: targetUser.active,
+            }
+          : undefined
+      );
+      notify('Badges de distinction mis à jour avec succès.');
+    } catch {
+      notify('Erreur lors de l’attribution du badge.', 'err');
+    }
+  };
+
   const handleMoveFicheKanban = (ficheId: string, targetStatut: StatutCRM) => {
+    const target = fiches.find((f) => f.id === ficheId);
+    if (!target || target.statut === targetStatut) return;
+    if (targetStatut === 'Signé Orange Pro') {
+      openSignContractModal(target);
+      return;
+    }
     const result = moveFicheToStatut(fiches, ficheId, targetStatut);
     if (!result.changed || !result.movedFiche) return;
     setFiches(result.updated);
@@ -5448,8 +5811,10 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
           className="max-w-[1440px] mx-auto px-4 flex gap-1 overflow-x-auto border-t border-stone-100"
         >
           {[
-            { id: 'portefeuille', label: `Portefeuille CRM (${fiches.length})`, icon: Building2 },
+            { id: 'portefeuille', label: `Portefeuille CRM (${accessibleFiches.length})`, icon: Building2 },
             { id: 'kanban', label: 'Kanban Pipeline', icon: KanbanSquare },
+            { id: 'team', label: `Équipe & Payouts (${signedContracts.length})`, icon: Trophy },
+            { id: 'badges', label: `Succès & Badges (${myAchievementSummary.unlockedCount}/${myAchievementSummary.totalCount})`, icon: Award },
             { id: 'crawler', label: 'Crawler Profond N1/N2', icon: Globe },
             { id: 'paste', label: 'Extraction HTML / CSV / JSON', icon: FileText },
             { id: 'dedup', label: `Déduplication MDM (${duplicateGroups.length})`, icon: GitMerge },
@@ -6280,13 +6645,18 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
                               <select
                                 aria-label={`Statut CRM de ${f.societe}`}
                                 value={f.statut}
-                                onChange={(e) =>
+                                onChange={(e) => {
+                                  const nextStatut = e.target.value as StatutCRM;
+                                  if (nextStatut === 'Signé Orange Pro' && f.statut !== 'Signé Orange Pro') {
+                                    openSignContractModal(f);
+                                    return;
+                                  }
                                   setFiches((prev) =>
                                     prev.map((x) =>
-                                      x.id === f.id ? { ...x, statut: e.target.value as StatutCRM } : x
+                                      x.id === f.id ? { ...x, statut: nextStatut } : x
                                     )
-                                  )
-                                }
+                                  );
+                                }}
                                 className="px-2 py-1 rounded-lg border border-stone-200 bg-stone-50 text-xs font-medium text-stone-800"
                               >
                                 {STATUTS_CRM.map((s) => (
@@ -6924,6 +7294,42 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
               </div>
             )}
           </section>
+        )}
+
+        {/* ================================================================== */}
+        {/* ONGLET : CLASSEMENT ÉQUIPE, ÉVOLUTION & PAYOUTS                    */}
+        {/* ================================================================== */}
+        {activeTab === 'team' && (
+          <TeamPerformancePanel
+            currentUserUid={cloudUser.uid}
+            isSuperAdmin={isSuperAdmin}
+            teamStats={teamStats}
+            signedContracts={signedContracts}
+            onAdminUpdateContract={isSuperAdmin ? handleAdminUpdateContract : undefined}
+            onJumpToBadges={
+              isSuperAdmin
+                ? (uid) => {
+                    setBadgesFocusUid(uid);
+                    setActiveTab('badges');
+                  }
+                : undefined
+            }
+          />
+        )}
+
+        {/* ================================================================== */}
+        {/* ONGLET : SUCCÈS, BADGES & RÉALISATIONS ORANGE PRO                  */}
+        {/* ================================================================== */}
+        {activeTab === 'badges' && (
+          <AchievementsPanel
+            currentUserUid={cloudUser.uid}
+            currentUserName={currentUserDisplayName}
+            isSuperAdmin={isSuperAdmin}
+            myMetrics={myCollaboratorMetrics}
+            teamStats={teamStats}
+            initialSelectedUid={badgesFocusUid}
+            onAdminToggleManualBadge={isSuperAdmin ? handleAdminToggleManualBadge : undefined}
+          />
         )}
 
         {/* ================================================================== */}
@@ -7918,11 +8324,20 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
         </div>
       )}
 
+      {/* Modal Confirmation Signature Orange Pro & Calcul Payout */}
+      <SignContractModal
+        target={signContractTarget}
+        isSuperAdmin={isSuperAdmin}
+        submitting={signingContractBusy}
+        onClose={() => setSignContractTarget(null)}
+        onConfirm={handleConfirmSignContract}
+      />
+
       {/* Copilote Commercial IA Orange Pro (Gemini intégré côté serveur) */}
       <AiCopilotDrawer
         open={showAiCopilot}
         onClose={() => setShowAiCopilot(false)}
-        fiches={fiches}
+        fiches={accessibleFiches}
         focusedFiche={copilotFiche}
         onClearFocusedFiche={() => setCopilotFiche(null)}
         aiAvailable={serverAiStatus.available}

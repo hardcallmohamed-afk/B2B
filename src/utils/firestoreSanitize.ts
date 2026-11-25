@@ -275,6 +275,145 @@ export function sanitizeAppUserPayload(input: AppUserLike): SanitizedAppUserDoc 
   };
 }
 
+export const VALID_TEAM_ROLES = new Set(['super_admin', 'manager', 'commercial'] as const);
+export const VALID_ORANGE_TIERS = new Set(['Grand Compte', 'PME', 'TPE / Libéral'] as const);
+export const VALID_PAYOUT_STATUSES = new Set(['En attente', 'Validé', 'Versé'] as const);
+
+export interface TeamStatLike {
+  uid: string;
+  displayName: string;
+  role: string;
+  zone: string;
+  active: boolean;
+  totalProspects: number;
+  totalQualified: number;
+  totalContracts: number;
+  totalPayoutMad: number;
+  xp: number;
+  unlockedCount: number;
+  manualBadges?: string[];
+  monthlyHistory?: string[];
+}
+
+export interface SanitizedTeamStatDoc {
+  uid: string;
+  orgScope: 'orange_pro_team';
+  displayName: string;
+  role: 'super_admin' | 'manager' | 'commercial';
+  zone: string;
+  active: boolean;
+  totalProspects: number;
+  totalQualified: number;
+  totalContracts: number;
+  totalPayoutMad: number;
+  xp: number;
+  unlockedCount: number;
+  manualBadges: string[];
+  monthlyHistory: string[];
+}
+
+export function sanitizeTeamStatPayload(input: TeamStatLike): SanitizedTeamStatDoc {
+  const cleanUid = sanitizeDocId(input.uid, 'usr');
+  const rawName = clampString((input.displayName || '').trim(), 120);
+  const displayName = rawName.length >= 1 ? rawName : 'Collaborateur';
+  const role: 'super_admin' | 'manager' | 'commercial' = VALID_TEAM_ROLES.has(input.role as never)
+    ? (input.role as 'super_admin' | 'manager' | 'commercial')
+    : 'commercial';
+
+  const clampInt = (n: unknown, maxVal: number) =>
+    Math.min(maxVal, Math.max(0, Math.round(Number(n) || 0)));
+
+  return {
+    uid: cleanUid,
+    orgScope: 'orange_pro_team',
+    displayName,
+    role,
+    zone: clampString((input.zone || '').trim(), 100),
+    active: Boolean(input.active),
+    totalProspects: clampInt(input.totalProspects, 100000),
+    totalQualified: clampInt(input.totalQualified, 100000),
+    totalContracts: clampInt(input.totalContracts, 100000),
+    totalPayoutMad: clampInt(input.totalPayoutMad, 100000000),
+    xp: clampInt(input.xp, 10000000),
+    unlockedCount: clampInt(input.unlockedCount, 100),
+    manualBadges: sanitizeStringArray(input.manualBadges ?? [], 20, 64),
+    monthlyHistory: sanitizeStringArray(input.monthlyHistory ?? [], 24, 40),
+  };
+}
+
+export interface SignedContractLike {
+  id: string;
+  ownerId: string;
+  ownerName: string;
+  ficheId: string;
+  numeroFiche?: string;
+  societe: string;
+  ville: string;
+  secteur: string;
+  produitOrangePro: string;
+  tier: string;
+  effectif: string;
+  payoutMad: number;
+  payoutStatus: string;
+  signedAt: string;
+}
+
+export interface SanitizedSignedContractDoc {
+  id: string;
+  orgScope: 'orange_pro_team';
+  ownerId: string;
+  ownerName: string;
+  ficheId: string;
+  numeroFiche: string;
+  societe: string;
+  ville: string;
+  secteur: string;
+  produitOrangePro: string;
+  tier: 'Grand Compte' | 'PME' | 'TPE / Libéral';
+  effectif: string;
+  payoutMad: number;
+  payoutStatus: 'En attente' | 'Validé' | 'Versé';
+  signedAt: string;
+}
+
+export function sanitizeSignedContractPayload(
+  input: SignedContractLike
+): SanitizedSignedContractDoc {
+  const cleanId = sanitizeDocId(input.id, 'ctr');
+  const cleanOwnerId = sanitizeDocId(input.ownerId, 'usr');
+  const cleanFicheId = sanitizeDocId(input.ficheId, 'op');
+  const rawOwnerName = clampString((input.ownerName || '').trim(), 120);
+  const rawSociete = clampString((input.societe || '').trim(), 200);
+  const rawProduit = clampString((input.produitOrangePro || '').trim(), 200);
+  const secteur = VALID_SECTEUR_CODES.has(input.secteur as never) ? input.secteur : 'pme';
+  const tier: 'Grand Compte' | 'PME' | 'TPE / Libéral' = VALID_ORANGE_TIERS.has(input.tier as never)
+    ? (input.tier as 'Grand Compte' | 'PME' | 'TPE / Libéral')
+    : 'PME';
+  const payoutStatus: 'En attente' | 'Validé' | 'Versé' = VALID_PAYOUT_STATUSES.has(
+    input.payoutStatus as never
+  )
+    ? (input.payoutStatus as 'En attente' | 'Validé' | 'Versé')
+    : 'En attente';
+
+  return {
+    id: cleanId,
+    orgScope: 'orange_pro_team',
+    ownerId: cleanOwnerId,
+    ownerName: rawOwnerName.length >= 1 ? rawOwnerName : 'Collaborateur',
+    ficheId: cleanFicheId,
+    numeroFiche: sanitizeNumeroFiche(input.numeroFiche) || '',
+    societe: rawSociete.length >= 1 ? rawSociete : 'Client Orange Pro',
+    ville: clampString((input.ville || '').trim(), 100),
+    secteur,
+    produitOrangePro: rawProduit.length >= 1 ? rawProduit : 'Pack Orange Pro',
+    tier,
+    effectif: clampString((input.effectif || '').trim(), 20),
+    payoutMad: Math.min(10000000, Math.max(0, Math.round(Number(input.payoutMad) || 0))),
+    payoutStatus,
+    signedAt: clampString(input.signedAt, 64) || new Date().toISOString(),
+  };
+}
+
 export function serializeDocCanonical(doc: Record<string, unknown>): string {
   const keys = Object.keys(doc).sort();
   const normalized: Record<string, unknown> = {};

@@ -161,3 +161,61 @@ test('sanitizeAppUserPayload enforces role enum, email lowercasing, and blueprin
   assert.equal(out.active, true);
   assert.equal(out.createdBy, 'admin_123');
 });
+
+test('sanitizeTeamStatPayload clamps counters, badges, monthlyHistory, and validates role', async () => {
+  const { sanitizeTeamStatPayload } = await import('./firestoreSanitize');
+  const out = sanitizeTeamStatPayload({
+    uid: 'usr/1',
+    displayName: '  Salma Idrissi ',
+    role: 'invalid_role',
+    zone: 'Meknès',
+    active: true,
+    totalProspects: -10,
+    totalQualified: 25,
+    totalContracts: 4,
+    totalPayoutMad: 5200.6,
+    xp: 1850,
+    unlockedCount: 140,
+    manualBadges: Array.from({ length: 25 }, (_, i) => `badge_${i}`),
+    monthlyHistory: Array.from({ length: 30 }, (_, i) => `2026-${String((i % 12) + 1).padStart(2, '0')}:1:1000`),
+  });
+
+  assert.equal(out.uid, 'usr_1');
+  assert.equal(out.orgScope, 'orange_pro_team');
+  assert.equal(out.role, 'commercial');
+  assert.equal(out.totalProspects, 0);
+  assert.equal(out.totalPayoutMad, 5201);
+  assert.equal(out.unlockedCount, 100);
+  assert.equal(out.manualBadges.length, 20);
+  assert.equal(out.monthlyHistory.length <= 24, true);
+});
+
+test('sanitizeSignedContractPayload strips invalid enums and enforces numeric bounds with zero PII fields', async () => {
+  const { sanitizeSignedContractPayload } = await import('./firestoreSanitize');
+  const out = sanitizeSignedContractPayload({
+    id: 'ctr/001',
+    ownerId: 'u_9',
+    ownerName: 'Youssef',
+    ficheId: 'op_77',
+    numeroFiche: 'op-0077',
+    societe: 'Clinique Atlas',
+    ville: 'Meknès',
+    secteur: 'clinique',
+    produitOrangePro: 'Fibre Dédiée + Flotte Mobile Corporate + Standard Cloud',
+    tier: 'InvalidTier',
+    effectif: '45',
+    payoutMad: -500,
+    payoutStatus: 'HackerPaid',
+    signedAt: '2026-11-25T15:00:00.000Z',
+  });
+
+  assert.equal(out.id, 'ctr_001');
+  assert.equal(out.orgScope, 'orange_pro_team');
+  assert.equal(out.numeroFiche, 'OP-0077');
+  assert.equal(out.tier, 'PME');
+  assert.equal(out.payoutStatus, 'En attente');
+  assert.equal(out.payoutMad, 0);
+  assert.equal('telephone' in out, false);
+  assert.equal('email' in out, false);
+});
+
