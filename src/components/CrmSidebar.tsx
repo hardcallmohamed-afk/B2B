@@ -18,6 +18,7 @@ import {
 } from 'lucide-react';
 import type { TeamRole } from '../utils/gamification';
 import { getUserInitials } from '../utils/avatarResize';
+import { DiversifiaMark } from './DiversifiaLogo';
 import { RoleBadge } from './RoleBadge';
 
 export type CrmTabId =
@@ -232,16 +233,14 @@ export const CrmSidebar: React.FC<CrmSidebarProps> = ({
           }`}
         >
           <div className="flex items-center gap-2.5 min-w-0">
-            <div className="w-8 h-8 rounded-lg bg-orange-600 text-white flex items-center justify-center font-extrabold text-base shrink-0 shadow-xs">
-              O
-            </div>
+            <DiversifiaMark size={32} />
             {!compact && (
               <div className="min-w-0">
-                <div className="text-sm font-extrabold tracking-tight text-white truncate leading-tight">
-                  Orange Pro B2B
+                <div className="text-sm font-extrabold tracking-[0.06em] text-white truncate leading-tight">
+                  DIVERSIFIA
                 </div>
-                <div className="text-[10px] font-medium text-stone-400 truncate">
-                  CRM · MDM · Studio IA
+                <div className="text-[9.5px] font-bold uppercase tracking-wider text-[#F96614] truncate">
+                  Distributeur Orange Pro
                 </div>
               </div>
             )}
