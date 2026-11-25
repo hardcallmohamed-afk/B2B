@@ -11,6 +11,8 @@ import {
   Plus,
   ChevronLeft,
   ChevronRight,
+  Clock,
+  AlertTriangle,
 } from 'lucide-react';
 import {
   SECTEURS_META,
@@ -20,10 +22,17 @@ import {
   type FicheEntreprise,
   type StatutCRM,
 } from '../App';
-import { KANBAN_STAGES, groupFichesByStatut } from '../utils/analytics';
+import {
+  KANBAN_STAGES,
+  computePortfolioVelocity,
+  groupFichesByStatut,
+  type PortfolioVelocityReport,
+  type VelocityLevel,
+} from '../utils/analytics';
 
 interface KanbanBoardProps {
   fiches: FicheEntreprise[];
+  velocityReport?: PortfolioVelocityReport;
   verifyingId: string | null;
   onMoveFiche: (ficheId: string, targetStatut: StatutCRM) => void;
   onOpenEmail: (fiche: FicheEntreprise) => void;
@@ -33,8 +42,54 @@ interface KanbanBoardProps {
   onQuickAddInStage?: (statut: StatutCRM) => void;
 }
 
+function getVelocityCardStyles(level: VelocityLevel): {
+  textCls: string;
+  subTextCls: string;
+  cardBorderCls: string;
+  barCls: string;
+} {
+  switch (level) {
+    case 'bottleneck':
+      return {
+        textCls: 'text-red-700',
+        subTextCls: 'text-red-600/90',
+        cardBorderCls: 'border-red-300 hover:border-red-400',
+        barCls: 'bg-red-500',
+      };
+    case 'slow':
+      return {
+        textCls: 'text-amber-700',
+        subTextCls: 'text-amber-700/90',
+        cardBorderCls: 'border-amber-300 hover:border-amber-400',
+        barCls: 'bg-amber-500',
+      };
+    case 'fast':
+      return {
+        textCls: 'text-emerald-700',
+        subTextCls: 'text-stone-500',
+        cardBorderCls: 'border-stone-200 hover:border-stone-400',
+        barCls: 'bg-emerald-500',
+      };
+    case 'terminal':
+      return {
+        textCls: 'text-stone-500',
+        subTextCls: 'text-stone-400',
+        cardBorderCls: 'border-stone-200 hover:border-stone-400',
+        barCls: 'bg-stone-300',
+      };
+    default:
+      return {
+        textCls: 'text-stone-700',
+        subTextCls: 'text-stone-500',
+        cardBorderCls: 'border-stone-200 hover:border-stone-400',
+        barCls: 'bg-stone-400',
+      };
+  }
+}
+
 export const KanbanBoard: React.FC<KanbanBoardProps> = ({
   fiches,
+  velocityReport: externalVelocityReport,
   verifyingId,
   onMoveFiche,
   onOpenEmail,
@@ -45,8 +100,28 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
 }) => {
   const [draggingId, setDraggingId] = useState<string | null>(null);
   const [dragOverStage, setDragOverStage] = useState<StatutCRM | null>(null);
+  const [onlyBottlenecks, setOnlyBottlenecks] = useState(false);
 
-  const columns = useMemo(() => groupFichesByStatut(fiches), [fiches]);
+  const velocityReport = useMemo(
+    () => externalVelocityReport ?? computePortfolioVelocity(fiches),
+    [externalVelocityReport, fiches]
+  );
+
+  const visibleFiches = useMemo(() => {
+    if (!onlyBottlenecks) return fiches;
+    return fiches.filter((f) => velocityReport.byFicheId.get(f.id)?.isBottleneck);
+  }, [fiches, onlyBottlenecks, velocityReport]);
+
+  const columns = useMemo(() => groupFichesByStatut(visibleFiches), [visibleFiches]);
+
+  const displayedBottleneckCount = useMemo(
+    () =>
+      fiches.reduce(
+        (acc, f) => acc + (velocityReport.byFicheId.get(f.id)?.isBottleneck ? 1 : 0),
+        0
+      ),
+    [fiches, velocityReport]
+  );
 
   const handleDragStart = (e: React.DragEvent, ficheId: string) => {
     setDraggingId(ficheId);
@@ -89,11 +164,34 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
             Pipeline Commercial Kanban — Glisser-Déposer
           </h2>
           <p className="text-xs text-stone-500">
-            Glissez une carte d&apos;une colonne à l&apos;autre (ou utilisez les flèches rapides / le sélecteur) pour mettre à jour le statut CRM, Firestore et les graphiques KPI.
+            Glissez une carte d&apos;une colonne à l&apos;autre ou suivez la vélocité par statut (temps écoulé vs moyenne) pour débloquer les comptes en attente.
           </p>
         </div>
-        <div className="text-xs text-stone-500 tabular-nums">
-          {fiches.length} fiche(s) affichée(s) · 6 étapes
+        <div className="flex flex-wrap items-center gap-3 text-xs tabular-nums">
+          {displayedBottleneckCount > 0 ? (
+            <button
+              type="button"
+              onClick={() => setOnlyBottlenecks((v) => !v)}
+              aria-pressed={onlyBottlenecks}
+              data-testid="kanban-bottleneck-toggle"
+              className={`px-2.5 py-1 rounded-md border font-semibold flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0 ${
+                onlyBottlenecks
+                  ? 'bg-red-700 text-white border-red-700'
+                  : 'bg-red-50 text-red-700 border-red-200 hover:bg-red-100'
+              }`}
+            >
+              <AlertTriangle className="w-3.5 h-3.5" />
+              {displayedBottleneckCount} point{displayedBottleneckCount > 1 ? 's' : ''} de blocage
+            </button>
+          ) : (
+            <span className="text-emerald-700 font-medium flex items-center gap-1 whitespace-nowrap">
+              <Clock className="w-3.5 h-3.5" />
+              Pipeline fluide
+            </span>
+          )}
+          <span className="text-stone-500">
+            {visibleFiches.length} fiche(s) affichée(s) · 6 étapes
+          </span>
         </div>
       </div>
 
@@ -103,6 +201,7 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
             const isOver = dragOverStage === col.meta.statut;
             const prevStage = colIndex > 0 ? KANBAN_STAGES[colIndex - 1].statut : null;
             const nextStage = colIndex < KANBAN_STAGES.length - 1 ? KANBAN_STAGES[colIndex + 1].statut : null;
+            const stageVel = velocityReport.byStage[col.meta.statut];
 
             return (
               <div
@@ -161,6 +260,29 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
                     </span>
                     <span>Mat. {col.avgMaturity}%</span>
                   </div>
+                  <div
+                    className="flex items-center justify-between gap-2 mt-1 pt-1 border-t border-stone-200/60 text-[10px] tabular-nums"
+                    data-testid={`kanban-stage-vel-${col.meta.statut}`}
+                  >
+                    <span className="text-stone-500 flex items-center gap-1">
+                      <Clock className="w-3 h-3 text-stone-400" />
+                      Moy. {stageVel?.avgLabel || '—'}
+                    </span>
+                    {stageVel && stageVel.bottleneckCount > 0 ? (
+                      <span className="font-semibold text-red-700 flex items-center gap-0.5">
+                        <AlertTriangle className="w-3 h-3" />
+                        {stageVel.bottleneckCount} bloqué{stageVel.bottleneckCount > 1 ? 's' : ''}
+                      </span>
+                    ) : stageVel && stageVel.slowCount > 0 ? (
+                      <span className="font-semibold text-amber-700">
+                        {stageVel.slowCount} ralenti{stageVel.slowCount > 1 ? 's' : ''}
+                      </span>
+                    ) : (
+                      <span className="text-stone-400">
+                        {stageVel?.isTerminal ? 'Sortie' : 'Nominal'}
+                      </span>
+                    )}
+                  </div>
                 </div>
 
                 {/* Liste des cartes */}
@@ -173,7 +295,7 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
                           : 'border-stone-300/80 text-stone-400'
                       }`}
                     >
-                      {isOver ? 'Déposer ici' : 'Glisser une fiche ici'}
+                      {isOver ? 'Déposer ici' : onlyBottlenecks ? 'Aucun blocage ici' : 'Glisser une fiche ici'}
                     </div>
                   ) : (
                     col.items.map((f) => {
@@ -181,10 +303,16 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
                       const segMeta = SEGMENTS_COULEUR[secMeta.couleur];
                       const reco = getOrangeProRecommendation(f);
                       const mat = computeMaturityScore(f);
+                      const vel = velocityReport.byFicheId.get(f.id);
+                      const velStyles = getVelocityCardStyles(vel?.level || 'normal');
                       const isDragging = draggingId === f.id;
                       const waPhone = f.telephone ? `212${f.telephone.replace(/^0/, '')}` : '';
                       const extraPhonesCount = f.telephonesSupplementaires?.length || 0;
                       const extraEmailsCount = f.emailsSupplementaires?.length || 0;
+                      const velBarPct =
+                        vel && vel.stageAvgHours > 0
+                          ? Math.min(100, Math.max(8, Math.round((vel.elapsedHours / (vel.stageAvgHours * 2)) * 100)))
+                          : 20;
 
                       return (
                         <article
@@ -193,7 +321,7 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
                           data-testid={`kanban-card-${f.id}`}
                           onDragStart={(e) => handleDragStart(e, f.id)}
                           onDragEnd={handleDragEnd}
-                          className={`relative overflow-hidden rounded-lg bg-white border border-stone-200 p-2.5 transition-all cursor-grab active:cursor-grabbing hover:border-stone-400 ${
+                          className={`relative overflow-hidden rounded-lg bg-white border p-2.5 transition-all cursor-grab active:cursor-grabbing ${velStyles.cardBorderCls} ${
                             isDragging ? 'opacity-45 scale-[0.98] ring-2 ring-orange-400' : ''
                           }`}
                         >
@@ -259,8 +387,39 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
                             )}
                           </div>
 
+                          {/* Indicateur de vélocité automatique (temps dans le statut vs moyenne) */}
+                          {vel && (
+                            <div
+                              data-testid={`kanban-velocity-${f.id}`}
+                              title={`Dans « ${f.statut} » depuis ${vel.durationLabel} (${vel.comparisonLabel})`}
+                              className="mt-2 pt-2 border-t border-stone-100 space-y-1"
+                            >
+                              <div className="flex items-center justify-between gap-1.5 text-[10px] tabular-nums">
+                                <span className={`font-semibold flex items-center gap-1 min-w-0 ${velStyles.textCls}`}>
+                                  {vel.isBottleneck ? (
+                                    <AlertTriangle className="w-3 h-3 shrink-0" />
+                                  ) : (
+                                    <Clock className="w-3 h-3 shrink-0" />
+                                  )}
+                                  <span className="font-mono font-bold">{vel.durationLabel}</span>
+                                  <span className="truncate">{vel.label}</span>
+                                </span>
+                                <span className={`font-mono shrink-0 ${velStyles.subTextCls}`}>
+                                  {vel.comparisonLabel}
+                                </span>
+                              </div>
+                              <div className="h-1 bg-stone-100 rounded-full overflow-hidden">
+                                <div
+                                  className={`h-full rounded-full transition-all ${velStyles.barCls}`}
+                                  style={{ width: `${velBarPct}%` }}
+                                />
+                              </div>
+                            </div>
+                          )}
+
                           {/* Barre de maturité */}
                           <div className="mt-2 flex items-center gap-2">
+                            <span className="text-[10px] text-stone-400 shrink-0">Mat.</span>
                             <div className="flex-1 h-1 bg-stone-100 rounded-full overflow-hidden">
                               <div
                                 className={`h-full rounded-full ${

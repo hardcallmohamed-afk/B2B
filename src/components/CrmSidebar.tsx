@@ -6,6 +6,7 @@ import {
   GitMerge,
   Globe,
   KanbanSquare,
+  KeyRound,
   LogOut,
   PanelLeftClose,
   PanelLeftOpen,
@@ -16,7 +17,7 @@ import {
   Users,
   X,
 } from 'lucide-react';
-import type { TeamRole } from '../utils/gamification';
+import { ROLE_BADGE_META, type TeamRole } from '../utils/gamification';
 import { getUserInitials } from '../utils/avatarResize';
 import { DiversifiaMark } from './DiversifiaLogo';
 import { RoleBadge } from './RoleBadge';
@@ -30,7 +31,8 @@ export type CrmTabId =
   | 'paste'
   | 'dedup'
   | 'compte'
-  | 'admin';
+  | 'admin'
+  | 'vault';
 
 export const CRM_TAB_META: Record<
   CrmTabId,
@@ -83,7 +85,12 @@ export const CRM_TAB_META: Record<
   admin: {
     section: 'Administration',
     title: 'Utilisateurs & Accès',
-    subtitle: 'Création de comptes, sélecteurs de rôles & coffre Cloud des clés API',
+    subtitle: 'Création de comptes, sélecteurs de rôles, suivi d’équipe & coffre Cloud des clés API',
+  },
+  vault: {
+    section: 'Administration',
+    title: 'Coffre Clés API (/api_keys)',
+    subtitle: 'Gestion sécurisée des clés Groq, Mistral, Gemini & proxy Cloud réservée au Super-Admin',
   },
 };
 
@@ -103,6 +110,7 @@ interface CrmSidebarProps {
     unlockedBadges: number;
     totalBadges: number;
     managedUsers: number;
+    apiKeys?: number;
   };
   user: {
     displayName: string;
@@ -209,6 +217,13 @@ export const CrmSidebar: React.FC<CrmSidebarProps> = ({
                 label: 'Utilisateurs & Accès',
                 icon: Users,
                 badge: String(counts.managedUsers),
+              },
+              {
+                id: 'vault' as CrmTabId,
+                label: 'Coffre Clés API',
+                icon: KeyRound,
+                badge: typeof counts.apiKeys === 'number' ? String(counts.apiKeys) : undefined,
+                badgeTone: 'orange' as const,
               },
             ],
           },
@@ -428,7 +443,7 @@ export const CrmSidebar: React.FC<CrmSidebarProps> = ({
               <button
                 type="button"
                 onClick={() => handleNavClick('compte')}
-                title={`${user.displayName} — Mon Compte`}
+                title={`${user.displayName} (${(ROLE_BADGE_META[user.role] || ROLE_BADGE_META.commercial).shortLabel}) — Mon Compte`}
                 className="w-8 h-8 rounded-lg overflow-hidden border border-stone-700 bg-stone-800 flex items-center justify-center hover:border-orange-500 transition-colors"
               >
                 {user.avatarDataUrl ? (

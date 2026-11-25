@@ -497,7 +497,8 @@ export function groupFichesByStatut(fiches: FicheEntreprise[]): KanbanColumnData
 export function moveFicheToStatut(
   fiches: FicheEntreprise[],
   ficheId: string,
-  targetStatut: StatutCRM
+  targetStatut: StatutCRM,
+  transitionAt: string = new Date().toISOString()
 ): { updated: FicheEntreprise[]; movedFiche: FicheEntreprise | null; changed: boolean } {
   let movedFiche: FicheEntreprise | null = null;
   let changed = false;
@@ -509,11 +510,195 @@ export function moveFicheToStatut(
       return f;
     }
     changed = true;
-    movedFiche = { ...f, statut: targetStatut };
+    movedFiche = { ...f, statut: targetStatut, statutUpdatedAt: transitionAt };
     return movedFiche;
   });
 
   return { updated, movedFiche, changed };
+}
+
+export type VelocityLevel = 'fast' | 'normal' | 'slow' | 'bottleneck' | 'terminal';
+
+export interface FicheVelocityInfo {
+  ficheId: string;
+  statut: StatutCRM;
+  elapsedHours: number;
+  elapsedDays: number;
+  stageAvgHours: number;
+  stageSampleCount: number;
+  ratioToAvg: number;
+  deltaPct: number;
+  level: VelocityLevel;
+  label: string;
+  durationLabel: string;
+  avgLabel: string;
+  comparisonLabel: string;
+  isBottleneck: boolean;
+}
+
+export interface StageVelocitySummary {
+  statut: StatutCRM;
+  count: number;
+  avgHours: number;
+  avgLabel: string;
+  bottleneckCount: number;
+  slowCount: number;
+  isTerminal: boolean;
+}
+
+export interface PortfolioVelocityReport {
+  byFicheId: Map<string, FicheVelocityInfo>;
+  byStage: Record<StatutCRM, StageVelocitySummary>;
+  totalBottlenecks: number;
+  totalSlow: number;
+  topBottleneckStage: StatutCRM | null;
+}
+
+const TERMINAL_VELOCITY_STAGES = new Set<StatutCRM>(['Signé Orange Pro', 'Pas intéressé']);
+
+export function formatVelocityDuration(hours: number): string {
+  if (!Number.isFinite(hours) || hours < 1) return '< 1h';
+  if (hours < 24) {
+    const rounded = Math.round(hours);
+    return rounded >= 24 ? '1j' : `${rounded}h`;
+  }
+  const days = hours / 24;
+  if (days < 10) {
+    const roundedTenth = Math.round(days * 10) / 10;
+    return `${String(roundedTenth).replace(/\.0$/, '').replace('.', ',')}j`;
+  }
+  return `${Math.round(days)}j`;
+}
+
+export function computePortfolioVelocity(
+  fiches: FicheEntreprise[],
+  referenceNowMs: number = Date.now()
+): PortfolioVelocityReport {
+  const stageAcc = new Map<StatutCRM, { sumHours: number; count: number }>();
+  for (const s of KANBAN_STAGES) {
+    stageAcc.set(s.statut, { sumHours: 0, count: 0 });
+  }
+
+  const elapsedByFiche = new Map<string, number>();
+
+  for (const f of fiches) {
+    const rawIso = f.statutUpdatedAt || f.dateAjout || '';
+    const parsedMs = Date.parse(rawIso);
+    const elapsedHours = Number.isFinite(parsedMs)
+      ? Math.max(0, (referenceNowMs - parsedMs) / 3600000)
+      : 0;
+    elapsedByFiche.set(f.id, elapsedHours);
+
+    const acc = stageAcc.get(f.statut);
+    if (acc) {
+      acc.sumHours += elapsedHours;
+      acc.count += 1;
+    }
+  }
+
+  const byStage = {} as Record<StatutCRM, StageVelocitySummary>;
+  for (const s of KANBAN_STAGES) {
+    const acc = stageAcc.get(s.statut) || { sumHours: 0, count: 0 };
+    const avgHours = acc.count > 0 ? acc.sumHours / acc.count : 0;
+    byStage[s.statut] = {
+      statut: s.statut,
+      count: acc.count,
+      avgHours,
+      avgLabel: acc.count > 0 ? formatVelocityDuration(avgHours) : '—',
+      bottleneckCount: 0,
+      slowCount: 0,
+      isTerminal: TERMINAL_VELOCITY_STAGES.has(s.statut),
+    };
+  }
+
+  const byFicheId = new Map<string, FicheVelocityInfo>();
+  let totalBottlenecks = 0;
+  let totalSlow = 0;
+
+  for (const f of fiches) {
+    const elapsedHours = elapsedByFiche.get(f.id) ?? 0;
+    const elapsedDays = Number((elapsedHours / 24).toFixed(1));
+    const stageSummary = byStage[f.statut];
+    const stageAvgHours = stageSummary ? stageSummary.avgHours : 0;
+    const stageSampleCount = stageSummary ? stageSummary.count : 1;
+    const avgLabel = stageSummary ? stageSummary.avgLabel : '—';
+    const durationLabel = formatVelocityDuration(elapsedHours);
+    const ratioToAvg = stageAvgHours > 0 ? elapsedHours / stageAvgHours : 1;
+    const deltaPct = stageAvgHours > 0 ? Math.round((ratioToAvg - 1) * 100) : 0;
+
+    let level: VelocityLevel = 'normal';
+    let label = 'Dans la moyenne';
+    let isBottleneck = false;
+
+    if (TERMINAL_VELOCITY_STAGES.has(f.statut)) {
+      level = 'terminal';
+      label = f.statut === 'Signé Orange Pro' ? 'Signé' : 'Clôturé';
+    } else if (elapsedHours < 12) {
+      level = 'fast';
+      label = 'Rapide';
+    } else if (stageSampleCount >= 2 && stageAvgHours > 0 && ratioToAvg >= 1.35 && elapsedHours >= 24) {
+      level = 'bottleneck';
+      label = 'Blocage';
+      isBottleneck = true;
+      totalBottlenecks += 1;
+      if (stageSummary) stageSummary.bottleneckCount += 1;
+    } else if (stageSampleCount >= 2 && stageAvgHours > 0 && ratioToAvg >= 1.1 && elapsedHours >= 18) {
+      level = 'slow';
+      label = 'Ralentissement';
+      totalSlow += 1;
+      if (stageSummary) stageSummary.slowCount += 1;
+    } else if (stageSampleCount >= 2 && stageAvgHours > 0 && ratioToAvg <= 0.75) {
+      level = 'fast';
+      label = 'Rapide';
+    }
+
+    const deltaText =
+      deltaPct > 0 ? `+${deltaPct}%` : deltaPct < 0 ? `${deltaPct}%` : 'dans la moy.';
+    const comparisonLabel = TERMINAL_VELOCITY_STAGES.has(f.statut)
+      ? stageSampleCount > 0
+        ? `moy. ${avgLabel}`
+        : '—'
+      : stageSampleCount > 1 && stageAvgHours > 0
+      ? `${deltaText} · moy. ${avgLabel}`
+      : stageAvgHours > 0
+      ? `moy. ${avgLabel}`
+      : '—';
+
+    byFicheId.set(f.id, {
+      ficheId: f.id,
+      statut: f.statut,
+      elapsedHours,
+      elapsedDays,
+      stageAvgHours,
+      stageSampleCount,
+      ratioToAvg,
+      deltaPct,
+      level,
+      label,
+      durationLabel,
+      avgLabel,
+      comparisonLabel,
+      isBottleneck,
+    });
+  }
+
+  let topBottleneckStage: StatutCRM | null = null;
+  let maxBottlenecks = 0;
+  for (const s of KANBAN_STAGES) {
+    const st = byStage[s.statut];
+    if (st && st.bottleneckCount > maxBottlenecks) {
+      maxBottlenecks = st.bottleneckCount;
+      topBottleneckStage = s.statut;
+    }
+  }
+
+  return {
+    byFicheId,
+    byStage,
+    totalBottlenecks,
+    totalSlow,
+    topBottleneckStage,
+  };
 }
 
 export function buildPortfolioAiSummary(fiches: FicheEntreprise[]): string {

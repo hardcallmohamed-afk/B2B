@@ -749,6 +749,7 @@ function buildMutableFicheUpdate(docData: SanitizedFicheDoc): DocumentData {
     siteWeb,
     verifieWeb,
     pistesEnrichissement,
+    statutUpdatedAt,
     ...requiredMutable
   } = docData;
 
@@ -763,6 +764,7 @@ function buildMutableFicheUpdate(docData: SanitizedFicheDoc): DocumentData {
     verifieWeb: verifieWeb !== undefined ? verifieWeb : deleteField(),
     pistesEnrichissement:
       pistesEnrichissement !== undefined ? pistesEnrichissement : deleteField(),
+    statutUpdatedAt: statutUpdatedAt !== undefined ? statutUpdatedAt : deleteField(),
   };
 }
 
@@ -901,6 +903,9 @@ async function upsertFicheResilient(
     if (statusOnly) {
       await updateDoc(ref, {
         statut: ficheDoc.statut,
+        ...(ficheDoc.statutUpdatedAt !== undefined
+          ? { statutUpdatedAt: ficheDoc.statutUpdatedAt }
+          : {}),
         updatedAt: serverTimestamp(),
       });
     } else {
@@ -978,6 +983,9 @@ export async function syncFichesDiffToFirestore(
       pushOp((b) =>
         b.update(ref, {
           statut: upd.next.statut,
+          ...(upd.next.statutUpdatedAt !== undefined
+            ? { statutUpdatedAt: upd.next.statutUpdatedAt }
+            : {}),
           updatedAt: serverTimestamp(),
         })
       );

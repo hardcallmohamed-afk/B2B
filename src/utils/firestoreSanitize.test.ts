@@ -123,9 +123,19 @@ test('computeCollectionSyncDiff detects create, status-only update, full update,
   assert.equal(noop.toUpdate.length, 0);
   assert.equal(noop.toDelete.length, 0);
 
-  // Status-only update on A, delete B, create C
-  const updatedA: SanitizedFicheDoc = { ...baseA, statut: 'RDV pris' };
-  const createdC = sanitizeFichePayload('u1', { ...baseA, id: 'op_3', societe: 'Notaire Fès' });
+  // Status-only update (statut + statutUpdatedAt) on A, delete B, create C
+  const updatedA: SanitizedFicheDoc = {
+    ...baseA,
+    statut: 'RDV pris',
+    statutUpdatedAt: '2026-11-25T11:30:00.000Z',
+  };
+  const createdC = sanitizeFichePayload('u1', {
+    ...baseA,
+    id: 'op_3',
+    societe: 'Notaire Fès',
+    statutUpdatedAt: '2026-11-25T11:30:00.000Z',
+  });
+  assert.equal(createdC.statutUpdatedAt, '2026-11-25T11:30:00.000Z');
   const diff = computeCollectionSyncDiff(known, [updatedA, createdC]);
 
   assert.equal(diff.toCreate.length, 1);
@@ -136,7 +146,12 @@ test('computeCollectionSyncDiff detects create, status-only update, full update,
   assert.deepEqual(diff.toDelete, ['op_2']);
 
   // Multi-field update sets statusOnly = false
-  const editedA: SanitizedFicheDoc = { ...baseA, statut: 'RDV pris', telephone: '0661223344' };
+  const editedA: SanitizedFicheDoc = {
+    ...baseA,
+    statut: 'RDV pris',
+    statutUpdatedAt: '2026-11-25T11:30:00.000Z',
+    telephone: '0661223344',
+  };
   const diff2 = computeCollectionSyncDiff(known, [editedA, baseB]);
   assert.equal(diff2.toUpdate.length, 1);
   assert.equal(diff2.toUpdate[0].statusOnly, false);

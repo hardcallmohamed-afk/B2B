@@ -85,6 +85,8 @@ function maskApiKey(raw: string): string {
   return `${s.slice(0, 5)}••••••${s.slice(-4)}`;
 }
 
+export type AdminPanelSection = 'all' | 'users' | 'attendance' | 'vault';
+
 interface AdminUsersPanelProps {
   adminUid: string;
   adminEmail: string;
@@ -94,6 +96,8 @@ interface AdminUsersPanelProps {
   userPresences?: UserPresenceRecord[];
   cloudApiKeys?: CloudApiKeyRecord[];
   villesOptions: string[];
+  activeSection?: AdminPanelSection;
+  onSectionChange?: (section: AdminPanelSection) => void;
   onNotify: (msg: string, type?: 'ok' | 'warn' | 'err') => void;
 }
 
@@ -106,8 +110,20 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
   userPresences = [],
   cloudApiKeys = [],
   villesOptions,
+  activeSection,
+  onSectionChange,
   onNotify,
 }) => {
+  const [internalSection, setInternalSection] = useState<AdminPanelSection>('all');
+  const currentSection = activeSection ?? internalSection;
+  const setCurrentSection = (next: AdminPanelSection) => {
+    setInternalSection(next);
+    onSectionChange?.(next);
+  };
+  const showUsersSection = currentSection === 'all' || currentSection === 'users';
+  const showAttendanceSection = currentSection === 'all' || currentSection === 'attendance';
+  const showVaultSection = currentSection === 'all' || currentSection === 'vault';
+  const [showVaultRulesPreview, setShowVaultRulesPreview] = useState(false);
   // Formulaire de création d'utilisateur
   const [displayName, setDisplayName] = useState('');
   const [email, setEmail] = useState('');
@@ -660,32 +676,73 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
 
   return (
     <section data-testid="admin-users-panel" className="space-y-4">
-      {/* En-tête Super-Admin */}
-      <div className="bg-white rounded-xl border border-stone-200 p-4 flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <h2 className="text-sm font-bold text-stone-900 flex items-center gap-2">
-            <ShieldCheck className="w-4 h-4 text-orange-600" />
-            Administration des Utilisateurs &amp; Accès Privés
-          </h2>
-          <p className="text-xs text-stone-500 mt-0.5">
-            Section strictement réservée au Super-Admin ({SUPER_ADMIN_EMAIL}). Vous seul pouvez créer, suspendre ou révoquer des comptes.
-          </p>
-        </div>
-        <div className="flex items-center gap-2 text-xs font-mono tabular-nums">
-          <span className="px-2.5 py-1 rounded-lg bg-stone-100 text-stone-800 font-semibold">
-            {stats.total} compte{stats.total > 1 ? 's' : ''}
-          </span>
-          <span className="px-2.5 py-1 rounded-lg bg-emerald-50 text-emerald-800 font-semibold">
-            {stats.active} actif{stats.active > 1 ? 's' : ''}
-          </span>
-          {stats.suspended > 0 && (
-            <span className="px-2.5 py-1 rounded-lg bg-red-50 text-red-800 font-semibold">
-              {stats.suspended} suspendu{stats.suspended > 1 ? 's' : ''}
+      {/* En-tête Super-Admin + Navigation directe par section */}
+      <div className="bg-white rounded-xl border border-stone-200 p-4 space-y-3">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h2 className="text-sm font-bold text-stone-900 flex items-center gap-2">
+              <ShieldCheck className="w-4 h-4 text-orange-600" />
+              Administration des Utilisateurs, Pointage &amp; Coffre Clés API
+            </h2>
+            <p className="text-xs text-stone-500 mt-0.5">
+              Section strictement réservée au Super-Admin ({SUPER_ADMIN_EMAIL}). Vous seul pouvez gérer les comptes, consulter le pointage et modifier <code className="font-mono text-[11px] text-orange-700">/api_keys/&#123;provider&#125;</code>.
+            </p>
+          </div>
+          <div className="flex items-center gap-2 text-xs font-mono tabular-nums">
+            <span className="px-2.5 py-1 rounded-lg bg-stone-100 text-stone-800 font-semibold">
+              {stats.total} compte{stats.total > 1 ? 's' : ''}
             </span>
-          )}
+            <span className="px-2.5 py-1 rounded-lg bg-emerald-50 text-emerald-800 font-semibold">
+              {stats.active} actif{stats.active > 1 ? 's' : ''}
+            </span>
+            <span className="px-2.5 py-1 rounded-lg bg-orange-50 text-orange-800 font-semibold">
+              {cloudApiKeys.length} clé{cloudApiKeys.length > 1 ? 's' : ''} API
+            </span>
+            {stats.suspended > 0 && (
+              <span className="px-2.5 py-1 rounded-lg bg-red-50 text-red-800 font-semibold">
+                {stats.suspended} suspendu{stats.suspended > 1 ? 's' : ''}
+              </span>
+            )}
+          </div>
+        </div>
+
+        {/* Barre d'onglets directs Super-Admin */}
+        <div
+          role="tablist"
+          aria-label="Sections Administration"
+          className="flex flex-wrap items-center gap-1.5 pt-2 border-t border-stone-100"
+        >
+          {(
+            [
+              { id: 'all', label: 'Vue complète' },
+              { id: 'users', label: `Comptes & Rôles (${stats.total})` },
+              { id: 'attendance', label: `Suivi & Pointage (${attendanceSummary.totalMembers})` },
+              { id: 'vault', label: `Coffre /api_keys/{provider} (${cloudApiKeys.length})` },
+            ] as Array<{ id: AdminPanelSection; label: string }>
+          ).map((tab) => {
+            const active = currentSection === tab.id;
+            return (
+              <button
+                key={tab.id}
+                type="button"
+                role="tab"
+                aria-selected={active}
+                data-testid={`admin-subtab-${tab.id}`}
+                onClick={() => setCurrentSection(tab.id)}
+                className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors border ${
+                  active
+                    ? 'bg-orange-600 text-white border-orange-600 shadow-xs'
+                    : 'bg-stone-50 text-stone-700 border-stone-200 hover:bg-stone-100'
+                }`}
+              >
+                {tab.label}
+              </button>
+            );
+          })}
         </div>
       </div>
 
+      {showUsersSection && (
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-start">
         {/* Colonne gauche : Formulaire création utilisateur + Mot de passe Admin */}
         <div className="lg:col-span-5 space-y-4">
@@ -1258,8 +1315,10 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
           )}
         </div>
       </div>
+      )}
 
       {/* Suivi Équipe, Profils complets, Appareils & Pointage Heures de Travail */}
+      {showAttendanceSection && (
       <div
         data-testid="admin-attendance-panel"
         className="bg-white rounded-xl border border-stone-200 p-4 space-y-4"
@@ -1624,9 +1683,12 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
           </div>
         )}
       </div>
+      )}
 
       {/* Coffre Clés API Cloud (/api_keys/{provider}) — Super-Admin uniquement */}
+      {showVaultSection && (
       <div
+        id="admin-api-keys-vault"
         data-testid="admin-api-keys-vault"
         className="bg-white rounded-xl border border-stone-200 p-4 space-y-3.5"
       >
@@ -1640,10 +1702,31 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
               Protégé côté serveur par les règles Firestore (<code className="font-mono">isSuperAdmin()</code>). Seul votre compte Super-Admin peut lire ou modifier ces clés (Groq, Mistral, Gemini, etc.).
             </p>
           </div>
-          <span className="px-2 py-0.5 rounded-md bg-orange-50 border border-orange-200 text-[10px] font-bold text-orange-800">
-            {cloudApiKeys.length} clé{cloudApiKeys.length > 1 ? 's' : ''} en coffre Cloud
-          </span>
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setShowVaultRulesPreview((v) => !v)}
+              className="px-2 py-0.5 rounded-md bg-emerald-50 border border-emerald-200 text-[10px] font-bold text-emerald-800 hover:bg-emerald-100"
+            >
+              {showVaultRulesPreview ? 'Masquer règle Firestore' : 'Règles isSuperAdmin() actives ✓'}
+            </button>
+            <span className="px-2 py-0.5 rounded-md bg-orange-50 border border-orange-200 text-[10px] font-bold text-orange-800">
+              {cloudApiKeys.length} clé{cloudApiKeys.length > 1 ? 's' : ''} en coffre Cloud
+            </span>
+          </div>
         </div>
+
+        {showVaultRulesPreview && (
+          <pre className="rounded-lg border border-stone-200 bg-stone-950 text-stone-100 p-3 text-[11px] font-mono overflow-x-auto leading-relaxed">{`match /api_keys/{provider} {
+  allow get: if isSuperAdmin() && isValidProviderId(provider);
+  allow list: if isSuperAdmin() && resource.data.updatedBy == request.auth.uid;
+  allow create: if isSuperAdmin() && isValidApiKeyConfig(incoming(), provider)
+    && incoming().createdAt == request.time && incoming().updatedAt == request.time;
+  allow update: if isSuperAdmin() && isValidApiKeyConfig(incoming(), provider)
+    && incoming().updatedAt == request.time;
+  allow delete: if isSuperAdmin() && isValidProviderId(provider);
+}`}</pre>
+        )}
 
         <form onSubmit={handleSaveCloudApiKey} className="grid grid-cols-1 sm:grid-cols-12 gap-2.5 items-end">
           <div className="sm:col-span-3 space-y-1">
@@ -1809,6 +1892,7 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
           </div>
         )}
       </div>
+      )}
     </section>
   );
 };

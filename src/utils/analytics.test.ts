@@ -8,6 +8,8 @@ import {
   groupFichesByStatut,
   moveFicheToStatut,
   buildPortfolioAiSummary,
+  formatVelocityDuration,
+  computePortfolioVelocity,
   KANBAN_STAGES,
 } from './analytics';
 
@@ -162,5 +164,70 @@ test('buildCityAndOfferBreakdown aggregates cities, offer tiers, and multi-conta
   assert.equal(res.contactability.totalPhonesCount, 5);
   assert.equal(res.contactability.totalEmailsCount, 4);
   assert.equal(res.offerTiers.find((t) => t.tier === 'Grand Compte')?.count, 2); // f2 (48) + f4 (32)
+});
+
+test('formatVelocityDuration formats hours and days cleanly in French', () => {
+  assert.equal(formatVelocityDuration(0.25), '< 1h');
+  assert.equal(formatVelocityDuration(6), '6h');
+  assert.equal(formatVelocityDuration(24), '1j');
+  assert.equal(formatVelocityDuration(36), '1,5j');
+  assert.equal(formatVelocityDuration(18 * 24), '18j');
+});
+
+test('moveFicheToStatut stamps statutUpdatedAt on transition', () => {
+  const stamp = '2026-11-25T11:30:00.000Z';
+  const res = moveFicheToStatut(sampleFiches, 'f3', 'Appel en cours', stamp);
+  assert.equal(res.changed, true);
+  assert.equal(res.movedFiche?.statutUpdatedAt, stamp);
+
+  const noop = moveFicheToStatut(res.updated, 'f3', 'Appel en cours', '2026-11-26T00:00:00.000Z');
+  assert.equal(noop.changed, false);
+  assert.equal(noop.movedFiche?.statutUpdatedAt, stamp);
+});
+
+test('computePortfolioVelocity computes stage averages and identifies bottlenecks while ignoring terminal stages and fresh fiches', () => {
+  const nowMs = refDate.getTime();
+  const hoursAgo = (h: number) => new Date(nowMs - h * 3600000).toISOString();
+
+  const velocityFiches: FicheEntreprise[] = [
+    // 'RDV pris': 24j (576h) vs 4j (96h) -> avg = 14j (336h). 24j is +71% -> bottleneck!
+    { ...sampleFiches[0], id: 'v1', statut: 'RDV pris', dateAjout: daysAgo(30), statutUpdatedAt: daysAgo(24) },
+    { ...sampleFiches[0], id: 'v2', statut: 'RDV pris', dateAjout: daysAgo(10), statutUpdatedAt: daysAgo(4) },
+    // 'À contacter': 20h, 2h, 1h -> avg = 7.7h. 20h is < 24h so not bottleneck (floor prevents false alarm on 20h), < 12h is fast
+    { ...sampleFiches[2], id: 'v3', statut: 'À contacter', dateAjout: hoursAgo(20) },
+    { ...sampleFiches[2], id: 'v4', statut: 'À contacter', dateAjout: hoursAgo(2) },
+    { ...sampleFiches[2], id: 'v5', statut: 'À contacter', dateAjout: hoursAgo(1) },
+    // Terminal stage 'Signé Orange Pro': very old, never flagged as bottleneck
+    { ...sampleFiches[1], id: 'v6', statut: 'Signé Orange Pro', dateAjout: daysAgo(60), statutUpdatedAt: daysAgo(40) },
+    { ...sampleFiches[1], id: 'v7', statut: 'Signé Orange Pro', dateAjout: daysAgo(10), statutUpdatedAt: daysAgo(2) },
+  ];
+
+  const report = computePortfolioVelocity(velocityFiches, nowMs);
+
+  assert.equal(report.totalBottlenecks, 1);
+  assert.equal(report.topBottleneckStage, 'RDV pris');
+  assert.equal(report.byStage['RDV pris'].avgLabel, '14j');
+  assert.equal(report.byStage['RDV pris'].bottleneckCount, 1);
+
+  const v1 = report.byFicheId.get('v1')!;
+  assert.equal(v1.isBottleneck, true);
+  assert.equal(v1.level, 'bottleneck');
+  assert.equal(v1.durationLabel, '24j');
+  assert.equal(v1.avgLabel, '14j');
+  assert.equal(v1.deltaPct, 71);
+  assert.match(v1.comparisonLabel, /\+71% · moy\. 14j/);
+
+  const v2 = report.byFicheId.get('v2')!;
+  assert.equal(v2.isBottleneck, false);
+  assert.equal(v2.level, 'fast');
+
+  const v3 = report.byFicheId.get('v3')!;
+  assert.equal(v3.isBottleneck, false);
+  assert.equal(v3.level, 'slow'); // 20h >= 18h and high ratio vs 7.7h, below 24h bottleneck floor
+
+  const v6 = report.byFicheId.get('v6')!;
+  assert.equal(v6.isBottleneck, false);
+  assert.equal(v6.level, 'terminal');
+  assert.equal(report.byStage['Signé Orange Pro'].bottleneckCount, 0);
 });
 

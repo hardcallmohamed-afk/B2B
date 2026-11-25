@@ -217,34 +217,33 @@ export const ROLE_BADGE_META: Record<
 > = {
   super_admin: {
     label: 'Super-Admin',
-    shortLabel: 'SUPER-ADMIN',
+    shortLabel: 'Admin',
     description: 'Direction & accès total (utilisateurs, payouts, clés API, badges)',
-    className:
-      'bg-gradient-to-r from-orange-600 to-amber-500 text-white border border-orange-500 shadow-2xs',
+    className: 'bg-orange-600 text-white border border-orange-700',
   },
   manager: {
     label: 'Superviseur / Manager',
-    shortLabel: 'SUPERVISEUR',
+    shortLabel: 'Manager',
     description: 'Pilotage commercial & suivi d’équipe Orange Pro',
-    className: 'bg-violet-100 text-violet-900 border border-violet-300',
+    className: 'bg-violet-50 text-violet-900 border border-violet-300',
   },
   team_lead: {
     label: 'Chef d’Équipe',
-    shortLabel: 'CHEF ÉQUIPE',
+    shortLabel: 'Chef Équipe',
     description: 'Animation d’escouade terrain & accompagnement commercial',
-    className: 'bg-indigo-100 text-indigo-900 border border-indigo-300',
+    className: 'bg-indigo-50 text-indigo-900 border border-indigo-300',
   },
   grand_compte: {
     label: 'Expert Grand Compte',
-    shortLabel: 'GRAND COMPTE',
+    shortLabel: 'Grand Compte',
     description: 'Négociation Fibre Dédiée, flottes corporate & dossiers grands comptes',
-    className: 'bg-amber-100 text-amber-900 border border-amber-300',
+    className: 'bg-amber-50 text-amber-900 border border-amber-300',
   },
   commercial: {
     label: 'Commercial B2B',
-    shortLabel: 'COMMERCIAL',
+    shortLabel: 'Commercial',
     description: 'Prospection terrain, qualification & signature Orange Pro',
-    className: 'bg-sky-100 text-sky-900 border border-sky-300',
+    className: 'bg-sky-50 text-sky-900 border border-sky-300',
   },
 };
 

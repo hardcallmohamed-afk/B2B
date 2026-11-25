@@ -45,6 +45,7 @@ import {
   ChevronDown,
   Settings,
   Menu,
+  Clock,
 } from 'lucide-react';
 import { onAuthStateChanged, type User } from 'firebase/auth';
 import { doc, onSnapshot, query, where } from 'firebase/firestore';
@@ -52,7 +53,7 @@ import { KpiTrendChart } from './components/KpiTrendChart';
 import { KanbanBoard } from './components/KanbanBoard';
 import { AiCopilotDrawer } from './components/AiCopilotDrawer';
 import { LoginScreen, AccessGateNotice } from './components/LoginScreen';
-import { AdminUsersPanel } from './components/AdminUsersPanel';
+import { AdminUsersPanel, type AdminPanelSection } from './components/AdminUsersPanel';
 import { TeamPerformancePanel } from './components/TeamPerformancePanel';
 import { AchievementsPanel } from './components/AchievementsPanel';
 import { RoleBadge } from './components/RoleBadge';
@@ -71,7 +72,11 @@ import {
   type AppNotification,
   type BadgeBaselineSnapshot,
 } from './utils/notifications';
-import { moveFicheToStatut } from './utils/analytics';
+import {
+  moveFicheToStatut,
+  computePortfolioVelocity,
+  type VelocityLevel,
+} from './utils/analytics';
 import { findSmartDuplicateGroups } from './utils/deduplication';
 import {
   evaluateUserAccess,
@@ -80,6 +85,7 @@ import {
   type ManagedAppUser,
 } from './utils/authAccess';
 import {
+  ROLE_BADGE_META,
   buildMonthlyHistoryStrings,
   evaluateAchievements,
   type CollaboratorMetrics,
@@ -194,6 +200,7 @@ export interface FicheEntreprise {
   verifieWeb?: boolean;
   pistesEnrichissement?: string[];
   dateAjout: string;
+  statutUpdatedAt?: string;
 }
 
 export interface CrawlLog {
@@ -2611,6 +2618,7 @@ export default function App() {
   const [dedupPrimaryChoices, setDedupPrimaryChoices] = useState<Record<string, string>>({});
   const [dedupSaving, setDedupSaving] = useState(false);
   const [userPresences, setUserPresences] = useState<UserPresenceRecord[]>([]);
+  const [adminSubSection, setAdminSubSection] = useState<AdminPanelSection>('all');
   const [crmViewMode, setCrmViewMode] = useState<'table' | 'kanban'>('table');
   const [showAiCopilot, setShowAiCopilot] = useState(false);
   const [copilotFiche, setCopilotFiche] = useState<FicheEntreprise | null>(null);
@@ -2656,7 +2664,8 @@ export default function App() {
   const [sourceFilter, setSourceFilter] = useState<string>('');
   const [statutFilter, setStatutFilter] = useState<StatutCRM | ''>('');
   const [onlyReadyToCall, setOnlyReadyToCall] = useState(false);
-  const [sortField, setSortField] = useState<'societe' | 'ville' | 'effectif' | 'maturite'>('maturite');
+  const [onlyBottlenecks, setOnlyBottlenecks] = useState(false);
+  const [sortField, setSortField] = useState<'societe' | 'ville' | 'effectif' | 'maturite' | 'velocite'>('maturite');
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
 
   // 5. Refs & Modales
@@ -2990,9 +2999,9 @@ export default function App() {
     return parseFriendlyCloudError(err).shortTag;
   };
 
-  // Empêche tout non-admin d'accéder à l'onglet Utilisateurs & Accès
+  // Empêche tout non-admin d'accéder aux onglets Administration / Coffre Clés API
   useEffect(() => {
-    if (!isSuperAdmin && activeTab === 'admin') {
+    if (!isSuperAdmin && (activeTab === 'admin' || activeTab === 'vault')) {
       setActiveTab('portefeuille');
     }
   }, [isSuperAdmin, activeTab]);
@@ -3630,6 +3639,7 @@ export default function App() {
             ? (d.pistesEnrichissement as string[])
             : undefined,
           dateAjout: typeof d.dateAjout === 'string' ? d.dateAjout : new Date().toISOString(),
+          statutUpdatedAt: typeof d.statutUpdatedAt === 'string' ? d.statutUpdatedAt : undefined,
         });
         nextKnown.set(clean.id, {
           hash: serializeDocCanonical(clean as unknown as Record<string, unknown>),
@@ -3660,6 +3670,9 @@ export default function App() {
             ? { pistesEnrichissement: clean.pistesEnrichissement }
             : {}),
           dateAjout: clean.dateAjout,
+          ...(clean.statutUpdatedAt !== undefined
+            ? { statutUpdatedAt: clean.statutUpdatedAt }
+            : {}),
         });
       });
 
@@ -4579,6 +4592,11 @@ export default function App() {
     return Array.from(set).sort((a, b) => a.localeCompare(b));
   }, [fiches]);
 
+  const velocityReport = useMemo(
+    () => computePortfolioVelocity(accessibleFiches),
+    [accessibleFiches]
+  );
+
   const hasActiveFilters = Boolean(
     search.trim() ||
       couleurFilter ||
@@ -4589,7 +4607,8 @@ export default function App() {
       completudeFilter ||
       sourceFilter ||
       statutFilter ||
-      onlyReadyToCall
+      onlyReadyToCall ||
+      onlyBottlenecks
   );
 
   const resetAllFilters = () => {
@@ -4603,6 +4622,7 @@ export default function App() {
     setSourceFilter('');
     setStatutFilter('');
     setOnlyReadyToCall(false);
+    setOnlyBottlenecks(false);
   };
 
   const filteredFiches = useMemo(() => {
@@ -4637,6 +4657,7 @@ export default function App() {
 
       if (sourceFilter && !stripAccents(f.source).includes(stripAccents(sourceFilter))) return false;
       if (onlyReadyToCall && !isReadyToCall(f)) return false;
+      if (onlyBottlenecks && !velocityReport.byFicheId.get(f.id)?.isBottleneck) return false;
 
       if (q) {
         const hay = stripAccents(
@@ -4652,14 +4673,24 @@ export default function App() {
       if (sortField === 'societe') cmp = a.societe.localeCompare(b.societe);
       else if (sortField === 'ville') cmp = a.ville.localeCompare(b.ville);
       else if (sortField === 'effectif') cmp = (parseInt(a.effectif, 10) || 0) - (parseInt(b.effectif, 10) || 0);
-      else cmp = computeMaturityScore(a) - computeMaturityScore(b);
+      else if (sortField === 'velocite') {
+        const va = velocityReport.byFicheId.get(a.id);
+        const vb = velocityReport.byFicheId.get(b.id);
+        const rankA = va?.isBottleneck ? 2 : va?.level === 'slow' ? 1 : va?.level === 'terminal' ? -1 : 0;
+        const rankB = vb?.isBottleneck ? 2 : vb?.level === 'slow' ? 1 : vb?.level === 'terminal' ? -1 : 0;
+        cmp = rankA - rankB;
+        if (cmp === 0) cmp = (va?.ratioToAvg ?? 0) - (vb?.ratioToAvg ?? 0);
+        if (cmp === 0) cmp = (va?.elapsedHours ?? 0) - (vb?.elapsedHours ?? 0);
+      } else {
+        cmp = computeMaturityScore(a) - computeMaturityScore(b);
+      }
       return sortDir === 'asc' ? cmp : -cmp;
     });
     return list;
   }, [
     accessibleFiches, search, couleurFilter, secteurFilter, villeFilter, tierFilter,
     effectifFilter, completudeFilter, sourceFilter, statutFilter, onlyReadyToCall,
-    sortField, sortDir,
+    onlyBottlenecks, velocityReport, sortField, sortDir,
   ]);
 
   const incompleteFilteredFiches = useMemo(
@@ -6018,6 +6049,7 @@ Réponds UNIQUEMENT en JSON strict : {"telephone":"","email":"","contact":"","ro
       effectif: quickForm.effectif ? String(parseInt(quickForm.effectif, 10) || '') : '',
       statut: quickAddStatut,
       dateAjout: new Date().toISOString(),
+      statutUpdatedAt: new Date().toISOString(),
     };
     setFiches((prev) => ensureUniqueNumeroFiches([f, ...prev]));
     setQuickForm({
@@ -6219,7 +6251,9 @@ Réponds UNIQUEMENT en JSON strict : {"telephone":"","email":"","contact":"","ro
 
       setFiches((prev) =>
         prev.map((x) =>
-          x.id === signContractTarget.id ? { ...x, statut: 'Signé Orange Pro' } : x
+          x.id === signContractTarget.id
+            ? { ...x, statut: 'Signé Orange Pro', statutUpdatedAt: new Date().toISOString() }
+            : x
         )
       );
       setSignContractTarget(null);
@@ -6461,7 +6495,11 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
       <div className="min-h-screen bg-[#F7F5F0] text-stone-900 flex">
         <CrmSidebar
           activeTab={activeTab}
-          onSelectTab={(tab) => setActiveTab(tab)}
+          onSelectTab={(tab) => {
+            if (tab === 'admin') setAdminSubSection('all');
+            if (tab === 'vault') setAdminSubSection('vault');
+            setActiveTab(tab);
+          }}
           onNewFiche={() => setShowQuickAdd(true)}
           collapsed={sidebarCollapsed}
           onToggleCollapse={() => setSidebarCollapsed((c) => !c)}
@@ -6475,6 +6513,7 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
             unlockedBadges: myAchievementSummary.unlockedCount,
             totalBadges: myAchievementSummary.totalCount,
             managedUsers: managedUsers.length,
+            apiKeys: cloudApiKeys.length,
           }}
           user={{
             displayName: currentUserDisplayName,
@@ -6588,12 +6627,12 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
                       )}
                     </div>
                     <span
-                      className="hidden md:inline font-semibold max-w-[110px] truncate"
+                      className="hidden sm:inline font-semibold max-w-[120px] truncate"
                       title={`Connecté (${cloudUser.email || ''})`}
                     >
                       {cloudBusy ? 'Synchro...' : currentUserDisplayName}
                     </span>
-                    <RoleBadge role={currentUserRole} showShort className="hidden sm:inline-flex" />
+                    <RoleBadge role={currentUserRole} showShort />
                     <ChevronDown className="w-3.5 h-3.5 text-stone-500 shrink-0" />
                   </button>
 
@@ -6624,6 +6663,9 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
                             <RoleBadge role={currentUserRole} showShort />
                           </div>
                           <div className="text-[11px] text-stone-500 truncate mt-0.5">{cloudUser.email}</div>
+                          <div className="text-[10px] text-stone-400 truncate mt-0.5">
+                            {(ROLE_BADGE_META[currentUserRole] || ROLE_BADGE_META.commercial).label}
+                          </div>
                         </div>
                       </div>
 
@@ -6698,7 +6740,21 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
                     Clés conservées uniquement dans ce navigateur (jamais exportées dans le Backup JSON). À priorité égale : Recherche (Tavily → Gemini) · Extraction/Audit (Groq → OpenRouter → Mistral → Gemini) · Email (Mistral → OpenRouter → Gemini → Groq). Rotation auto sur quota 429.
                   </p>
                 </div>
-                <div className="flex items-center gap-2 shrink-0">
+                <div className="flex flex-wrap items-center gap-2 shrink-0">
+                  {isSuperAdmin && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setShowApiHub(false);
+                        setAdminSubSection('vault');
+                        setActiveTab('vault');
+                      }}
+                      className="px-2.5 py-1.5 rounded-lg border border-orange-300 bg-orange-50 hover:bg-orange-100 text-xs font-semibold text-orange-800 inline-flex items-center gap-1.5"
+                    >
+                      <KeyRound className="w-3.5 h-3.5" />
+                      Coffre Cloud /api_keys ({cloudApiKeys.length})
+                    </button>
+                  )}
                   {apiKeys.some((k) => k.status === 'quota' || k.status === 'error') && (
                     <button
                       type="button"
@@ -7179,6 +7235,23 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
                   Prêtes à appeler
                 </button>
 
+                <button
+                  type="button"
+                  onClick={() => setOnlyBottlenecks((v) => !v)}
+                  aria-pressed={onlyBottlenecks}
+                  data-testid="filter-bottlenecks-btn"
+                  className={`px-3 py-2 rounded-lg text-xs font-semibold border flex items-center gap-1.5 whitespace-nowrap tabular-nums ${
+                    onlyBottlenecks
+                      ? 'bg-red-700 text-white border-red-700'
+                      : velocityReport.totalBottlenecks > 0
+                      ? 'bg-red-50 text-red-700 border-red-200 hover:bg-red-100'
+                      : 'bg-stone-50 text-stone-600 border-stone-300 hover:bg-stone-100'
+                  }`}
+                >
+                  <AlertTriangle className="w-3.5 h-3.5" />
+                  Blocages ({velocityReport.totalBottlenecks})
+                </button>
+
                 <div className="flex flex-wrap items-center gap-1.5">
                   <button
                     type="button"
@@ -7424,6 +7497,7 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
             {crmViewMode === 'kanban' ? (
               <KanbanBoard
                 fiches={filteredFiches}
+                velocityReport={velocityReport}
                 verifyingId={verifyingId}
                 onMoveFiche={handleMoveFicheKanban}
                 onOpenEmail={openEmailStudio}
@@ -7486,13 +7560,23 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
                         </button>
                       </th>
                       <th className="p-3">Statut CRM</th>
+                      <th className="p-3">
+                        <button
+                          type="button"
+                          onClick={() => toggleSort('velocite')}
+                          className="flex items-center gap-1 hover:text-stone-900 whitespace-nowrap"
+                          title="Temps passé dans le statut actuel vs moyenne du statut"
+                        >
+                          Vélocité <ArrowUpDown className="w-3 h-3" />
+                        </button>
+                      </th>
                       <th className="p-3 text-right">Actions terrain</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-stone-100">
                     {filteredFiches.length === 0 ? (
                       <tr>
-                        <td colSpan={8} className="p-8 sm:p-10 text-center">
+                        <td colSpan={9} className="p-8 sm:p-10 text-center">
                           {accessibleFiches.length === 0 ? (
                             <div
                               data-testid="empty-initial-portfolio"
@@ -7852,9 +7936,12 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
                                     openSignContractModal(f);
                                     return;
                                   }
+                                  const transitionAt = new Date().toISOString();
                                   setFiches((prev) =>
                                     prev.map((x) =>
-                                      x.id === f.id ? { ...x, statut: nextStatut } : x
+                                      x.id === f.id && x.statut !== nextStatut
+                                        ? { ...x, statut: nextStatut, statutUpdatedAt: transitionAt }
+                                        : x
                                     )
                                   );
                                 }}
@@ -7866,6 +7953,58 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
                                   </option>
                                 ))}
                               </select>
+                            </td>
+
+                            <td className="p-3 whitespace-nowrap min-w-[148px]" data-testid={`table-velocity-${f.id}`}>
+                              {(() => {
+                                const vel = velocityReport.byFicheId.get(f.id);
+                                if (!vel) return <span className="text-stone-400">—</span>;
+                                const lvl: VelocityLevel = vel.level;
+                                const textCls =
+                                  lvl === 'bottleneck'
+                                    ? 'text-red-700'
+                                    : lvl === 'slow'
+                                    ? 'text-amber-700'
+                                    : lvl === 'fast'
+                                    ? 'text-emerald-700'
+                                    : 'text-stone-700';
+                                const barCls =
+                                  lvl === 'bottleneck'
+                                    ? 'bg-red-500'
+                                    : lvl === 'slow'
+                                    ? 'bg-amber-500'
+                                    : lvl === 'fast'
+                                    ? 'bg-emerald-500'
+                                    : lvl === 'terminal'
+                                    ? 'bg-stone-300'
+                                    : 'bg-stone-400';
+                                const pct =
+                                  vel.stageAvgHours > 0
+                                    ? Math.min(100, Math.max(8, Math.round((vel.elapsedHours / (vel.stageAvgHours * 2)) * 100)))
+                                    : 20;
+                                return (
+                                  <div
+                                    className="space-y-1"
+                                    title={`Dans « ${f.statut} » depuis ${vel.durationLabel} (${vel.comparisonLabel})`}
+                                  >
+                                    <div className={`flex items-center gap-1.5 text-xs font-semibold tabular-nums ${textCls}`}>
+                                      {vel.isBottleneck ? (
+                                        <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+                                      ) : (
+                                        <Clock className="w-3.5 h-3.5 shrink-0" />
+                                      )}
+                                      <span className="font-mono font-bold">{vel.durationLabel}</span>
+                                      <span>{vel.label}</span>
+                                    </div>
+                                    <div className="h-1 w-28 bg-stone-100 rounded-full overflow-hidden">
+                                      <div className={`h-full rounded-full ${barCls}`} style={{ width: `${pct}%` }} />
+                                    </div>
+                                    <div className="text-[10px] font-mono tabular-nums text-stone-500">
+                                      {vel.comparisonLabel}
+                                    </div>
+                                  </div>
+                                );
+                              })()}
                             </td>
 
                             <td className="p-3 text-right whitespace-nowrap">
@@ -8037,6 +8176,7 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
             <KpiTrendChart fiches={filteredFiches} totalUnfilteredCount={fiches.length} />
             <KanbanBoard
               fiches={filteredFiches}
+              velocityReport={velocityReport}
               verifyingId={verifyingId}
               onMoveFiche={handleMoveFicheKanban}
               onOpenEmail={openEmailStudio}
@@ -8699,7 +8839,7 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
         {/* ================================================================== */}
         {/* ONGLET 5 : ADMINISTRATION UTILISATEURS (SUPER-ADMIN EXCLUSIF)      */}
         {/* ================================================================== */}
-        {activeTab === 'admin' && isSuperAdmin && (
+        {(activeTab === 'admin' || activeTab === 'vault') && isSuperAdmin && (
           <AdminUsersPanel
             adminUid={cloudUser.uid}
             adminEmail={cloudUser.email || ''}
@@ -8709,6 +8849,15 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
             teamStats={teamStats}
             userPresences={userPresences}
             villesOptions={villesState.all}
+            activeSection={activeTab === 'vault' ? 'vault' : adminSubSection}
+            onSectionChange={(section) => {
+              setAdminSubSection(section);
+              if (section === 'vault') {
+                setActiveTab('vault');
+              } else if (activeTab === 'vault') {
+                setActiveTab('admin');
+              }
+            }}
             onNotify={notify}
           />
         )}
@@ -9469,7 +9618,11 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
                   const nextStatut: StatutCRM =
                     emailCycle === 'relance_devis' ? 'Devis envoyé' : 'Appel en cours';
                   setFiches((prev) =>
-                    prev.map((x) => (x.id === emailModalFiche.id ? { ...x, statut: nextStatut } : x))
+                    prev.map((x) =>
+                      x.id === emailModalFiche.id && x.statut !== nextStatut
+                        ? { ...x, statut: nextStatut, statutUpdatedAt: new Date().toISOString() }
+                        : x
+                    )
                   );
                   notify(`Statut CRM mis à jour : ${nextStatut}`);
                   setEmailModalFiche(null);

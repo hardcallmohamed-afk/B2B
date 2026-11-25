@@ -44,6 +44,7 @@ export interface FicheLike {
   verifieWeb?: boolean;
   pistesEnrichissement?: string[];
   dateAjout: string;
+  statutUpdatedAt?: string;
 }
 
 export interface EmailSkillLike {
@@ -117,6 +118,7 @@ export interface SanitizedFicheDoc {
   verifieWeb?: boolean;
   pistesEnrichissement?: string[];
   dateAjout: string;
+  statutUpdatedAt?: string;
 }
 
 export interface SanitizedEmailSkillDoc {
@@ -301,6 +303,9 @@ export function sanitizeFichePayload(ownerId: string, fiche: FicheLike): Sanitiz
   }
   if (Array.isArray(fiche.pistesEnrichissement)) {
     doc.pistesEnrichissement = sanitizeStringArray(fiche.pistesEnrichissement, 15, 250);
+  }
+  if (typeof fiche.statutUpdatedAt === 'string' && fiche.statutUpdatedAt.trim().length > 0) {
+    doc.statutUpdatedAt = clampString(fiche.statutUpdatedAt.trim(), 64);
   }
 
   return doc;
@@ -726,7 +731,9 @@ export interface SyncDiff<T extends { id: string }> {
   toDelete: string[];
 }
 
-export function computeCollectionSyncDiff<T extends { id: string; statut?: string }>(
+export function computeCollectionSyncDiff<
+  T extends { id: string; statut?: string; statutUpdatedAt?: string }
+>(
   knownById: Map<string, { hash: string; doc: T }>,
   nextDocs: T[]
 ): SyncDiff<T> {
@@ -745,7 +752,11 @@ export function computeCollectionSyncDiff<T extends { id: string; statut?: strin
       toCreate.push(doc);
     } else if (prev.hash !== nextHash) {
       // Detect pure status transition (matches Action 1 in firestore.rules)
-      const prevWithoutStatus = { ...prev.doc, statut: doc.statut };
+      const prevWithoutStatus = {
+        ...prev.doc,
+        statut: doc.statut,
+        statutUpdatedAt: doc.statutUpdatedAt,
+      };
       const statusOnly =
         typeof doc.statut === 'string' &&
         doc.statut !== prev.doc.statut &&

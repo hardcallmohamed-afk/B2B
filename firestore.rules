@@ -327,7 +327,7 @@ service cloud.firestore {
         && data.keys().hasOnly([
           'ownerId', 'id', 'numeroFiche', 'societe', 'secteur', 'ville',
           'telephone', 'telephonesSupplementaires', 'email', 'emailsSupplementaires',
-          'contact', 'role', 'source', 'effectif', 'statut',
+          'contact', 'role', 'source', 'effectif', 'statut', 'statutUpdatedAt',
           'siteWeb', 'verifieWeb', 'pistesEnrichissement',
           'dateAjout', 'createdAt', 'updatedAt'
         ])
@@ -350,6 +350,7 @@ service cloud.firestore {
         && data.source is string && data.source.size() <= 500
         && data.effectif is string && data.effectif.size() <= 20
         && isValidStatut(data.statut)
+        && (!('statutUpdatedAt' in data) || (data.statutUpdatedAt is string && data.statutUpdatedAt.size() <= 64))
         && (!('siteWeb' in data) || (data.siteWeb is string && data.siteWeb.size() <= 500))
         && (!('verifieWeb' in data) || (data.verifieWeb is bool))
         && (!('pistesEnrichissement' in data) || isValidStringList(data.pistesEnrichissement, 15, 250))
@@ -720,14 +721,14 @@ service cloud.firestore {
           && exists(/databases/$(database)/documents/users/$(userId))
           && (
             // Action 1: Kanban pipeline status transition
-            incoming().diff(existing()).affectedKeys().hasOnly(['statut', 'updatedAt'])
+            incoming().diff(existing()).affectedKeys().hasOnly(['statut', 'statutUpdatedAt', 'updatedAt'])
             ||
             // Action 2: Full CRM edit, multi-contact addition, web/AI enrichment, or MDM merge
             incoming().diff(existing()).affectedKeys().hasOnly([
               'numeroFiche', 'societe', 'secteur', 'ville', 'telephone',
               'telephonesSupplementaires', 'email', 'emailsSupplementaires',
-              'contact', 'role', 'source', 'effectif', 'statut', 'siteWeb',
-              'verifieWeb', 'pistesEnrichissement', 'dateAjout', 'updatedAt'
+              'contact', 'role', 'source', 'effectif', 'statut', 'statutUpdatedAt',
+              'siteWeb', 'verifieWeb', 'pistesEnrichissement', 'dateAjout', 'updatedAt'
             ])
           );
 
