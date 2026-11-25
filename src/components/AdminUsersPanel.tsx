@@ -16,6 +16,8 @@ import {
   Lock,
   ExternalLink,
   AlertTriangle,
+  Sparkles,
+  Loader2,
 } from 'lucide-react';
 import {
   adminCreateManagedUser,
@@ -23,6 +25,7 @@ import {
   adminDeleteManagedUser,
   adminUpsertApiKey,
   adminDeleteApiKey,
+  getCurrentUserIdToken,
   requestPasswordReset,
   setOrLinkAccountPassword,
   type CloudApiKeyRecord,
@@ -105,6 +108,12 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
   const [showApiKeyInput, setShowApiKeyInput] = useState(false);
   const [apiKeyBusy, setApiKeyBusy] = useState(false);
   const [revealedProviders, setRevealedProviders] = useState<Record<string, boolean>>({});
+  const [proxyTestBusy, setProxyTestBusy] = useState<string | null>(null);
+  const [proxyTestResult, setProxyTestResult] = useState<{
+    ok: boolean;
+    provider: string;
+    message: string;
+  } | null>(null);
 
   const currentHostname = typeof window !== 'undefined' ? window.location.hostname : 'hardcallmohamed-afk.github.io';
   const firebaseAuthSettingsUrl = `https://console.firebase.google.com/project/${FIREBASE_PROJECT_ID}/authentication/settings`;
@@ -315,6 +324,46 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
       onNotify('Impossible de supprimer cette clé API.', 'err');
     } finally {
       setApiKeyBusy(false);
+    }
+  };
+
+  const handleTestSecureProxy = async (providerId: string) => {
+    setProxyTestBusy(providerId);
+    setProxyTestResult(null);
+    try {
+      const idToken = await getCurrentUserIdToken();
+      const res = await fetch('/api/ai/groq-secure', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${idToken}`,
+        },
+        body: JSON.stringify({
+          provider: providerId,
+          prompt:
+            'Réponds en une phrase courte en français : confirme que la connexion sécurisée Orange Pro B2B fonctionne.',
+        }),
+      });
+      const data = (await res.json().catch(() => ({}))) as {
+        reply?: string;
+        model?: string;
+        error?: string;
+      };
+      if (!res.ok) {
+        const errMsg = data.error || `Erreur serveur HTTP ${res.status}.`;
+        setProxyTestResult({ ok: false, provider: providerId, message: errMsg });
+        onNotify(errMsg, 'err');
+        return;
+      }
+      const okMsg = `${data.reply || 'Réponse reçue'} (${data.model || providerId})`;
+      setProxyTestResult({ ok: true, provider: providerId, message: okMsg });
+      onNotify(`Proxy serveur sécurisé (${providerId}) opérationnel.`);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Erreur réseau lors du test du proxy.';
+      setProxyTestResult({ ok: false, provider: providerId, message: msg });
+      onNotify(msg, 'err');
+    } finally {
+      setProxyTestBusy(null);
     }
   };
 
@@ -806,6 +855,22 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
                     </div>
                   </div>
                   <div className="flex items-center gap-1 shrink-0">
+                    {['groq', 'mistral', 'openrouter', 'openai', 'deepseek'].includes(item.provider) && (
+                      <button
+                        type="button"
+                        disabled={proxyTestBusy !== null}
+                        onClick={() => void handleTestSecureProxy(item.provider)}
+                        title="Tester l'appel serveur sécurisé (/api/ai/groq-secure)"
+                        className="px-2 py-1 rounded-lg border border-orange-200 bg-orange-50 hover:bg-orange-100 text-orange-800 text-[11px] font-semibold inline-flex items-center gap-1 disabled:opacity-50"
+                      >
+                        {proxyTestBusy === item.provider ? (
+                          <Loader2 className="w-3 h-3 animate-spin" />
+                        ) : (
+                          <Sparkles className="w-3 h-3" />
+                        )}
+                        Tester
+                      </button>
+                    )}
                     <button
                       type="button"
                       onClick={() =>
@@ -832,6 +897,49 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
                 </div>
               );
             })}
+          </div>
+        )}
+
+        {/* Test direct du proxy serveur sécurisé (/api/ai/groq-secure) */}
+        <div className="pt-2 border-t border-stone-100 flex flex-wrap items-center justify-between gap-2 text-[11px]">
+          <span className="text-stone-500">
+            Endpoint serveur sécurisé (Admin SDK + vérification token Firebase) :{' '}
+            <code className="font-mono font-semibold text-stone-800">POST /api/ai/groq-secure</code>
+          </span>
+          <button
+            type="button"
+            disabled={proxyTestBusy !== null}
+            onClick={() =>
+              void handleTestSecureProxy(
+                ['groq', 'mistral', 'openrouter', 'openai', 'deepseek'].includes(apiProvider)
+                  ? apiProvider
+                  : 'groq'
+              )
+            }
+            className="px-2.5 py-1.5 rounded-lg border border-stone-300 bg-white hover:bg-stone-50 text-stone-800 font-semibold inline-flex items-center gap-1.5 disabled:opacity-50"
+          >
+            {proxyTestBusy ? (
+              <Loader2 className="w-3.5 h-3.5 animate-spin text-orange-600" />
+            ) : (
+              <Sparkles className="w-3.5 h-3.5 text-orange-600" />
+            )}
+            Tester l’appel serveur sécurisé
+          </button>
+        </div>
+
+        {proxyTestResult && (
+          <div
+            role="status"
+            className={`rounded-lg border px-3 py-2 text-xs ${
+              proxyTestResult.ok
+                ? 'border-emerald-200 bg-emerald-50 text-emerald-900'
+                : 'border-amber-200 bg-amber-50 text-amber-900'
+            }`}
+          >
+            <span className="font-bold uppercase tracking-wide text-[10px] mr-1.5">
+              [{proxyTestResult.provider}]
+            </span>
+            {proxyTestResult.message}
           </div>
         )}
       </div>

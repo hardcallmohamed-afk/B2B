@@ -239,4 +239,35 @@ test('sanitizeProviderId & sanitizeApiKeyConfigPayload normalize provider IDs an
   assert.equal(out.updatedBy, 'admin_uid_1');
 });
 
+test('sanitizeAvatarDataUrl accepts valid JPEG/PNG/WebP base64 and blocks SVG/XSS/oversized payloads', async () => {
+  const { sanitizeAvatarDataUrl, sanitizeWorkspacePayload } = await import('./firestoreSanitize');
+  const validJpg = 'data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD=';
+  assert.equal(sanitizeAvatarDataUrl(validJpg), validJpg);
+  assert.equal(sanitizeAvatarDataUrl('data:image/svg+xml;base64,PHN2Zz48c2NyaXB0Lz48L3N2Zz4='), '');
+  assert.equal(sanitizeAvatarDataUrl('javascript:alert(1)'), '');
+  assert.equal(sanitizeAvatarDataUrl('data:image/jpeg;base64,' + 'A'.repeat(46000)), '');
+
+  const ws = sanitizeWorkspacePayload('u_prof', {
+    villesAll: ['Meknès'],
+    villesActive: ['Meknès'],
+    modeVille: 'default',
+    defaultVille: 'Meknès',
+    emailSignature: 'Sig',
+    seeded: true,
+    displayName: '  Karim Mansouri ',
+    avatarDataUrl: validJpg,
+    monthlyGoalContracts: 500,
+    notifyBadges: true,
+    notifySound: false,
+    compactUi: true,
+  });
+  assert.equal(ws.displayName, 'Karim Mansouri');
+  assert.equal(ws.avatarDataUrl, validJpg);
+  assert.equal(ws.monthlyGoalContracts, 200);
+  assert.equal(ws.notifyBadges, true);
+  assert.equal(ws.notifySound, false);
+  assert.equal(ws.compactUi, true);
+});
+
+
 

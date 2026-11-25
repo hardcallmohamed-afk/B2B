@@ -41,6 +41,9 @@ import {
   Users,
   Trophy,
   Award,
+  User as UserIcon,
+  ChevronDown,
+  Settings,
 } from 'lucide-react';
 import { onAuthStateChanged, type User } from 'firebase/auth';
 import { doc, onSnapshot, query, where } from 'firebase/firestore';
@@ -53,6 +56,18 @@ import { TeamPerformancePanel } from './components/TeamPerformancePanel';
 import { AchievementsPanel } from './components/AchievementsPanel';
 import { RoleBadge } from './components/RoleBadge';
 import { SignContractModal, type SignContractTarget } from './components/SignContractModal';
+import { AccountSettingsPanel, type UserProfileSettings } from './components/AccountSettingsPanel';
+import { NotificationBell } from './components/NotificationBell';
+import { AchievementToast } from './components/AchievementToast';
+import { getUserInitials } from './utils/avatarResize';
+import {
+  detectNewUnlockNotifications,
+  mergeNotificationsFeed,
+  markAllNotificationsRead,
+  playCelebrationChime,
+  type AppNotification,
+  type BadgeBaselineSnapshot,
+} from './utils/notifications';
 import { moveFicheToStatut } from './utils/analytics';
 import { findSmartDuplicateGroups } from './utils/deduplication';
 import {
@@ -2401,28 +2416,41 @@ export function generatePersonalizedEmail(
 // 9. APPLICATION PRINCIPALE (EXECUTIVE B2B WORKSPACE)
 // ============================================================================
 
+export const DEFAULT_USER_PROFILE: UserProfileSettings = {
+  displayName: '',
+  avatarDataUrl: '',
+  phonePro: '',
+  zone: 'Meknès',
+  bio: '',
+  monthlyGoalContracts: 5,
+  notifyBadges: true,
+  notifySound: true,
+  compactUi: false,
+};
+
 export default function App() {
-  // 1. Portefeuille CRM persistant (localStorage + synchronisation Cloud Firestore)
-  const [fiches, setFiches] = useState<FicheEntreprise[]>(() => {
-    try {
-      const raw = window.localStorage.getItem(STORAGE_KEY_PORTFOLIO);
-      if (raw !== null) {
-        const parsed = JSON.parse(raw);
-        if (Array.isArray(parsed)) return ensureUniqueNumeroFiches(parsed);
-      }
-    } catch {
-      // Fallback
-    }
-    return ensureUniqueNumeroFiches(createInitialPortfolio());
-  });
+  // 1. Portefeuille CRM persistant (démarre vide pour tout nouveau compte ; hydraté depuis Firestore)
+  const [fiches, setFiches] = useState<FicheEntreprise[]>([]);
+  const [userProfile, setUserProfile] = useState<UserProfileSettings>(DEFAULT_USER_PROFILE);
+  const [profileMenuOpen, setProfileMenuOpen] = useState(false);
+  const profileMenuRef = useRef<HTMLDivElement | null>(null);
+  const [notifications, setNotifications] = useState<AppNotification[]>([]);
+  const [activeAchievementToast, setActiveAchievementToast] = useState<AppNotification | null>(null);
+  const achievementToastTimerRef = useRef<number | null>(null);
+  const badgeBaselineRef = useRef<BadgeBaselineSnapshot>({ initialized: false, unlockedIds: [] });
+  const seenBadgesUidRef = useRef<string>('');
+  const teamStatsHydratedRef = useRef<boolean>(false);
 
   useEffect(() => {
-    try {
-      window.localStorage.setItem(STORAGE_KEY_PORTFOLIO, JSON.stringify(fiches));
-    } catch {
-      // Ignore quota
-    }
-  }, [fiches]);
+    if (!profileMenuOpen) return;
+    const handleOutside = (e: MouseEvent) => {
+      if (profileMenuRef.current && !profileMenuRef.current.contains(e.target as Node)) {
+        setProfileMenuOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleOutside);
+    return () => document.removeEventListener('mousedown', handleOutside);
+  }, [profileMenuOpen]);
 
   // 2. Panneau Villes Cibles persistant
   const [villesState, setVillesState] = useState<{
@@ -2510,9 +2538,9 @@ export default function App() {
     [apiKeys]
   );
 
-  // 4. Navigation, Vue Kanban, Équipe/Payouts, Succès/Badges, Copilote IA & Filtres Portefeuille
+  // 4. Navigation, Vue Kanban, Équipe/Payouts, Succès/Badges, Mon Compte, Copilote IA & Filtres Portefeuille
   const [activeTab, setActiveTab] = useState<
-    'portefeuille' | 'kanban' | 'team' | 'badges' | 'crawler' | 'paste' | 'dedup' | 'admin'
+    'portefeuille' | 'kanban' | 'team' | 'badges' | 'crawler' | 'paste' | 'dedup' | 'admin' | 'compte'
   >('portefeuille');
   const [teamStats, setTeamStats] = useState<TeamStatRecord[]>([]);
   const [signedContracts, setSignedContracts] = useState<SignedContractRecord[]>([]);
@@ -2715,13 +2743,31 @@ export default function App() {
   const knownCloudFichesRef = useRef<Map<string, { hash: string; doc: SanitizedFicheDoc }>>(new Map());
   const knownCloudSkillsRef = useRef<Map<string, { hash: string; doc: SanitizedEmailSkillDoc }>>(new Map());
   const knownCloudWorkspaceHashRef = useRef<string>('');
-  const latestLocalStateRef = useRef({ fiches, villesState, emailSignature, emailSkills });
-  latestLocalStateRef.current = { fiches, villesState, emailSignature, emailSkills };
+  const latestLocalStateRef = useRef({ fiches, villesState, emailSignature, emailSkills, userProfile });
+  latestLocalStateRef.current = { fiches, villesState, emailSignature, emailSkills, userProfile };
+
+  // Sauvegarde locale isolée par UID utilisateur (jamais partagée entre deux comptes)
+  useEffect(() => {
+    if (!cloudUser || !cloudSynced) return;
+    try {
+      window.localStorage.setItem(`${STORAGE_KEY_PORTFOLIO}_${cloudUser.uid}`, JSON.stringify(fiches));
+    } catch {
+      // Ignore quota
+    }
+  }, [fiches, cloudUser, cloudSynced]);
 
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, (u) => {
       setCloudUser(u);
       setAuthReady(true);
+      setProfileMenuOpen(false);
+      // Toujours réinitialiser le portefeuille et le profil lors d'un changement/déconnexion de compte
+      setFiches([]);
+      setUserProfile(DEFAULT_USER_PROFILE);
+      setActiveAchievementToast(null);
+      badgeBaselineRef.current = { initialized: false, unlockedIds: [] };
+      seenBadgesUidRef.current = '';
+      teamStatsHydratedRef.current = false;
       if (!u) {
         setCloudSynced(false);
         setAppUserProfile(null);
@@ -2730,6 +2776,7 @@ export default function App() {
         setCloudApiKeys([]);
         setTeamStats([]);
         setSignedContracts([]);
+        setNotifications([]);
         knownCloudFichesRef.current = new Map();
         knownCloudSkillsRef.current = new Map();
         knownCloudWorkspaceHashRef.current = '';
@@ -2737,6 +2784,17 @@ export default function App() {
       } else {
         setCloudSynced(false);
         setProfileChecked(false);
+        try {
+          const savedNotifs = window.localStorage.getItem(`op_notifications_${u.uid}`);
+          if (savedNotifs) {
+            const parsed = JSON.parse(savedNotifs);
+            if (Array.isArray(parsed)) setNotifications(parsed);
+          } else {
+            setNotifications([]);
+          }
+        } catch {
+          setNotifications([]);
+        }
       }
     });
     return () => unsub();
@@ -2906,8 +2964,10 @@ export default function App() {
             unlockedCount: Number(d.unlockedCount) || 0,
             manualBadges: Array.isArray(d.manualBadges) ? d.manualBadges : [],
             monthlyHistory: Array.isArray(d.monthlyHistory) ? d.monthlyHistory : [],
+            avatarDataUrl: typeof d.avatarDataUrl === 'string' && d.avatarDataUrl ? d.avatarDataUrl : undefined,
           });
         });
+        teamStatsHydratedRef.current = true;
         setTeamStats(list);
       },
       (err) => {
@@ -2987,6 +3047,16 @@ export default function App() {
         defaultVille: typeof data.defaultVille === 'string' ? data.defaultVille : 'Meknès',
         emailSignature: typeof data.emailSignature === 'string' ? data.emailSignature : '',
         seeded: Boolean(data.seeded),
+        displayName: typeof data.displayName === 'string' ? data.displayName : undefined,
+        avatarDataUrl: typeof data.avatarDataUrl === 'string' ? data.avatarDataUrl : undefined,
+        phonePro: typeof data.phonePro === 'string' ? data.phonePro : undefined,
+        zone: typeof data.zone === 'string' ? data.zone : undefined,
+        bio: typeof data.bio === 'string' ? data.bio : undefined,
+        monthlyGoalContracts:
+          typeof data.monthlyGoalContracts === 'number' ? data.monthlyGoalContracts : undefined,
+        notifyBadges: typeof data.notifyBadges === 'boolean' ? data.notifyBadges : undefined,
+        notifySound: typeof data.notifySound === 'boolean' ? data.notifySound : undefined,
+        compactUi: typeof data.compactUi === 'boolean' ? data.compactUi : undefined,
       });
       const nextHash = serializeDocCanonical(cleanWs as unknown as Record<string, unknown>);
       if (nextHash !== knownCloudWorkspaceHashRef.current) {
@@ -2998,6 +3068,17 @@ export default function App() {
           defaultVille: cleanWs.defaultVille,
         });
         setEmailSignature(cleanWs.emailSignature);
+        setUserProfile({
+          displayName: cleanWs.displayName ?? '',
+          avatarDataUrl: cleanWs.avatarDataUrl ?? '',
+          phonePro: cleanWs.phonePro ?? '',
+          zone: cleanWs.zone ?? cleanWs.defaultVille ?? 'Meknès',
+          bio: cleanWs.bio ?? '',
+          monthlyGoalContracts: cleanWs.monthlyGoalContracts ?? 5,
+          notifyBadges: cleanWs.notifyBadges ?? true,
+          notifySound: cleanWs.notifySound ?? true,
+          compactUi: cleanWs.compactUi ?? false,
+        });
       }
     };
 
@@ -3116,6 +3197,18 @@ export default function App() {
     (async () => {
       try {
         const snapshotLocal = latestLocalStateRef.current;
+        const initialDisplayName =
+          appUserProfile?.displayName ||
+          cloudUser.displayName ||
+          cloudUser.email?.split('@')[0] ||
+          'Collaborateur';
+        const initialZone = appUserProfile?.zone || snapshotLocal.villesState.defaultVille || 'Meknès';
+        const initialProfileSeed: UserProfileSettings = {
+          ...DEFAULT_USER_PROFILE,
+          displayName: initialDisplayName,
+          zone: initialZone,
+        };
+        // IMPORTANT : Tout nouveau compte démarre systématiquement avec un portefeuille vide ([]).
         const { created } = await ensureUserWorkspace(
           uid,
           {
@@ -3125,8 +3218,17 @@ export default function App() {
             defaultVille: snapshotLocal.villesState.defaultVille,
             emailSignature: snapshotLocal.emailSignature,
             seeded: true,
+            displayName: initialProfileSeed.displayName,
+            avatarDataUrl: initialProfileSeed.avatarDataUrl,
+            phonePro: initialProfileSeed.phonePro,
+            zone: initialProfileSeed.zone,
+            bio: initialProfileSeed.bio,
+            monthlyGoalContracts: initialProfileSeed.monthlyGoalContracts,
+            notifyBadges: initialProfileSeed.notifyBadges,
+            notifySound: initialProfileSeed.notifySound,
+            compactUi: initialProfileSeed.compactUi,
           },
-          snapshotLocal.fiches,
+          [],
           snapshotLocal.emailSkills
         );
 
@@ -3140,20 +3242,22 @@ export default function App() {
             defaultVille: snapshotLocal.villesState.defaultVille,
             emailSignature: snapshotLocal.emailSignature,
             seeded: true,
+            displayName: initialProfileSeed.displayName,
+            avatarDataUrl: initialProfileSeed.avatarDataUrl,
+            phonePro: initialProfileSeed.phonePro,
+            zone: initialProfileSeed.zone,
+            bio: initialProfileSeed.bio,
+            monthlyGoalContracts: initialProfileSeed.monthlyGoalContracts,
+            notifyBadges: initialProfileSeed.notifyBadges,
+            notifySound: initialProfileSeed.notifySound,
+            compactUi: initialProfileSeed.compactUi,
           });
           knownCloudWorkspaceHashRef.current = serializeDocCanonical(
             initialWorkspace as unknown as Record<string, unknown>
           );
-
-          const fichesMap = new Map<string, { hash: string; doc: SanitizedFicheDoc }>();
-          for (const f of snapshotLocal.fiches) {
-            const clean = sanitizeFichePayload(uid, f);
-            fichesMap.set(clean.id, {
-              hash: serializeDocCanonical(clean as unknown as Record<string, unknown>),
-              doc: clean,
-            });
-          }
-          knownCloudFichesRef.current = fichesMap;
+          setUserProfile(initialProfileSeed);
+          knownCloudFichesRef.current = new Map();
+          setFiches([]);
 
           const skillsMap = new Map<string, { hash: string; doc: SanitizedEmailSkillDoc }>();
           for (const s of snapshotLocal.emailSkills) {
@@ -3328,7 +3432,7 @@ export default function App() {
     });
   }, [emailSkills, cloudUser, cloudSynced]);
 
-  // Synchroniser automatiquement les villes cibles et la signature email vers Firestore (debounce 450ms)
+  // Synchroniser automatiquement les villes cibles, la signature email et les paramètres de profil vers Firestore (debounce 450ms)
   useEffect(() => {
     if (!cloudUser || !cloudSynced) return;
     const uid = cloudUser.uid;
@@ -3339,6 +3443,15 @@ export default function App() {
       defaultVille: villesState.defaultVille,
       emailSignature,
       seeded: true,
+      displayName: userProfile.displayName,
+      avatarDataUrl: userProfile.avatarDataUrl,
+      phonePro: userProfile.phonePro,
+      zone: userProfile.zone,
+      bio: userProfile.bio,
+      monthlyGoalContracts: userProfile.monthlyGoalContracts,
+      notifyBadges: userProfile.notifyBadges,
+      notifySound: userProfile.notifySound,
+      compactUi: userProfile.compactUi,
     });
     const nextHash = serializeDocCanonical(payload as unknown as Record<string, unknown>);
     if (nextHash === knownCloudWorkspaceHashRef.current) return;
@@ -3351,7 +3464,7 @@ export default function App() {
     }, 450);
 
     return () => window.clearTimeout(timer);
-  }, [villesState, emailSignature, cloudUser, cloudSynced]);
+  }, [villesState, emailSignature, userProfile, cloudUser, cloudSynced]);
 
   // Calcul des métriques personnelles, badges automatiques et synchronisation /team_stats/{uid}
   const mySignedContracts = useMemo(() => {
@@ -3407,11 +3520,104 @@ export default function App() {
   );
 
   const currentUserDisplayName = useMemo(() => {
+    if (userProfile.displayName.trim()) return userProfile.displayName.trim();
     if (appUserProfile?.displayName) return appUserProfile.displayName;
     if (cloudUser?.displayName) return cloudUser.displayName;
     if (cloudUser?.email) return cloudUser.email.split('@')[0];
     return 'Collaborateur';
-  }, [appUserProfile, cloudUser]);
+  }, [userProfile.displayName, appUserProfile, cloudUser]);
+
+  // Détection en temps réel des nouveaux succès débloqués & badges de rôle/distinction attribués
+  useEffect(() => {
+    if (!cloudUser || !cloudSynced || !canAccessWorkspace) return;
+    if (!teamStatsHydratedRef.current) return;
+    const uid = cloudUser.uid;
+    const storageKey = `op_seen_badges_${uid}`;
+
+    let currentBaseline = badgeBaselineRef.current;
+    if (seenBadgesUidRef.current !== uid) {
+      seenBadgesUidRef.current = uid;
+      currentBaseline = { initialized: false, unlockedIds: [] };
+      try {
+        const raw = window.localStorage.getItem(storageKey);
+        if (raw) {
+          const parsed = JSON.parse(raw);
+          if (Array.isArray(parsed)) {
+            currentBaseline = {
+              initialized: true,
+              unlockedIds: parsed.filter((x): x is string => typeof x === 'string'),
+            };
+          }
+        }
+      } catch {
+        // Fallback to uninitialized baseline
+      }
+    }
+
+    const { nextBaseline, created } = detectNewUnlockNotifications(
+      currentBaseline,
+      myAchievementSummary.items
+    );
+    badgeBaselineRef.current = nextBaseline;
+
+    try {
+      window.localStorage.setItem(storageKey, JSON.stringify(nextBaseline.unlockedIds));
+    } catch {
+      // Ignore quota
+    }
+
+    if (created.length === 0) return;
+
+    setNotifications((prev) => {
+      const merged = mergeNotificationsFeed(prev, created);
+      try {
+        window.localStorage.setItem(`op_notifications_${uid}`, JSON.stringify(merged));
+      } catch {
+        // Ignore quota
+      }
+      return merged;
+    });
+
+    if (userProfile.notifyBadges !== false) {
+      setActiveAchievementToast(created[0]);
+      if (achievementToastTimerRef.current) {
+        window.clearTimeout(achievementToastTimerRef.current);
+      }
+      achievementToastTimerRef.current = window.setTimeout(() => {
+        setActiveAchievementToast(null);
+      }, 6500);
+      if (userProfile.notifySound !== false) {
+        playCelebrationChime();
+      }
+    }
+  }, [
+    cloudUser,
+    cloudSynced,
+    canAccessWorkspace,
+    myAchievementSummary,
+    teamStats,
+    userProfile.notifyBadges,
+    userProfile.notifySound,
+  ]);
+
+  const handleMarkAllNotificationsRead = () => {
+    setNotifications((prev) => {
+      const next = markAllNotificationsRead(prev);
+      if (cloudUser) {
+        try {
+          window.localStorage.setItem(`op_notifications_${cloudUser.uid}`, JSON.stringify(next));
+        } catch {
+          // Ignore quota
+        }
+      }
+      return next;
+    });
+  };
+
+  const handleSaveUserProfile = (nextProfile: UserProfileSettings, nextSignature: string) => {
+    setUserProfile(nextProfile);
+    setEmailSignature(nextSignature);
+  };
 
   useEffect(() => {
     if (!cloudUser || !cloudSynced || !canAccessWorkspace) return;
@@ -3421,7 +3627,7 @@ export default function App() {
       : appUserProfile?.role === 'manager'
         ? 'manager'
         : 'commercial';
-    const zone = appUserProfile?.zone || villesState.defaultVille || 'Meknès';
+    const zone = userProfile.zone || appUserProfile?.zone || villesState.defaultVille || 'Meknès';
     const monthlyHistory = buildMonthlyHistoryStrings(mySignedContracts);
     const payload = {
       uid,
@@ -3437,6 +3643,7 @@ export default function App() {
       unlockedCount: myAchievementSummary.unlockedCount,
       manualBadges: myTeamStatRecord?.manualBadges || [],
       monthlyHistory,
+      avatarDataUrl: userProfile.avatarDataUrl || '',
     };
     const nextHash = serializeDocCanonical(payload as unknown as Record<string, unknown>);
     if (nextHash === lastTeamStatHashRef.current) return;
@@ -3456,6 +3663,8 @@ export default function App() {
     isSuperAdmin,
     appUserProfile,
     villesState.defaultVille,
+    userProfile.zone,
+    userProfile.avatarDataUrl,
     currentUserDisplayName,
     myCollaboratorMetrics,
     myAchievementSummary,
@@ -3465,6 +3674,7 @@ export default function App() {
 
   const handleGoogleSignOut = async () => {
     try {
+      setProfileMenuOpen(false);
       await signOutUser();
       setActiveTab('portefeuille');
       notify('Session fermée en toute sécurité.');
@@ -5508,6 +5718,13 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
         </div>
       )}
 
+      {/* Notification célébration lors d'un déblocage de succès ou d'attribution de badge */}
+      <AchievementToast
+        notification={activeAchievementToast}
+        onDismiss={() => setActiveAchievementToast(null)}
+        onOpenBadges={() => setActiveTab('badges')}
+      />
+
       {/* En-tête Executive B2B Workspace */}
       <header className="bg-white border-b border-stone-200 sm:sticky sm:top-0 z-30">
         <div className="max-w-[1440px] mx-auto px-4 py-3 flex flex-wrap items-center justify-between gap-3">
@@ -5526,31 +5743,130 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
-            <div className="flex items-center gap-1.5 rounded-lg border border-emerald-200 bg-emerald-50 px-2.5 py-1.5 text-xs text-emerald-900 shrink-0">
-              <Cloud className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
-              <span
-                className="font-semibold max-w-[140px] truncate"
-                title={`Connecté et synchronisé (${cloudUser.email || ''})`}
-              >
-                {cloudBusy
-                  ? 'Synchro...'
-                  : appUserProfile?.displayName ||
-                    cloudUser.displayName?.split(' ')[0] ||
-                    cloudUser.email?.split('@')[0] ||
-                    'Connecté'}
-              </span>
-              {accessDecision?.status === 'allowed' && (
-                <RoleBadge role={currentUserRole} showShort className="hidden sm:inline-flex" />
-              )}
+            <NotificationBell
+              notifications={notifications}
+              onMarkAllRead={handleMarkAllNotificationsRead}
+              onOpenBadges={() => setActiveTab('badges')}
+            />
+
+            {/* Menu Profil Utilisateur (Photo, Rôle, Paramètres & Déconnexion) */}
+            <div ref={profileMenuRef} className="relative">
               <button
                 type="button"
-                onClick={handleGoogleSignOut}
-                aria-label="Se déconnecter"
-                title="Se déconnecter"
-                className="ml-1 p-0.5 rounded hover:bg-emerald-200/70 text-emerald-800 transition-colors"
+                onClick={() => setProfileMenuOpen((v) => !v)}
+                aria-expanded={profileMenuOpen}
+                aria-label="Menu de mon compte"
+                data-testid="header-profile-menu-btn"
+                className="flex items-center gap-2 rounded-lg border border-emerald-200 bg-emerald-50/80 hover:bg-emerald-100/70 px-2 py-1 text-xs text-emerald-950 shrink-0 transition-colors"
               >
-                <LogOut className="w-3.5 h-3.5" />
+                <div className="w-6 h-6 rounded-md overflow-hidden border border-emerald-300 bg-white flex items-center justify-center shrink-0">
+                  {userProfile.avatarDataUrl ? (
+                    <img
+                      src={userProfile.avatarDataUrl}
+                      alt={currentUserDisplayName}
+                      className="w-full h-full object-cover"
+                    />
+                  ) : (
+                    <span className="text-[10px] font-extrabold text-orange-700">
+                      {getUserInitials(currentUserDisplayName)}
+                    </span>
+                  )}
+                </div>
+                <span
+                  className="font-semibold max-w-[125px] truncate"
+                  title={`Connecté et synchronisé (${cloudUser.email || ''})`}
+                >
+                  {cloudBusy ? 'Synchro...' : currentUserDisplayName}
+                </span>
+                {accessDecision?.status === 'allowed' && (
+                  <RoleBadge role={currentUserRole} showShort className="hidden sm:inline-flex" />
+                )}
+                <ChevronDown className="w-3.5 h-3.5 text-emerald-700 shrink-0" />
               </button>
+
+              {profileMenuOpen && (
+                <div
+                  data-testid="header-profile-dropdown"
+                  className="absolute right-0 mt-2 w-72 rounded-2xl border border-stone-200 bg-white shadow-xl z-50 overflow-hidden"
+                >
+                  <div className="p-3.5 bg-stone-50/80 border-b border-stone-100 flex items-center gap-3">
+                    <div className="w-11 h-11 rounded-xl overflow-hidden border border-stone-200 bg-white flex items-center justify-center shrink-0">
+                      {userProfile.avatarDataUrl ? (
+                        <img
+                          src={userProfile.avatarDataUrl}
+                          alt={currentUserDisplayName}
+                          className="w-full h-full object-cover"
+                        />
+                      ) : (
+                        <span className="text-sm font-extrabold text-orange-700">
+                          {getUserInitials(currentUserDisplayName)}
+                        </span>
+                      )}
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <div className="text-xs font-extrabold text-stone-900 truncate">
+                        {currentUserDisplayName}
+                      </div>
+                      <div className="text-[11px] text-stone-500 truncate">{cloudUser.email}</div>
+                      <div className="mt-1">
+                        <RoleBadge role={currentUserRole} />
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="p-1.5 space-y-0.5 text-xs">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setProfileMenuOpen(false);
+                        setActiveTab('compte');
+                      }}
+                      className="w-full px-3 py-2 rounded-lg text-left font-semibold text-stone-800 hover:bg-stone-100 flex items-center gap-2"
+                    >
+                      <Settings className="w-3.5 h-3.5 text-orange-600" />
+                      Paramètres du compte &amp; Photo
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setProfileMenuOpen(false);
+                        setActiveTab('badges');
+                      }}
+                      className="w-full px-3 py-2 rounded-lg text-left font-semibold text-stone-800 hover:bg-stone-100 flex items-center justify-between gap-2"
+                    >
+                      <span className="flex items-center gap-2">
+                        <Award className="w-3.5 h-3.5 text-amber-500" />
+                        Mes Succès &amp; Badges
+                      </span>
+                      <span className="text-[10px] font-bold text-stone-500 tabular-nums">
+                        {myAchievementSummary.unlockedCount}/{myAchievementSummary.totalCount}
+                      </span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setProfileMenuOpen(false);
+                        setActiveTab('team');
+                      }}
+                      className="w-full px-3 py-2 rounded-lg text-left font-semibold text-stone-800 hover:bg-stone-100 flex items-center gap-2"
+                    >
+                      <Trophy className="w-3.5 h-3.5 text-emerald-600" />
+                      Classement &amp; Mes Payouts
+                    </button>
+                  </div>
+
+                  <div className="p-1.5 border-t border-stone-100">
+                    <button
+                      type="button"
+                      onClick={handleGoogleSignOut}
+                      className="w-full px-3 py-2 rounded-lg text-left text-xs font-bold text-red-700 hover:bg-red-50 flex items-center gap-2"
+                    >
+                      <LogOut className="w-3.5 h-3.5" />
+                      Se déconnecter
+                    </button>
+                  </div>
+                </div>
+              )}
             </div>
             <button
               type="button"
@@ -5889,6 +6205,7 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
             { id: 'crawler', label: 'Crawler Profond N1/N2', icon: Globe },
             { id: 'paste', label: 'Extraction HTML / CSV / JSON', icon: FileText },
             { id: 'dedup', label: `Déduplication MDM (${duplicateGroups.length})`, icon: GitMerge },
+            { id: 'compte', label: 'Mon Compte', icon: UserIcon },
             ...(isSuperAdmin
               ? [{ id: 'admin', label: `Utilisateurs & Accès (${managedUsers.length})`, icon: Users }]
               : []),
@@ -5916,7 +6233,7 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
         </nav>
       </header>
 
-      <main className="max-w-[1440px] mx-auto p-4 space-y-4">
+      <main className={`max-w-[1440px] mx-auto ${userProfile.compactUi ? 'p-2.5 space-y-2.5' : 'p-4 space-y-4'}`}>
         {/* Barre de progression Audit & Enrichissement 8-Workers */}
         {auditProgress && (
           <section className="bg-stone-900 text-stone-50 rounded-xl p-3.5 border border-stone-700 space-y-2">
@@ -7401,6 +7718,36 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
             teamStats={teamStats}
             initialSelectedUid={badgesFocusUid}
             onAdminToggleManualBadge={isSuperAdmin ? handleAdminToggleManualBadge : undefined}
+          />
+        )}
+
+        {/* ================================================================== */}
+        {/* ONGLET : MON COMPTE, PROFIL, PHOTO & PARAMÈTRES                    */}
+        {/* ================================================================== */}
+        {activeTab === 'compte' && (
+          <AccountSettingsPanel
+            uid={cloudUser.uid}
+            email={cloudUser.email || ''}
+            emailVerified={cloudUser.emailVerified}
+            hasPasswordProvider={cloudUser.providerData.some((p) => p.providerId === 'password')}
+            role={currentUserRole}
+            profile={{
+              ...userProfile,
+              displayName: userProfile.displayName || currentUserDisplayName,
+              zone: userProfile.zone || appUserProfile?.zone || villesState.defaultVille || 'Meknès',
+            }}
+            emailSignature={emailSignature}
+            villesOptions={villesState.all}
+            manualBadges={myTeamStatRecord?.manualBadges || []}
+            achievementSummary={myAchievementSummary}
+            contractsCount={myCollaboratorMetrics.contractsCount}
+            totalPayoutMad={myCollaboratorMetrics.totalPayoutMad}
+            prospectsCount={myCollaboratorMetrics.totalProspects}
+            onSaveProfile={handleSaveUserProfile}
+            onExportBackup={handleExportFullBackup}
+            onSignOut={handleGoogleSignOut}
+            onJumpToBadges={() => setActiveTab('badges')}
+            onNotify={notify}
           />
         )}
 

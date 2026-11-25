@@ -1,14 +1,84 @@
 import 'dotenv/config';
+import fs from 'fs';
 import express from 'express';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { GoogleGenAI, Type, ThinkingLevel } from '@google/genai';
+import {
+  initializeApp as initializeAdminApp,
+  getApps as getAdminApps,
+  getApp as getAdminApp,
+} from 'firebase-admin/app';
+import { getAuth as getAdminAuth } from 'firebase-admin/auth';
+import { getFirestore as getAdminFirestore } from 'firebase-admin/firestore';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const PORT = Number(process.env.PORT) || 3000;
 const AI_MODEL = 'gemini-4-hydrogen';
+const SUPER_ADMIN_EMAIL = 'hardcallmohamed@gmail.com';
+
+interface FirebaseAppletConfig {
+  projectId: string;
+  firestoreDatabaseId?: string;
+}
+
+const SECURE_LLM_PROVIDERS: Record<string, { url: string; defaultModel: string; label: string }> = {
+  groq: {
+    url: 'https://api.groq.com/openai/v1/chat/completions',
+    defaultModel: 'llama-3.3-70b-versatile',
+    label: 'Groq',
+  },
+  mistral: {
+    url: 'https://api.mistral.ai/v1/chat/completions',
+    defaultModel: 'mistral-small-latest',
+    label: 'Mistral AI',
+  },
+  openrouter: {
+    url: 'https://openrouter.ai/api/v1/chat/completions',
+    defaultModel: 'openai/gpt-4o-mini',
+    label: 'OpenRouter',
+  },
+  openai: {
+    url: 'https://api.openai.com/v1/chat/completions',
+    defaultModel: 'gpt-4o-mini',
+    label: 'OpenAI',
+  },
+  deepseek: {
+    url: 'https://api.deepseek.com/chat/completions',
+    defaultModel: 'deepseek-chat',
+    label: 'DeepSeek',
+  },
+};
+
+function loadFirebaseAppletConfig(): FirebaseAppletConfig | null {
+  try {
+    const configPath = path.resolve(__dirname, 'firebase-applet-config.json');
+    const raw = fs.readFileSync(configPath, 'utf-8');
+    const parsed = JSON.parse(raw) as FirebaseAppletConfig;
+    if (!parsed?.projectId) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function getFirebaseAdminServices() {
+  const config = loadFirebaseAppletConfig();
+  if (!config) return null;
+
+  const adminApp = getAdminApps().length
+    ? getAdminApp()
+    : initializeAdminApp({ projectId: config.projectId });
+
+  const adminAuth = getAdminAuth(adminApp);
+  const adminDb = config.firestoreDatabaseId
+    ? getAdminFirestore(adminApp, config.firestoreDatabaseId)
+    : getAdminFirestore(adminApp);
+
+  return { adminApp, adminAuth, adminDb, config };
+}
 
 function isValidConfiguredKey(val: string | undefined): val is string {
   if (!val) return false;
@@ -553,6 +623,174 @@ Produis un audit structuré, actionnable immédiatement sur le terrain (Meknès 
     } catch (err) {
       const formatted = formatAiError(err);
       res.status(formatted.status).json({ error: formatted.message });
+    }
+  });
+
+  // 8. Proxy IA sécurisé via Firebase Admin SDK (/api_keys/{provider} dans Firestore)
+  // Vérifie le token Firebase ID + contrôle d'accès (Super-Admin ou collaborateur actif dans /app_users)
+  app.post('/api/ai/groq-secure', async (req, res) => {
+    const services = getFirebaseAdminServices();
+    if (!services) {
+      res.status(503).json({
+        error: 'Configuration Firebase Admin introuvable sur le serveur.',
+      });
+      return;
+    }
+
+    const authHeader = typeof req.headers.authorization === 'string' ? req.headers.authorization : '';
+    if (!authHeader.startsWith('Bearer ')) {
+      res.status(401).json({ error: 'Authentification requise (jeton Bearer manquant).' });
+      return;
+    }
+    const idToken = authHeader.slice('Bearer '.length).trim();
+    if (!idToken || idToken.length > 8192) {
+      res.status(401).json({ error: 'Jeton d’authentification invalide.' });
+      return;
+    }
+
+    let decoded: Awaited<ReturnType<typeof services.adminAuth.verifyIdToken>>;
+    try {
+      decoded = await services.adminAuth.verifyIdToken(idToken);
+    } catch {
+      res.status(401).json({ error: 'Session Firebase invalide ou expirée. Reconnectez-vous.' });
+      return;
+    }
+
+    const callerEmail = (decoded.email || '').toLowerCase();
+    const isSuperAdmin = decoded.email_verified === true && callerEmail === SUPER_ADMIN_EMAIL;
+
+    if (!decoded.email_verified) {
+      res.status(403).json({ error: 'Veuillez vérifier votre adresse e-mail avant d’utiliser le proxy IA.' });
+      return;
+    }
+
+    if (!isSuperAdmin) {
+      try {
+        const memberSnap = await services.adminDb.doc(`app_users/${decoded.uid}`).get();
+        if (!memberSnap.exists || memberSnap.data()?.active !== true) {
+          res.status(403).json({ error: 'Accès refusé : compte non autorisé ou désactivé.' });
+          return;
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (/PERMISSION_DENIED|7 PERMISSION_DENIED|Could not load the default credentials/i.test(msg)) {
+          res.status(503).json({
+            error:
+              'Droits IAM Firestore manquants sur le serveur. Accordez le rôle roles/datastore.viewer au compte de service d’aperçu dans Google Cloud IAM.',
+          });
+          return;
+        }
+        res.status(500).json({ error: 'Impossible de vérifier les autorisations utilisateur côté serveur.' });
+        return;
+      }
+    }
+
+    const rawProvider = clampString(req.body?.provider, 40).toLowerCase() || 'groq';
+    const providerConfig = SECURE_LLM_PROVIDERS[rawProvider];
+    if (!providerConfig) {
+      res.status(400).json({
+        error: `Fournisseur non supporté. Fournisseurs autorisés : ${Object.keys(SECURE_LLM_PROVIDERS).join(', ')}.`,
+      });
+      return;
+    }
+
+    const prompt = clampString(req.body?.prompt, 6000);
+    if (!prompt) {
+      res.status(400).json({ error: 'Veuillez fournir un prompt valide.' });
+      return;
+    }
+
+    const requestedModel = clampString(req.body?.model, 120);
+    const model =
+      requestedModel && /^[a-zA-Z0-9._:/-]{2,120}$/.test(requestedModel)
+        ? requestedModel
+        : providerConfig.defaultModel;
+
+    let apiKey = '';
+    try {
+      const keySnap = await services.adminDb.doc(`api_keys/${rawProvider}`).get();
+      if (!keySnap.exists) {
+        res.status(404).json({
+          error: `La clé API ${providerConfig.label} n'est pas encore configurée dans le coffre-fort Cloud (/api_keys/${rawProvider}).`,
+        });
+        return;
+      }
+      const keyData = keySnap.data();
+      if (keyData?.active === false) {
+        res.status(403).json({
+          error: `La clé API ${providerConfig.label} est actuellement désactivée dans le coffre-fort Cloud.`,
+        });
+        return;
+      }
+      apiKey = typeof keyData?.key === 'string' ? keyData.key.trim() : '';
+      if (!apiKey) {
+        res.status(404).json({
+          error: `La clé API ${providerConfig.label} enregistrée dans Firestore est vide.`,
+        });
+        return;
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (/PERMISSION_DENIED|7 PERMISSION_DENIED|Could not load the default credentials/i.test(msg)) {
+        res.status(503).json({
+          error:
+            'Permissions IAM Firestore manquantes côté serveur : accordez le rôle roles/datastore.viewer au compte de service d’aperçu dans Google Cloud IAM.',
+        });
+        return;
+      }
+      res.status(502).json({
+        error: 'Impossible de récupérer la clé API depuis Firestore côté serveur.',
+      });
+      return;
+    }
+
+    try {
+      const upstream = await fetch(providerConfig.url, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          model,
+          messages: [{ role: 'user', content: prompt }],
+          temperature: 0.4,
+          max_tokens: 700,
+        }),
+        signal: AbortSignal.timeout(25000),
+      });
+
+      const payload = (await upstream.json().catch(() => ({}))) as {
+        choices?: Array<{ message?: { content?: string } }>;
+        error?: { message?: string };
+      };
+
+      if (!upstream.ok) {
+        const providerErr = clampString(payload?.error?.message, 220);
+        res.status(upstream.status >= 400 && upstream.status < 500 ? 502 : 503).json({
+          error: providerErr
+            ? `Erreur ${providerConfig.label} : ${providerErr}`
+            : `Le fournisseur ${providerConfig.label} a renvoyé le statut HTTP ${upstream.status}.`,
+        });
+        return;
+      }
+
+      const reply = clampString(payload?.choices?.[0]?.message?.content, 8000);
+      if (!reply) {
+        res.status(502).json({ error: `Réponse vide renvoyée par ${providerConfig.label}.` });
+        return;
+      }
+
+      res.json({
+        reply,
+        provider: rawProvider,
+        providerLabel: providerConfig.label,
+        model,
+      });
+    } catch {
+      res.status(503).json({
+        error: `Impossible de joindre ${providerConfig.label} depuis le serveur.`,
+      });
     }
   });
 

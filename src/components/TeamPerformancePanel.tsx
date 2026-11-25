@@ -25,6 +25,7 @@ import {
   type SignedContractRecord,
   type TeamStatRecord,
 } from '../utils/gamification';
+import { getUserInitials } from '../utils/avatarResize';
 import { RoleBadge } from './RoleBadge';
 
 interface TeamPerformancePanelProps {
@@ -390,17 +391,34 @@ export const TeamPerformancePanel: React.FC<TeamPerformancePanelProps> = ({
                         </span>
                       </td>
                       <td className="px-4 py-3">
-                        <div className="flex items-center gap-1.5 flex-wrap">
-                          <span className="font-bold text-stone-900">{row.displayName}</span>
-                          {isMe && (
-                            <span className="rounded-md bg-orange-100 px-1.5 py-0.5 text-[10px] font-bold text-orange-800">
-                              Vous
-                            </span>
-                          )}
-                        </div>
-                        <div className="mt-1 flex items-center gap-1.5 flex-wrap">
-                          <RoleBadge role={row.role} showShort />
-                          <span className="text-[11px] text-stone-500">· {row.zone || 'Meknès'}</span>
+                        <div className="flex items-center gap-2.5">
+                          <div className="h-8 w-8 rounded-lg overflow-hidden border border-stone-200 bg-stone-100 shrink-0 flex items-center justify-center">
+                            {row.avatarDataUrl ? (
+                              <img
+                                src={row.avatarDataUrl}
+                                alt={row.displayName}
+                                className="h-full w-full object-cover"
+                              />
+                            ) : (
+                              <span className="text-[11px] font-bold text-stone-700">
+                                {getUserInitials(row.displayName)}
+                              </span>
+                            )}
+                          </div>
+                          <div className="min-w-0">
+                            <div className="flex items-center gap-1.5 flex-wrap">
+                              <span className="font-bold text-stone-900">{row.displayName}</span>
+                              {isMe && (
+                                <span className="rounded-md bg-orange-100 px-1.5 py-0.5 text-[10px] font-bold text-orange-800">
+                                  Vous
+                                </span>
+                              )}
+                            </div>
+                            <div className="mt-0.5 flex items-center gap-1.5 flex-wrap">
+                              <RoleBadge role={row.role} showShort />
+                              <span className="text-[11px] text-stone-500">· {row.zone || 'Meknès'}</span>
+                            </div>
+                          </div>
                         </div>
                       </td>
                       <td className="px-4 py-3 text-right text-sm font-extrabold text-stone-900 tabular-nums">

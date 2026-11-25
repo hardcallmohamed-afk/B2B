@@ -34,6 +34,41 @@
         "seeded": {
           "type": "boolean"
         },
+        "displayName": {
+          "type": "string",
+          "maxLength": 120
+        },
+        "avatarDataUrl": {
+          "type": "string",
+          "maxLength": 45000,
+          "pattern": "^(|data:image/(jpeg|png|webp);base64,[A-Za-z0-9+/=]+)$"
+        },
+        "phonePro": {
+          "type": "string",
+          "maxLength": 30
+        },
+        "zone": {
+          "type": "string",
+          "maxLength": 100
+        },
+        "bio": {
+          "type": "string",
+          "maxLength": 240
+        },
+        "monthlyGoalContracts": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 200
+        },
+        "notifyBadges": {
+          "type": "boolean"
+        },
+        "notifySound": {
+          "type": "boolean"
+        },
+        "compactUi": {
+          "type": "boolean"
+        },
         "createdAt": {
           "type": "string",
           "format": "date-time"
@@ -364,6 +399,11 @@
         "monthlyHistory": {
           "type": "array",
           "description": "Historique mensuel agrégé YYYY-MM:contrats:payout (max 24)."
+        },
+        "avatarDataUrl": {
+          "type": "string",
+          "maxLength": 45000,
+          "pattern": "^(|data:image/(jpeg|png|webp);base64,[A-Za-z0-9+/=]+)$"
         },
         "createdAt": {
           "type": "string",

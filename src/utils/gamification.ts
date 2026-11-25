@@ -171,6 +171,7 @@ export interface TeamStatRecord {
   unlockedCount: number;
   manualBadges: string[];
   monthlyHistory: string[]; // "YYYY-MM:contracts:payout"
+  avatarDataUrl?: string;
 }
 
 export interface CollaboratorMetrics {
@@ -856,6 +857,7 @@ export interface LeaderboardRow {
   badgesCount: number;
   manualBadges: string[];
   conversionPct: number;
+  avatarDataUrl?: string;
 }
 
 export function buildTeamLeaderboard(
@@ -892,6 +894,7 @@ export function buildTeamLeaderboard(
       badgesCount: m.unlockedCount,
       manualBadges: m.manualBadges || [],
       conversionPct,
+      avatarDataUrl: m.avatarDataUrl || undefined,
     };
   });
 

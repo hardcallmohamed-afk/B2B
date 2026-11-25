@@ -172,6 +172,22 @@ export async function setOrLinkAccountPassword(newPassword: string): Promise<voi
   }
 }
 
+export async function updateOwnAuthDisplayName(displayName: string): Promise<void> {
+  if (!auth.currentUser) {
+    throw new Error('Aucun compte connecté.');
+  }
+  const cleanName = displayName.trim().slice(0, 120);
+  if (!cleanName) return;
+  await updateProfile(auth.currentUser, { displayName: cleanName });
+}
+
+export async function getCurrentUserIdToken(forceRefresh = false): Promise<string> {
+  if (!auth.currentUser) {
+    throw new Error('Vous devez être connecté pour utiliser le proxy IA sécurisé.');
+  }
+  return auth.currentUser.getIdToken(forceRefresh);
+}
+
 export async function signOutUser(): Promise<void> {
   await signOut(auth);
 }
@@ -450,7 +466,7 @@ export async function syncMyTeamStat(
     }
 
     if (isSuperAdmin) {
-      await updateDoc(ref, {
+      const payload: DocumentData = {
         displayName: clean.displayName,
         role: clean.role,
         zone: clean.zone,
@@ -463,10 +479,14 @@ export async function syncMyTeamStat(
         unlockedCount: clean.unlockedCount,
         monthlyHistory: clean.monthlyHistory,
         updatedAt: serverTimestamp(),
-      });
+      };
+      if (typeof clean.avatarDataUrl === 'string') {
+        payload.avatarDataUrl = clean.avatarDataUrl;
+      }
+      await updateDoc(ref, payload);
     } else {
       // Strictly respect Action 2 in firestore.rules: collaborator never touches manualBadges, role, or active
-      await updateDoc(ref, {
+      const payload: DocumentData = {
         displayName: clean.displayName,
         zone: clean.zone,
         totalProspects: clean.totalProspects,
@@ -477,7 +497,11 @@ export async function syncMyTeamStat(
         unlockedCount: clean.unlockedCount,
         monthlyHistory: clean.monthlyHistory,
         updatedAt: serverTimestamp(),
-      });
+      };
+      if (typeof clean.avatarDataUrl === 'string') {
+        payload.avatarDataUrl = clean.avatarDataUrl;
+      }
+      await updateDoc(ref, payload);
     }
   } catch (error) {
     handleFirestoreError(error, OperationType.WRITE, path);

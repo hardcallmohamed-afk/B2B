@@ -63,6 +63,15 @@ export interface WorkspaceLike {
   defaultVille: string;
   emailSignature: string;
   seeded: boolean;
+  displayName?: string;
+  avatarDataUrl?: string;
+  phonePro?: string;
+  zone?: string;
+  bio?: string;
+  monthlyGoalContracts?: number;
+  notifyBadges?: boolean;
+  notifySound?: boolean;
+  compactUi?: boolean;
 }
 
 export interface SanitizedWorkspaceDoc {
@@ -73,6 +82,15 @@ export interface SanitizedWorkspaceDoc {
   defaultVille: string;
   emailSignature: string;
   seeded: boolean;
+  displayName?: string;
+  avatarDataUrl?: string;
+  phonePro?: string;
+  zone?: string;
+  bio?: string;
+  monthlyGoalContracts?: number;
+  notifyBadges?: boolean;
+  notifySound?: boolean;
+  compactUi?: boolean;
 }
 
 export interface SanitizedFicheDoc {
@@ -163,6 +181,16 @@ function sanitizeStringArray(arr: unknown, maxItems: number, maxItemLen: number)
   return out;
 }
 
+const SAFE_AVATAR_DATA_URL_REGEX = /^data:image\/(jpeg|png|webp);base64,[A-Za-z0-9+/=]+$/;
+
+export function sanitizeAvatarDataUrl(raw: unknown): string {
+  if (typeof raw !== 'string') return '';
+  const trimmed = raw.trim();
+  if (!trimmed) return '';
+  if (trimmed.length > 45000) return '';
+  return SAFE_AVATAR_DATA_URL_REGEX.test(trimmed) ? trimmed : '';
+}
+
 export function sanitizeWorkspacePayload(ownerId: string, input: WorkspaceLike): SanitizedWorkspaceDoc {
   const cleanOwnerId = sanitizeDocId(ownerId, 'user');
   const villesAll = sanitizeStringArray(input.villesAll, 50, 100);
@@ -171,7 +199,7 @@ export function sanitizeWorkspacePayload(ownerId: string, input: WorkspaceLike):
   const rawDefaultVille = clampString(input.defaultVille?.trim?.() ?? '', 80);
   const defaultVille = clampString(rawDefaultVille.length >= 1 ? rawDefaultVille : villesAll[0] || 'Meknès', 80);
 
-  return {
+  const doc: SanitizedWorkspaceDoc = {
     ownerId: cleanOwnerId,
     villesAll,
     villesActive,
@@ -180,6 +208,36 @@ export function sanitizeWorkspacePayload(ownerId: string, input: WorkspaceLike):
     emailSignature: clampString(input.emailSignature, 400),
     seeded: Boolean(input.seeded),
   };
+
+  if (typeof input.displayName === 'string') {
+    doc.displayName = clampString(input.displayName.trim(), 120);
+  }
+  if (typeof input.avatarDataUrl === 'string') {
+    doc.avatarDataUrl = sanitizeAvatarDataUrl(input.avatarDataUrl);
+  }
+  if (typeof input.phonePro === 'string') {
+    doc.phonePro = clampString(input.phonePro.trim(), 30);
+  }
+  if (typeof input.zone === 'string') {
+    doc.zone = clampString(input.zone.trim(), 100);
+  }
+  if (typeof input.bio === 'string') {
+    doc.bio = clampString(input.bio.trim(), 240);
+  }
+  if (typeof input.monthlyGoalContracts === 'number' && Number.isFinite(input.monthlyGoalContracts)) {
+    doc.monthlyGoalContracts = Math.min(200, Math.max(1, Math.round(input.monthlyGoalContracts)));
+  }
+  if (typeof input.notifyBadges === 'boolean') {
+    doc.notifyBadges = input.notifyBadges;
+  }
+  if (typeof input.notifySound === 'boolean') {
+    doc.notifySound = input.notifySound;
+  }
+  if (typeof input.compactUi === 'boolean') {
+    doc.compactUi = input.compactUi;
+  }
+
+  return doc;
 }
 
 export function sanitizeFichePayload(ownerId: string, fiche: FicheLike): SanitizedFicheDoc {
@@ -293,6 +351,7 @@ export interface TeamStatLike {
   unlockedCount: number;
   manualBadges?: string[];
   monthlyHistory?: string[];
+  avatarDataUrl?: string;
 }
 
 export interface SanitizedTeamStatDoc {
@@ -310,6 +369,7 @@ export interface SanitizedTeamStatDoc {
   unlockedCount: number;
   manualBadges: string[];
   monthlyHistory: string[];
+  avatarDataUrl?: string;
 }
 
 export function sanitizeTeamStatPayload(input: TeamStatLike): SanitizedTeamStatDoc {
@@ -323,7 +383,7 @@ export function sanitizeTeamStatPayload(input: TeamStatLike): SanitizedTeamStatD
   const clampInt = (n: unknown, maxVal: number) =>
     Math.min(maxVal, Math.max(0, Math.round(Number(n) || 0)));
 
-  return {
+  const doc: SanitizedTeamStatDoc = {
     uid: cleanUid,
     orgScope: 'orange_pro_team',
     displayName,
@@ -339,6 +399,12 @@ export function sanitizeTeamStatPayload(input: TeamStatLike): SanitizedTeamStatD
     manualBadges: sanitizeStringArray(input.manualBadges ?? [], 20, 64),
     monthlyHistory: sanitizeStringArray(input.monthlyHistory ?? [], 24, 40),
   };
+
+  if (typeof input.avatarDataUrl === 'string') {
+    doc.avatarDataUrl = sanitizeAvatarDataUrl(input.avatarDataUrl);
+  }
+
+  return doc;
 }
 
 export interface SignedContractLike {
