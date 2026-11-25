@@ -17,6 +17,7 @@ const __dirname = path.dirname(__filename);
 
 const PORT = Number(process.env.PORT) || 3000;
 const AI_MODEL = 'gemini-4-hydrogen';
+const AI_FALLBACK_MODELS = ['gemini-4-hydrogen', 'gemini-3.1-flash-lite'] as const;
 const SUPER_ADMIN_EMAIL = 'hardcallmohamed@gmail.com';
 
 interface FirebaseAppletConfig {
@@ -116,6 +117,28 @@ async function withRetry<T>(fn: () => Promise<T>, maxRetries = 2): Promise<T> {
   throw lastErr;
 }
 
+async function generateContentWithFallback(
+  ai: GoogleGenAI,
+  buildRequest: (model: string) => Parameters<GoogleGenAI['models']['generateContent']>[0]
+) {
+  let lastErr: unknown;
+  for (let i = 0; i < AI_FALLBACK_MODELS.length; i++) {
+    const model = AI_FALLBACK_MODELS[i];
+    try {
+      const response = await withRetry(() => ai.models.generateContent(buildRequest(model)));
+      return { response, usedModel: model };
+    } catch (err) {
+      lastErr = err;
+      const msg = err instanceof Error ? err.message : String(err);
+      const canFallbackModel = /429|RESOURCE_EXHAUSTED|quota|404|NOT_FOUND|503|UNAVAILABLE/i.test(msg);
+      if (!canFallbackModel || i === AI_FALLBACK_MODELS.length - 1) {
+        throw err;
+      }
+    }
+  }
+  throw lastErr;
+}
+
 function clampString(val: unknown, maxLen: number): string {
   if (typeof val !== 'string') return '';
   return val.trim().slice(0, maxLen);
@@ -139,13 +162,15 @@ function formatAiError(err: unknown): { status: number; message: string } {
   if (/403|PERMISSION_DENIED|API_KEY_INVALID|API key not valid|invalid api key/i.test(raw)) {
     return {
       status: 502,
-      message: 'Clé Gemini invalide ou autorisations insuffisantes. Vérifiez votre clé dans Settings > Secrets.',
+      message:
+        'Clé Gemini intégrée invalide ou expirée. Bascule automatique vers les autres fournisseurs IA du Hub API / Coffre Cloud.',
     };
   }
   if (/429|RESOURCE_EXHAUSTED|quota/i.test(raw)) {
     return {
       status: 429,
-      message: 'Quota API Gemini atteint temporairement. Vérifiez votre quota dans Settings > Secrets ou réessayez plus tard.',
+      message:
+        'Quota Gemini intégré atteint temporairement. Bascule automatique vers les autres IA disponibles (Hub API / Coffre Cloud).',
     };
   }
   if (/404|NOT_FOUND/i.test(raw)) {
@@ -174,7 +199,7 @@ function formatAiError(err: unknown): { status: number; message: string } {
 
 async function startServer() {
   const app = express();
-  app.use(express.json({ limit: '512kb' }));
+  app.use(express.json({ limit: '2mb' }));
 
   // 1. Statut de l'intégration IA serveur (sans jamais exposer la clé)
   app.get('/api/ai/status', (_req, res) => {
@@ -187,7 +212,7 @@ async function startServer() {
     const ai = getGeminiClient();
     if (!ai) {
       res.status(503).json({
-        error: 'Service Gemini IA non configuré sur le serveur. Vérifiez GEMINI_API_KEY dans Settings > Secrets.',
+        error: 'Service Gemini intégré non configuré. Bascule automatique vers les autres fournisseurs IA du Hub API / Coffre Cloud.',
       });
       return;
     }
@@ -228,23 +253,21 @@ ${focusedFiche ? `\n=== FICHE CIBLÉE ===\n${focusedFiche}` : ''}`;
         parts: [{ text: m.text }],
       }));
 
-      const response = await withRetry(() =>
-        ai.models.generateContent({
-          model: AI_MODEL,
-          contents,
-          config: {
-            systemInstruction,
-            thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
-          },
-        })
-      );
+      const { response, usedModel } = await generateContentWithFallback(ai, (model) => ({
+        model,
+        contents,
+        config: {
+          systemInstruction,
+          thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+        },
+      }));
 
       const reply = (response.text ?? '').trim();
       if (!reply) {
         res.status(502).json({ error: 'Réponse vide du modèle Gemini.' });
         return;
       }
-      res.json({ reply, model: AI_MODEL });
+      res.json({ reply, model: usedModel });
     } catch (err) {
       const formatted = formatAiError(err);
       res.status(formatted.status).json({ error: formatted.message });
@@ -256,7 +279,7 @@ ${focusedFiche ? `\n=== FICHE CIBLÉE ===\n${focusedFiche}` : ''}`;
     const ai = getGeminiClient();
     if (!ai) {
       res.status(503).json({
-        error: 'Service Gemini IA non configuré sur le serveur. Vérifiez GEMINI_API_KEY dans Settings > Secrets.',
+        error: 'Service Gemini intégré non configuré. Bascule automatique vers les autres fournisseurs IA du Hub API / Coffre Cloud.',
       });
       return;
     }
@@ -268,26 +291,24 @@ ${focusedFiche ? `\n=== FICHE CIBLÉE ===\n${focusedFiche}` : ''}`;
     }
 
     try {
-      const response = await withRetry(() =>
-        ai.models.generateContent({
-          model: AI_MODEL,
-          contents: prompt,
-          config: {
-            systemInstruction:
-              'Tu es un expert en rédaction commerciale B2B Orange Pro Maroc. Retourne uniquement un objet JSON valide avec les champs "objet" et "corps" en français naturel et percutant.',
-            responseMimeType: 'application/json',
-            responseSchema: {
-              type: Type.OBJECT,
-              properties: {
-                objet: { type: Type.STRING, description: "Objet concis de l'email B2B" },
-                corps: { type: Type.STRING, description: "Corps complet de l'email prêt à envoyer avec la signature" },
-              },
-              required: ['objet', 'corps'],
+      const { response, usedModel } = await generateContentWithFallback(ai, (model) => ({
+        model,
+        contents: prompt,
+        config: {
+          systemInstruction:
+            'Tu es un expert en rédaction commerciale B2B Orange Pro Maroc. Retourne uniquement un objet JSON valide avec les champs "objet" et "corps" en français naturel et percutant.',
+          responseMimeType: 'application/json',
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              objet: { type: Type.STRING, description: "Objet concis de l'email B2B" },
+              corps: { type: Type.STRING, description: "Corps complet de l'email prêt à envoyer avec la signature" },
             },
-            thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+            required: ['objet', 'corps'],
           },
-        })
-      );
+          thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+        },
+      }));
 
       const text = (response.text ?? '').replace(/^```(?:json)?\s*|\s*```$/g, '').trim();
       const parsed = JSON.parse(text);
@@ -299,7 +320,7 @@ ${focusedFiche ? `\n=== FICHE CIBLÉE ===\n${focusedFiche}` : ''}`;
       res.json({
         objet: String(parsed.objet).trim(),
         corps: String(parsed.corps).trim(),
-        model: AI_MODEL,
+        model: usedModel,
       });
     } catch (err) {
       const formatted = formatAiError(err);
@@ -312,7 +333,7 @@ ${focusedFiche ? `\n=== FICHE CIBLÉE ===\n${focusedFiche}` : ''}`;
     const ai = getGeminiClient();
     if (!ai) {
       res.status(503).json({
-        error: 'Service Gemini IA non configuré sur le serveur. Vérifiez GEMINI_API_KEY dans Settings > Secrets.',
+        error: 'Service Gemini intégré non configuré. Bascule automatique vers les autres fournisseurs IA du Hub API / Coffre Cloud.',
       });
       return;
     }
@@ -344,47 +365,45 @@ ${focusedFiche ? `\n=== FICHE CIBLÉE ===\n${focusedFiche}` : ''}`;
 - Maturité fiche : ${maturite}%`;
 
     try {
-      const response = await withRetry(() =>
-        ai.models.generateContent({
-          model: AI_MODEL,
-          contents: prompt,
-          config: {
-            systemInstruction:
-              'Tu es Directeur Commercial B2B Orange Pro Maroc. Fournis une battlecard ultra-concrète, adaptée au tissu économique marocain (continuité fiscale/opérationnelle, portabilité Maroc Telecom/inwi sans coupure, Fibre Pro & Flotte Mobile).',
-            responseMimeType: 'application/json',
-            responseSchema: {
-              type: Type.OBJECT,
-              properties: {
-                priorite: { type: Type.STRING, description: 'Haute, Moyenne ou Opportuniste' },
-                resume: { type: Type.STRING, description: 'Diagnostic en 1-2 phrases courtes' },
-                pitch3Points: {
-                  type: Type.ARRAY,
-                  items: { type: Type.STRING },
-                  description: '3 arguments commerciaux concrets adaptés au secteur et à la taille',
-                },
-                objectionPrincipale: { type: Type.STRING, description: 'Objection la plus probable du décideur' },
-                reponseObjection: { type: Type.STRING, description: 'Réponse terrain courte et crédible' },
-                canalRecommande: { type: Type.STRING, description: 'Téléphone, WhatsApp Pro, Email ou Visite terrain' },
-                prochaineAction: { type: Type.STRING, description: 'Action immédiate concrète à exécuter maintenant' },
+      const { response, usedModel } = await generateContentWithFallback(ai, (model) => ({
+        model,
+        contents: prompt,
+        config: {
+          systemInstruction:
+            'Tu es Directeur Commercial B2B Orange Pro Maroc. Fournis une battlecard ultra-concrète, adaptée au tissu économique marocain (continuité fiscale/opérationnelle, portabilité Maroc Telecom/inwi sans coupure, Fibre Pro & Flotte Mobile).',
+          responseMimeType: 'application/json',
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              priorite: { type: Type.STRING, description: 'Haute, Moyenne ou Opportuniste' },
+              resume: { type: Type.STRING, description: 'Diagnostic en 1-2 phrases courtes' },
+              pitch3Points: {
+                type: Type.ARRAY,
+                items: { type: Type.STRING },
+                description: '3 arguments commerciaux concrets adaptés au secteur et à la taille',
               },
-              required: [
-                'priorite',
-                'resume',
-                'pitch3Points',
-                'objectionPrincipale',
-                'reponseObjection',
-                'canalRecommande',
-                'prochaineAction',
-              ],
+              objectionPrincipale: { type: Type.STRING, description: 'Objection la plus probable du décideur' },
+              reponseObjection: { type: Type.STRING, description: 'Réponse terrain courte et crédible' },
+              canalRecommande: { type: Type.STRING, description: 'Téléphone, WhatsApp Pro, Email ou Visite terrain' },
+              prochaineAction: { type: Type.STRING, description: 'Action immédiate concrète à exécuter maintenant' },
             },
-            thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+            required: [
+              'priorite',
+              'resume',
+              'pitch3Points',
+              'objectionPrincipale',
+              'reponseObjection',
+              'canalRecommande',
+              'prochaineAction',
+            ],
           },
-        })
-      );
+          thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+        },
+      }));
 
       const cleanText = (response.text ?? '{}').replace(/^```(?:json)?\s*|\s*```$/g, '').trim();
       const parsed = JSON.parse(cleanText);
-      res.json({ brief: parsed, model: AI_MODEL });
+      res.json({ brief: parsed, model: usedModel });
     } catch (err) {
       const formatted = formatAiError(err);
       res.status(formatted.status).json({ error: formatted.message });
@@ -431,14 +450,14 @@ Réponds UNIQUEMENT par un objet JSON valide :
 {"telephone":"","telephones":[],"email":"","emails":[],"contact":"","role":"","effectif":"","siteWeb":"","secteur":""}`;
 
     try {
-      const response = await ai.models.generateContent({
-        model: AI_MODEL,
+      const { response, usedModel } = await generateContentWithFallback(ai, (model) => ({
+        model,
         contents: prompt,
         config: {
           tools: [{ googleSearch: {} }],
           thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
         },
-      });
+      }));
 
       const rawText = (response.text ?? '').trim();
       const chunks = response.candidates?.[0]?.groundingMetadata?.groundingChunks || [];
@@ -450,7 +469,7 @@ Réponds UNIQUEMENT par un objet JSON valide :
         .filter((s: { uri: string }) => Boolean(s.uri))
         .slice(0, 5);
 
-      res.json({ text: rawText, sources, model: AI_MODEL });
+      res.json({ text: rawText, sources, model: usedModel });
     } catch (err) {
       const formatted = formatAiError(err);
       res.status(formatted.status).json({ error: formatted.message });
@@ -493,45 +512,43 @@ Extrais EXCLUSIVEMENT les informations réellement présentes dans le texte ci-d
 ${rawText}`;
 
     try {
-      const response = await withRetry(() =>
-        ai.models.generateContent({
-          model: AI_MODEL,
-          contents: prompt,
-          config: {
-            systemInstruction:
-              'Tu es un extracteur de données CRM B2B ultra-précis pour le Maroc. Tu sais lire les synthèses Google Aperçu IA, les fiches Google Maps et les profils LinkedIn. Ne fabrique aucune donnée.',
-            responseMimeType: 'application/json',
-            responseSchema: {
-              type: Type.OBJECT,
-              properties: {
-                telephones: {
-                  type: Type.ARRAY,
-                  items: { type: Type.STRING },
-                  description: 'Liste de tous les numéros marocains au format 05/06/07XXXXXXXX',
-                },
-                emails: {
-                  type: Type.ARRAY,
-                  items: { type: Type.STRING },
-                  description: 'Liste de toutes les adresses email extraites',
-                },
-                contact: { type: Type.STRING, description: 'Nom complet du décideur ou chaîne vide' },
-                role: { type: Type.STRING, description: 'Fonction du décideur ou chaîne vide' },
-                effectif: { type: Type.STRING, description: 'Nombre entier en texte ou chaîne vide' },
-                siteWeb: { type: Type.STRING, description: 'URL officielle ou chaîne vide' },
-                secteur: { type: Type.STRING, description: 'Code secteur valide ou chaîne vide' },
-                ville: { type: Type.STRING, description: 'Ville marocaine détectée ou chaîne vide' },
-                resume: { type: Type.STRING, description: 'Courte synthèse (1 phrase) des éléments trouvés' },
+      const { response, usedModel } = await generateContentWithFallback(ai, (model) => ({
+        model,
+        contents: prompt,
+        config: {
+          systemInstruction:
+            'Tu es un extracteur de données CRM B2B ultra-précis pour le Maroc. Tu sais lire les synthèses Google Aperçu IA, les fiches Google Maps et les profils LinkedIn. Ne fabrique aucune donnée.',
+          responseMimeType: 'application/json',
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              telephones: {
+                type: Type.ARRAY,
+                items: { type: Type.STRING },
+                description: 'Liste de tous les numéros marocains au format 05/06/07XXXXXXXX',
               },
-              required: ['telephones', 'emails', 'contact', 'role', 'effectif', 'siteWeb', 'secteur', 'ville', 'resume'],
+              emails: {
+                type: Type.ARRAY,
+                items: { type: Type.STRING },
+                description: 'Liste de toutes les adresses email extraites',
+              },
+              contact: { type: Type.STRING, description: 'Nom complet du décideur ou chaîne vide' },
+              role: { type: Type.STRING, description: 'Fonction du décideur ou chaîne vide' },
+              effectif: { type: Type.STRING, description: 'Nombre entier en texte ou chaîne vide' },
+              siteWeb: { type: Type.STRING, description: 'URL officielle ou chaîne vide' },
+              secteur: { type: Type.STRING, description: 'Code secteur valide ou chaîne vide' },
+              ville: { type: Type.STRING, description: 'Ville marocaine détectée ou chaîne vide' },
+              resume: { type: Type.STRING, description: 'Courte synthèse (1 phrase) des éléments trouvés' },
             },
-            thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+            required: ['telephones', 'emails', 'contact', 'role', 'effectif', 'siteWeb', 'secteur', 'ville', 'resume'],
           },
-        })
-      );
+          thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+        },
+      }));
 
       const cleanText = (response.text ?? '{}').replace(/^```(?:json)?\s*|\s*```$/g, '').trim();
       const parsed = JSON.parse(cleanText);
-      res.json({ extracted: parsed, model: AI_MODEL });
+      res.json({ extracted: parsed, model: usedModel });
     } catch (err) {
       const formatted = formatAiError(err);
       res.status(formatted.status).json({ error: formatted.message });
@@ -543,7 +560,7 @@ ${rawText}`;
     const ai = getGeminiClient();
     if (!ai) {
       res.status(503).json({
-        error: 'Service Gemini IA non configuré sur le serveur. Vérifiez GEMINI_API_KEY dans Settings > Secrets.',
+        error: 'Service Gemini intégré non configuré. Bascule automatique vers les autres fournisseurs IA du Hub API / Coffre Cloud.',
       });
       return;
     }
@@ -561,65 +578,63 @@ ${portfolioSummary}
 Produis un audit structuré, actionnable immédiatement sur le terrain (Meknès & Région / Maroc), en citant les vrais codes fiche (OP-XXXX) et noms d'entreprises présents ci-dessus.`;
 
     try {
-      const response = await withRetry(() =>
-        ai.models.generateContent({
-          model: AI_MODEL,
-          contents: prompt,
-          config: {
-            systemInstruction:
-              'Tu es Directeur des Ventes B2B Orange Pro Maroc. Analyse le portefeuille CRM et livre un diagnostic chiffré, honnête et orienté signature Fibre Pro, Fibre Dédiée & Flotte Mobile. Ne fabrique aucun compte.',
-            responseMimeType: 'application/json',
-            responseSchema: {
-              type: Type.OBJECT,
-              properties: {
-                scoreSante: {
-                  type: Type.INTEGER,
-                  description: 'Score global de santé commerciale du portefeuille de 0 à 100',
-                },
-                constatCle: {
-                  type: Type.STRING,
-                  description: 'Constat exécutif en 2 phrases courtes sur la qualité et la dynamique du pipeline',
-                },
-                alertePipeline: {
-                  type: Type.STRING,
-                  description: 'Principal point de friction ou risque détecté dans le tunnel de conversion',
-                },
-                actionsPrioritaires: {
-                  type: Type.ARRAY,
-                  items: { type: Type.STRING },
-                  description: '3 à 4 actions terrain immédiates à fort impact',
-                },
-                opportunitesCibles: {
-                  type: Type.ARRAY,
-                  items: {
-                    type: Type.OBJECT,
-                    properties: {
-                      numeroFiche: { type: Type.STRING, description: 'Code OP-XXXX de la fiche si présent' },
-                      societe: { type: Type.STRING, description: 'Nom exact de l entreprise dans le portefeuille' },
-                      raison: { type: Type.STRING, description: 'Pourquoi ce compte est prioritaire' },
-                      action: { type: Type.STRING, description: 'Prochaine action concrète recommandée' },
-                    },
-                    required: ['numeroFiche', 'societe', 'raison', 'action'],
-                  },
-                  description: 'Top 3 des comptes à prioriser maintenant',
-                },
+      const { response, usedModel } = await generateContentWithFallback(ai, (model) => ({
+        model,
+        contents: prompt,
+        config: {
+          systemInstruction:
+            'Tu es Directeur des Ventes B2B Orange Pro Maroc. Analyse le portefeuille CRM et livre un diagnostic chiffré, honnête et orienté signature Fibre Pro, Fibre Dédiée & Flotte Mobile. Ne fabrique aucun compte.',
+          responseMimeType: 'application/json',
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              scoreSante: {
+                type: Type.INTEGER,
+                description: 'Score global de santé commerciale du portefeuille de 0 à 100',
               },
-              required: [
-                'scoreSante',
-                'constatCle',
-                'alertePipeline',
-                'actionsPrioritaires',
-                'opportunitesCibles',
-              ],
+              constatCle: {
+                type: Type.STRING,
+                description: 'Constat exécutif en 2 phrases courtes sur la qualité et la dynamique du pipeline',
+              },
+              alertePipeline: {
+                type: Type.STRING,
+                description: 'Principal point de friction ou risque détecté dans le tunnel de conversion',
+              },
+              actionsPrioritaires: {
+                type: Type.ARRAY,
+                items: { type: Type.STRING },
+                description: '3 à 4 actions terrain immédiates à fort impact',
+              },
+              opportunitesCibles: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    numeroFiche: { type: Type.STRING, description: 'Code OP-XXXX de la fiche si présent' },
+                    societe: { type: Type.STRING, description: 'Nom exact de l entreprise dans le portefeuille' },
+                    raison: { type: Type.STRING, description: 'Pourquoi ce compte est prioritaire' },
+                    action: { type: Type.STRING, description: 'Prochaine action concrète recommandée' },
+                  },
+                  required: ['numeroFiche', 'societe', 'raison', 'action'],
+                },
+                description: 'Top 3 des comptes à prioriser maintenant',
+              },
             },
-            thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+            required: [
+              'scoreSante',
+              'constatCle',
+              'alertePipeline',
+              'actionsPrioritaires',
+              'opportunitesCibles',
+            ],
           },
-        })
-      );
+          thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+        },
+      }));
 
       const cleanText = (response.text ?? '{}').replace(/^```(?:json)?\s*|\s*```$/g, '').trim();
       const parsed = JSON.parse(cleanText);
-      res.json({ insights: parsed, model: AI_MODEL });
+      res.json({ insights: parsed, model: usedModel });
     } catch (err) {
       const formatted = formatAiError(err);
       res.status(formatted.status).json({ error: formatted.message });
@@ -744,6 +759,14 @@ Produis un audit structuré, actionnable immédiatement sur le terrain (Meknès 
       return;
     }
 
+    const systemInstruction = clampString(req.body?.systemInstruction, 2500);
+    const messages = systemInstruction
+      ? [
+          { role: 'system', content: systemInstruction },
+          { role: 'user', content: prompt },
+        ]
+      : [{ role: 'user', content: prompt }];
+
     try {
       const upstream = await fetch(providerConfig.url, {
         method: 'POST',
@@ -753,9 +776,9 @@ Produis un audit structuré, actionnable immédiatement sur le terrain (Meknès 
         },
         body: JSON.stringify({
           model,
-          messages: [{ role: 'user', content: prompt }],
+          messages,
           temperature: 0.4,
-          max_tokens: 700,
+          max_tokens: 1400,
         }),
         signal: AbortSignal.timeout(25000),
       });
@@ -792,6 +815,196 @@ Produis un audit structuré, actionnable immédiatement sur le terrain (Meknès 
         error: `Impossible de joindre ${providerConfig.label} depuis le serveur.`,
       });
     }
+  });
+
+  // 9. Détection automatique du distributeur d'une clé API (sans jamais logger ni renvoyer la clé)
+  // Utilise uniquement des URL officielles codées en dur (aucune URL client acceptée)
+  app.post('/api/ai/detect-provider', async (req, res) => {
+    const rawKey = clampString(req.body?.apiKey, 512);
+    if (!rawKey || rawKey.length < 8) {
+      res.status(400).json({ error: 'Clé API trop courte pour détecter le distributeur.' });
+      return;
+    }
+
+    const ALL_PROVIDERS = [
+      'groq',
+      'openrouter',
+      'gemini',
+      'tavily',
+      'openai',
+      'deepseek',
+      'mistral',
+      'anthropic',
+    ] as const;
+    type ProbeId = (typeof ALL_PROVIDERS)[number];
+
+    const rawAllowed = Array.isArray(req.body?.allowedProviders) ? req.body.allowedProviders : null;
+    const allowedSet = new Set<ProbeId>(
+      rawAllowed
+        ? (rawAllowed
+            .map((x: unknown) => clampString(x, 32).toLowerCase())
+            .filter((x: string): x is ProbeId => (ALL_PROVIDERS as readonly string[]).includes(x)) as ProbeId[])
+        : ALL_PROVIDERS
+    );
+
+    const LABELS: Record<ProbeId, string> = {
+      groq: 'Groq',
+      openrouter: 'OpenRouter',
+      gemini: 'Google Gemini',
+      tavily: 'Tavily Search',
+      openai: 'OpenAI',
+      deepseek: 'DeepSeek',
+      mistral: 'Mistral AI',
+      anthropic: 'Anthropic Claude',
+    };
+
+    const probeOne = async (provider: ProbeId): Promise<boolean> => {
+      try {
+        const timeout = AbortSignal.timeout(4500);
+        if (provider === 'groq') {
+          const r = await fetch('https://api.groq.com/openai/v1/models', {
+            headers: { Authorization: `Bearer ${rawKey}` },
+            signal: timeout,
+          });
+          return r.ok;
+        }
+        if (provider === 'openrouter') {
+          const r = await fetch('https://openrouter.ai/api/v1/auth/key', {
+            headers: { Authorization: `Bearer ${rawKey}` },
+            signal: timeout,
+          });
+          return r.ok;
+        }
+        if (provider === 'openai') {
+          const r = await fetch('https://api.openai.com/v1/models', {
+            headers: { Authorization: `Bearer ${rawKey}` },
+            signal: timeout,
+          });
+          return r.ok;
+        }
+        if (provider === 'deepseek') {
+          const r = await fetch('https://api.deepseek.com/models', {
+            headers: { Authorization: `Bearer ${rawKey}` },
+            signal: timeout,
+          });
+          return r.ok;
+        }
+        if (provider === 'mistral') {
+          const r = await fetch('https://api.mistral.ai/v1/models', {
+            headers: { Authorization: `Bearer ${rawKey}` },
+            signal: timeout,
+          });
+          return r.ok;
+        }
+        if (provider === 'gemini') {
+          const r = await fetch(
+            `https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(rawKey)}`,
+            { signal: timeout }
+          );
+          return r.ok;
+        }
+        if (provider === 'anthropic') {
+          const r = await fetch('https://api.anthropic.com/v1/models', {
+            headers: {
+              'x-api-key': rawKey,
+              'anthropic-version': '2023-06-01',
+            },
+            signal: timeout,
+          });
+          return r.ok;
+        }
+        if (provider === 'tavily') {
+          const r = await fetch('https://api.tavily.com/search', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ api_key: rawKey, query: 'test', max_results: 1 }),
+            signal: timeout,
+          });
+          return r.ok;
+        }
+      } catch {
+        return false;
+      }
+      return false;
+    };
+
+    // Déterminer les candidats probables d'après le format pour répondre très rapidement
+    let candidates: ProbeId[] = [];
+    if (/^gsk_/.test(rawKey)) candidates = ['groq'];
+    else if (/^sk-or-/i.test(rawKey)) candidates = ['openrouter'];
+    else if (/^sk-ant-/i.test(rawKey)) candidates = ['anthropic'];
+    else if (/^tvly-/i.test(rawKey)) candidates = ['tavily'];
+    else if (/^(AIza|AQ\.)/.test(rawKey)) candidates = ['gemini'];
+    else if (/^sk-(?:proj|svcacct|admin)-/.test(rawKey)) candidates = ['openai'];
+    else if (/^mis_/i.test(rawKey)) candidates = ['mistral'];
+    else if (/^sk-[a-f0-9]{24,}$/.test(rawKey)) candidates = ['deepseek', 'openai', 'openrouter'];
+    else if (/^sk-/.test(rawKey)) candidates = ['openai', 'deepseek', 'openrouter'];
+    else if (/^[A-Za-z0-9]{32}$/.test(rawKey)) candidates = ['mistral', 'groq', 'gemini', 'deepseek', 'openai'];
+    else candidates = [...ALL_PROVIDERS];
+
+    candidates = candidates.filter((p) => allowedSet.has(p));
+
+    if (candidates.length > 0) {
+      const results = await Promise.all(
+        candidates.map(async (p) => ({ p, ok: await probeOne(p) }))
+      );
+      const verifiedMatch = results.find((r) => r.ok);
+      if (verifiedMatch) {
+        res.json({
+          detectedProvider: verifiedMatch.p,
+          label: LABELS[verifiedMatch.p],
+          verified: true,
+          confidence: 'verified',
+        });
+        return;
+      }
+    }
+
+    // Repli sur la liste complète si le format était inhabituel
+    if (candidates.length < allowedSet.size) {
+      const remaining = Array.from(allowedSet).filter((p) => !candidates.includes(p));
+      const restResults = await Promise.all(
+        remaining.map(async (p) => ({ p, ok: await probeOne(p) }))
+      );
+      const verifiedRest = restResults.find((r) => r.ok);
+      if (verifiedRest) {
+        res.json({
+          detectedProvider: verifiedRest.p,
+          label: LABELS[verifiedRest.p],
+          verified: true,
+          confidence: 'verified',
+        });
+        return;
+      }
+    }
+
+    // Aucun appel distant n'a confirmé : renvoyer la meilleure estimation par motif s'il y en a une
+    const fallbackPattern = candidates[0] || null;
+    res.json({
+      detectedProvider: fallbackPattern,
+      label: fallbackPattern ? LABELS[fallbackPattern] : '',
+      verified: false,
+      confidence: fallbackPattern ? 'pattern' : 'unknown',
+    });
+  });
+
+  // Garantir que toute route /api/* inconnue ou erreur de parsing JSON renvoie du JSON (jamais du HTML)
+  app.all('/api/*', (_req, res) => {
+    res.status(404).json({ error: 'Point de terminaison API introuvable.' });
+  });
+
+  app.use((err: unknown, req: express.Request, res: express.Response, next: express.NextFunction) => {
+    if (req.path.startsWith('/api/')) {
+      const status = typeof (err as { status?: number })?.status === 'number' ? (err as { status: number }).status : 400;
+      res.status(status >= 400 && status < 600 ? status : 500).json({
+        error:
+          status === 413
+            ? 'Requête IA trop volumineuse pour le serveur.'
+            : 'Requête JSON invalide ou erreur interne du serveur IA.',
+      });
+      return;
+    }
+    next(err);
   });
 
   // Montage Vite en développement / fichiers statiques en production

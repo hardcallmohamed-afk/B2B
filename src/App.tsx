@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useRef } from 'react';
+import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import {
   Search,
   Globe,
@@ -77,6 +77,12 @@ import {
   computePortfolioVelocity,
   type VelocityLevel,
 } from './utils/analytics';
+import { fetchJsonWithRetry, parseJsonObjectFromLlmText } from './utils/aiCopilotClient';
+import {
+  detectApiKeyProviderSync,
+  probeApiKeyProviderViaServer,
+  type ApiKeyDetectionResult,
+} from './utils/apiKeyDetector';
 import { findSmartDuplicateGroups } from './utils/deduplication';
 import {
   evaluateUserAccess,
@@ -136,6 +142,7 @@ import {
   adminUpdateUserManualBadges,
   createSignedContract,
   adminUpdateSignedContract,
+  getCurrentUserIdToken,
   handleFirestoreError,
   OperationType,
   type CloudApiKeyRecord,
@@ -1635,7 +1642,7 @@ async function fetchFastest(
 // 7. HUB API MULTI-FOURNISSEURS, ROUTAGE PAR TÂCHE & ROTATION AUTO SUR QUOTA
 // ============================================================================
 
-export type ApiProvider = 'tavily' | 'openrouter' | 'groq' | 'mistral' | 'gemini';
+export type ApiProvider = 'tavily' | 'openrouter' | 'groq' | 'mistral' | 'gemini' | 'openai' | 'deepseek';
 export type ApiTask = 'search' | 'extract' | 'email';
 export type ApiTaskScope = 'all' | ApiTask;
 export type ApiKeyHealth = 'idle' | 'ok' | 'quota' | 'error';
@@ -1688,7 +1695,7 @@ export const PROVIDER_META: Record<
   groq: {
     name: 'Groq',
     defaultModel: 'llama-3.3-70b-versatile',
-    defaultScope: 'extract',
+    defaultScope: 'all',
     placeholderKey: 'gsk_...',
     modelHint: 'llama-3.3-70b-versatile',
     endpoint: 'https://api.groq.com/openai/v1/chat/completions',
@@ -1697,7 +1704,7 @@ export const PROVIDER_META: Record<
   mistral: {
     name: 'Mistral AI',
     defaultModel: 'mistral-small-latest',
-    defaultScope: 'email',
+    defaultScope: 'all',
     placeholderKey: 'Clé Mistral...',
     modelHint: 'mistral-small-latest',
     endpoint: 'https://api.mistral.ai/v1/chat/completions',
@@ -1712,12 +1719,30 @@ export const PROVIDER_META: Record<
     endpoint: 'https://generativelanguage.googleapis.com/v1beta',
     capabilities: ['search', 'extract', 'email'],
   },
+  openai: {
+    name: 'OpenAI',
+    defaultModel: 'gpt-4o-mini',
+    defaultScope: 'all',
+    placeholderKey: 'sk-proj-...',
+    modelHint: 'gpt-4o-mini',
+    endpoint: 'https://api.openai.com/v1/chat/completions',
+    capabilities: ['extract', 'email'],
+  },
+  deepseek: {
+    name: 'DeepSeek',
+    defaultModel: 'deepseek-chat',
+    defaultScope: 'all',
+    placeholderKey: 'sk-...',
+    modelHint: 'deepseek-chat',
+    endpoint: 'https://api.deepseek.com/chat/completions',
+    capabilities: ['extract', 'email'],
+  },
 };
 
 export const TASK_PROVIDER_ORDER: Record<ApiTask, ApiProvider[]> = {
   search: ['tavily', 'gemini'],
-  extract: ['groq', 'openrouter', 'mistral', 'gemini'],
-  email: ['mistral', 'openrouter', 'gemini', 'groq'],
+  extract: ['groq', 'openrouter', 'mistral', 'gemini', 'openai', 'deepseek'],
+  email: ['mistral', 'openrouter', 'gemini', 'groq', 'openai', 'deepseek'],
 };
 
 export function getOrderedKeysForTask(
@@ -1742,6 +1767,81 @@ export function getOrderedKeysForTask(
     if (rankA !== rankB) return rankA - rankB;
     return a.label.localeCompare(b.label);
   });
+}
+
+/**
+ * Retourne TOUTES les clés LLM disponibles (Groq, OpenRouter, Mistral, Gemini, OpenAI, DeepSeek),
+ * en commençant par celles configurées pour la tâche puis toutes les autres clés LLM actives
+ * quelle que soit leur portée (afin que n'importe quelle IA disponible prenne le relais).
+ */
+export function getAnyAvailableLlmKeys(
+  keys: ApiKeyEntry[],
+  preferredTask: 'extract' | 'email'
+): ApiKeyEntry[] {
+  const exact = getOrderedKeysForTask(keys, preferredTask);
+  const seen = new Set(exact.map((k) => k.id));
+  const llmProviders = TASK_PROVIDER_ORDER[preferredTask];
+
+  const remainingFresh = keys
+    .filter(
+      (k) =>
+        !seen.has(k.id) &&
+        k.enabled &&
+        k.apiKey.trim() &&
+        llmProviders.includes(k.provider) &&
+        k.status !== 'quota'
+    )
+    .sort((a, b) => a.priority - b.priority);
+
+  remainingFresh.forEach((k) => seen.add(k.id));
+
+  const remainingQuotaRetry = keys
+    .filter(
+      (k) =>
+        !seen.has(k.id) &&
+        k.enabled &&
+        k.apiKey.trim() &&
+        llmProviders.includes(k.provider)
+    )
+    .sort((a, b) => a.priority - b.priority);
+
+  return [...exact, ...remainingFresh, ...remainingQuotaRetry];
+}
+
+export function mergeHubAndCloudKeys(
+  localKeys: ApiKeyEntry[],
+  cloudKeys: CloudApiKeyRecord[]
+): ApiKeyEntry[] {
+  const validProviders = new Set<ApiProvider>([
+    'groq',
+    'openrouter',
+    'mistral',
+    'gemini',
+    'openai',
+    'deepseek',
+  ]);
+  const existingSecrets = new Set(localKeys.map((k) => k.apiKey.trim()));
+  const cloudEntries: ApiKeyEntry[] = [];
+  let idx = 0;
+  for (const c of cloudKeys) {
+    const prov = String(c.provider || '').toLowerCase() as ApiProvider;
+    const secret = String(c.key || '').trim();
+    if (!c.active || !secret || !validProviders.has(prov) || existingSecrets.has(secret)) {
+      continue;
+    }
+    cloudEntries.push({
+      id: `cloud_vault_${prov}`,
+      provider: prov,
+      label: `${c.label || PROVIDER_META[prov].name} (Coffre Cloud)`,
+      apiKey: secret,
+      model: PROVIDER_META[prov].defaultModel,
+      taskScope: 'all',
+      priority: 100 + idx++,
+      enabled: true,
+      status: 'idle',
+    });
+  }
+  return [...localKeys, ...cloudEntries];
 }
 
 function isQuotaError(status: number, errMsg: string): boolean {
@@ -1974,6 +2074,54 @@ async function callSingleLLMKey(
     return { ok: Boolean(text), text, usedModel: model, status: 200, error: text ? '' : 'Réponse vide' };
   }
 
+  if (entry.provider === 'openai') {
+    const model = entry.model.trim() || 'gpt-4o-mini';
+    const res = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${key}`,
+      },
+      signal,
+      body: JSON.stringify({
+        model,
+        temperature: 0.3,
+        messages: [{ role: 'user', content: prompt }],
+      }),
+    });
+    if (!res.ok) {
+      const errJson = await res.json().catch(() => ({}));
+      return { ok: false, text: '', usedModel: model, status: res.status, error: errJson?.error?.message || `HTTP ${res.status}` };
+    }
+    const json = await res.json();
+    const text = String(json?.choices?.[0]?.message?.content || '').trim();
+    return { ok: Boolean(text), text, usedModel: model, status: 200, error: text ? '' : 'Réponse vide' };
+  }
+
+  if (entry.provider === 'deepseek') {
+    const model = entry.model.trim() || 'deepseek-chat';
+    const res = await fetch('https://api.deepseek.com/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${key}`,
+      },
+      signal,
+      body: JSON.stringify({
+        model,
+        temperature: 0.3,
+        messages: [{ role: 'user', content: prompt }],
+      }),
+    });
+    if (!res.ok) {
+      const errJson = await res.json().catch(() => ({}));
+      return { ok: false, text: '', usedModel: model, status: res.status, error: errJson?.error?.message || errJson?.message || `HTTP ${res.status}` };
+    }
+    const json = await res.json();
+    const text = String(json?.choices?.[0]?.message?.content || '').trim();
+    return { ok: Boolean(text), text, usedModel: model, status: 200, error: text ? '' : 'Réponse vide' };
+  }
+
   return { ok: false, text: '', usedModel: entry.model, status: 400, error: 'Fournisseur non LLM' };
 }
 
@@ -2014,6 +2162,54 @@ export async function callRouterLLM(
       if (signal?.aborted) break;
       lastErr = err instanceof Error ? err.message : String(err);
       onStatus?.(entry.id, 'error', `Erreur réseau: ${lastErr.slice(0, 60)}`);
+    }
+  }
+  return { ok: false, text: '', providerLabel: '', usedModel: '', error: lastErr || 'Toutes les clés IA ont échoué.' };
+}
+
+export async function callAnyAvailableLLM(
+  keys: ApiKeyEntry[],
+  preferredTask: 'extract' | 'email',
+  prompt: string,
+  signal?: AbortSignal,
+  onStatus?: KeyStatusUpdater
+): Promise<{ ok: boolean; text: string; providerLabel: string; usedModel: string; error: string }> {
+  const ordered = getAnyAvailableLlmKeys(keys, preferredTask);
+  if (ordered.length === 0) {
+    return { ok: false, text: '', providerLabel: '', usedModel: '', error: 'Aucune clé IA disponible.' };
+  }
+
+  let lastErr = '';
+  for (const entry of ordered) {
+    if (signal?.aborted) break;
+    try {
+      const res = await callSingleLLMKey(entry, prompt, signal);
+      if (res.ok && res.text) {
+        if (!entry.id.startsWith('cloud_vault_')) {
+          onStatus?.(entry.id, 'ok', `Actif (${res.usedModel})`);
+        }
+        return {
+          ok: true,
+          text: res.text,
+          providerLabel: `${entry.label} (${PROVIDER_META[entry.provider].name})`,
+          usedModel: res.usedModel,
+          error: '',
+        };
+      }
+      lastErr = res.error;
+      if (!entry.id.startsWith('cloud_vault_')) {
+        if (isQuotaError(res.status, res.error)) {
+          onStatus?.(entry.id, 'quota', 'Quota (rotation auto)');
+        } else {
+          onStatus?.(entry.id, 'error', `Erreur: ${res.error.slice(0, 70)}`);
+        }
+      }
+    } catch (err: unknown) {
+      if (signal?.aborted) break;
+      lastErr = err instanceof Error ? err.message : String(err);
+      if (!entry.id.startsWith('cloud_vault_')) {
+        onStatus?.(entry.id, 'error', `Erreur réseau: ${lastErr.slice(0, 60)}`);
+      }
     }
   }
   return { ok: false, text: '', providerLabel: '', usedModel: '', error: lastErr || 'Toutes les clés IA ont échoué.' };
@@ -2575,11 +2771,13 @@ export default function App() {
   }, [apiKeys]);
 
   const [showApiHub, setShowApiHub] = useState(false);
-  const [newKeyProvider, setNewKeyProvider] = useState<ApiProvider>('tavily');
+  const [newKeyProvider, setNewKeyProvider] = useState<ApiProvider>('groq');
   const [newKeyLabel, setNewKeyLabel] = useState('');
   const [newKeySecret, setNewKeySecret] = useState('');
-  const [newKeyModel, setNewKeyModel] = useState(PROVIDER_META.tavily.defaultModel);
-  const [newKeyScope, setNewKeyScope] = useState<ApiTaskScope>(PROVIDER_META.tavily.defaultScope);
+  const [newKeyModel, setNewKeyModel] = useState(PROVIDER_META.groq.defaultModel);
+  const [newKeyScope, setNewKeyScope] = useState<ApiTaskScope>(PROVIDER_META.groq.defaultScope);
+  const [detectedKeyInfo, setDetectedKeyInfo] = useState<ApiKeyDetectionResult | null>(null);
+  const [detectingKeyProvider, setDetectingKeyProvider] = useState(false);
   const [testingKeyId, setTestingKeyId] = useState<string | null>(null);
   const [confirmClearHub, setConfirmClearHub] = useState(false);
 
@@ -2627,20 +2825,26 @@ export default function App() {
     model: 'gemini-4-hydrogen',
   });
 
-  useEffect(() => {
-    let active = true;
-    fetch('/api/ai/status')
-      .then((r) => (r.ok ? r.json() : null))
-      .then((data) => {
-        if (active && data && typeof data.available === 'boolean') {
-          setServerAiStatus({ available: data.available, model: data.model || 'gemini-4-hydrogen' });
+  const refreshServerAiStatus = useCallback(() => {
+    fetchJsonWithRetry<{ available?: boolean; model?: string }>(
+      '/api/ai/status',
+      { method: 'GET' },
+      { timeoutMs: 8000, maxNetworkRetries: 1, fallbackLabel: 'Statut IA indisponible' }
+    )
+      .then((res) => {
+        if (res.ok && res.data && typeof res.data.available === 'boolean') {
+          setServerAiStatus({
+            available: res.data.available,
+            model: res.data.model || 'gemini-4-hydrogen',
+          });
         }
       })
       .catch(() => {});
-    return () => {
-      active = false;
-    };
   }, []);
+
+  useEffect(() => {
+    refreshServerAiStatus();
+  }, [refreshServerAiStatus]);
 
   const [search, setSearch] = useState('');
   const [couleurFilter, setCouleurFilter] = useState<SegmentCouleur | ''>('');
@@ -4354,47 +4558,188 @@ export default function App() {
   };
 
   // Helper mise à jour statut d'une clé dans le Hub API (rotation temps réel)
-  const updateApiKeyStatus: KeyStatusUpdater = (id, status, message) => {
+  const updateApiKeyStatus: KeyStatusUpdater = useCallback((id, status, message) => {
     setApiKeys((prev) => {
       const next = prev.map((k) => (k.id === id ? { ...k, status, statusMessage: message } : k));
       apiKeysRef.current = next;
       return next;
     });
-  };
+  }, []);
 
-  // Gestion CRUD Hub API Multi-Fournisseurs
+  const handleCopilotFallbackPrompt = useCallback(
+    async (
+      prompt: string,
+      systemInstruction?: string
+    ): Promise<{ ok: boolean; text: string; sourceLabel?: string; error?: string }> => {
+      // 1. N'importe quelle IA disponible dans le Hub API ou le Coffre Cloud chargé en session prend la tâche
+      const fullPrompt = systemInstruction ? `${systemInstruction}\n\n${prompt}` : prompt;
+      const combinedPool = mergeHubAndCloudKeys(apiKeysRef.current, cloudApiKeys);
+      let lastFallbackError = '';
+
+      if (combinedPool.some((k) => k.enabled && k.provider !== 'tavily')) {
+        const rRes = await callAnyAvailableLLM(
+          combinedPool,
+          'extract',
+          fullPrompt,
+          undefined,
+          updateApiKeyStatus
+        );
+        if (rRes.ok && rRes.text.trim()) {
+          return {
+            ok: true,
+            text: rRes.text.trim(),
+            sourceLabel: `${rRes.providerLabel} (${rRes.usedModel})`,
+          };
+        }
+        if (rRes.error) lastFallbackError = rRes.error;
+      }
+
+      // 2. Essayer le coffre Cloud sécurisé côté serveur (/api/ai/groq-secure) si l'utilisateur est authentifié
+      if (cloudUser) {
+        try {
+          const idToken = await getCurrentUserIdToken();
+          if (idToken) {
+            for (const providerId of ['groq', 'mistral', 'openrouter', 'openai', 'deepseek']) {
+              const res = await fetchJsonWithRetry<{
+                reply?: string;
+                providerLabel?: string;
+                model?: string;
+                error?: string;
+              }>(
+                '/api/ai/groq-secure',
+                {
+                  method: 'POST',
+                  headers: {
+                    'Content-Type': 'application/json',
+                    Authorization: `Bearer ${idToken}`,
+                  },
+                  body: JSON.stringify({
+                    provider: providerId,
+                    prompt,
+                    systemInstruction,
+                  }),
+                },
+                { timeoutMs: 25000, maxNetworkRetries: 0, fallbackLabel: 'Proxy coffre IA indisponible' }
+              );
+              if (res.ok && res.data?.reply) {
+                return {
+                  ok: true,
+                  text: res.data.reply,
+                  sourceLabel: `Coffre Cloud · ${res.data.providerLabel || providerId} (${res.data.model || providerId})`,
+                };
+              }
+              if (res.error && !lastFallbackError) {
+                lastFallbackError = res.error;
+              }
+              if (res.isNetworkFailure || res.status === 401 || res.status === 403 || res.status === 503) {
+                break;
+              }
+            }
+          }
+        } catch {
+          // Ignore token retrieval failures and propagate caller diagnostic
+        }
+      }
+
+      return {
+        ok: false,
+        text: '',
+        error:
+          lastFallbackError ||
+          'Aucune clé IA de secours active. Ajoutez n’importe quelle clé (Groq, Mistral, OpenRouter, OpenAI, DeepSeek ou Gemini) dans le Hub API : le fournisseur est détecté automatiquement.',
+      };
+    },
+    [cloudApiKeys, cloudUser, updateApiKeyStatus]
+  );
+
+  // Gestion CRUD Hub API Multi-Fournisseurs avec détection automatique du distributeur
   const handleProviderSelectChange = (p: ApiProvider) => {
     setNewKeyProvider(p);
     setNewKeyModel(PROVIDER_META[p].defaultModel);
     setNewKeyScope(PROVIDER_META[p].defaultScope);
   };
 
-  const handleAddApiKey = (e: React.FormEvent) => {
+  const handleHubSecretChange = (rawValue: string) => {
+    setNewKeySecret(rawValue);
+    const detected = detectApiKeyProviderSync(rawValue);
+    setDetectedKeyInfo(detected);
+    if (detected && detected.provider in PROVIDER_META) {
+      const nextProvider = detected.provider as ApiProvider;
+      setNewKeyProvider(nextProvider);
+      setNewKeyModel(PROVIDER_META[nextProvider].defaultModel);
+      setNewKeyScope(PROVIDER_META[nextProvider].defaultScope);
+    }
+  };
+
+  const handleAddApiKey = async (e: React.FormEvent) => {
     e.preventDefault();
     const secret = newKeySecret.trim();
     if (!secret) {
       notify('Renseigne une clé API valide avant de l’ajouter.', 'warn');
       return;
     }
-    const existingSameProvider = apiKeys.filter((k) => k.provider === newKeyProvider).length;
-    const label = newKeyLabel.trim() || `${PROVIDER_META[newKeyProvider].name} #${existingSameProvider + 1}`;
+
+    let resolvedProvider = newKeyProvider;
+    let resolvedModel = newKeyModel.trim() || PROVIDER_META[newKeyProvider].defaultModel;
+    let resolvedScope = newKeyScope;
+    const syncDetected = detectApiKeyProviderSync(secret);
+
+    if (syncDetected && syncDetected.confidence === 'high' && syncDetected.provider in PROVIDER_META) {
+      resolvedProvider = syncDetected.provider as ApiProvider;
+      if (resolvedProvider !== newKeyProvider) {
+        resolvedModel = PROVIDER_META[resolvedProvider].defaultModel;
+        resolvedScope = PROVIDER_META[resolvedProvider].defaultScope;
+      }
+    } else if (!syncDetected || syncDetected.needsServerProbe) {
+      setDetectingKeyProvider(true);
+      try {
+        const probed = await probeApiKeyProviderViaServer(secret, [
+          'groq',
+          'openrouter',
+          'gemini',
+          'tavily',
+          'openai',
+          'deepseek',
+          'mistral',
+        ]);
+        if (probed.provider && probed.provider in PROVIDER_META) {
+          const detectedProv = probed.provider as ApiProvider;
+          if (probed.verified || !syncDetected) {
+            resolvedProvider = detectedProv;
+            if (resolvedProvider !== newKeyProvider) {
+              resolvedModel = PROVIDER_META[resolvedProvider].defaultModel;
+              resolvedScope = PROVIDER_META[resolvedProvider].defaultScope;
+            }
+          }
+        }
+      } finally {
+        setDetectingKeyProvider(false);
+      }
+    }
+
+    const existingSameProvider = apiKeys.filter((k) => k.provider === resolvedProvider).length;
+    const label = newKeyLabel.trim() || `${PROVIDER_META[resolvedProvider].name} #${existingSameProvider + 1}`;
     const maxPrio = apiKeys.reduce((acc, k) => Math.max(acc, k.priority), 0);
     const entry: ApiKeyEntry = {
       id: makeId('key'),
-      provider: newKeyProvider,
+      provider: resolvedProvider,
       label,
       apiKey: secret,
-      model: newKeyModel.trim() || PROVIDER_META[newKeyProvider].defaultModel,
-      taskScope: newKeyScope,
+      model: resolvedModel,
+      taskScope: resolvedScope,
       priority: maxPrio + 1,
       enabled: true,
       status: 'idle',
       statusMessage: 'Prête',
     };
     setApiKeys((prev) => [...prev, entry]);
+    setNewKeyProvider(resolvedProvider);
+    setNewKeyModel(PROVIDER_META[resolvedProvider].defaultModel);
+    setNewKeyScope(PROVIDER_META[resolvedProvider].defaultScope);
     setNewKeyLabel('');
     setNewKeySecret('');
-    notify(`Clé « ${label} » ajoutée au Hub API (P${entry.priority}).`);
+    setDetectedKeyInfo(null);
+    notify(`Clé « ${label} » détectée (${PROVIDER_META[resolvedProvider].name}) et ajoutée au Hub API (P${entry.priority}).`);
   };
 
   const handleMoveKeyPriority = (id: string, dir: -1 | 1) => {
@@ -5564,34 +5909,83 @@ Réponds UNIQUEMENT en JSON strict : {"telephone":"","email":"","contact":"","ro
 
   const handleAssistAiParse = async () => {
     if (!assistModalFiche || !assistPasteText.trim()) {
-      notify('Colle d’abord un texte (ex. Aperçu IA Google, LinkedIn) avant de lancer l’extraction Gemini.', 'warn');
+      notify('Colle d’abord un texte (ex. Aperçu IA Google, LinkedIn) avant de lancer l’extraction IA.', 'warn');
       return;
     }
     setAssistAiLoading(true);
     setAssistAiSummary('');
     try {
-      const res = await fetch('/api/ai/parse-paste', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          rawText: assistPasteText,
-          societe: assistModalFiche.societe,
-          ville: assistModalFiche.ville,
-          secteur: assistModalFiche.secteur,
-          allowedSecteurs: Object.keys(SECTEURS_META).join(','),
-        }),
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        notify(data?.error || 'Extraction IA indisponible — bascule sur l’extracteur local.', 'warn');
+      const localEx = extractAllFromAssistedPaste(assistPasteText, assistModalFiche.societe);
+      type AssistPasteExtracted = {
+        telephones?: string[];
+        emails?: string[];
+        contact?: string;
+        role?: string;
+        effectif?: string;
+        siteWeb?: string;
+        secteur?: string;
+        ville?: string;
+        resume?: string;
+      };
+      let ex: AssistPasteExtracted | null = null;
+      let usedSource = 'IA Multi-Fournisseurs';
+
+      if (serverAiStatus.available) {
+        const res = await fetchJsonWithRetry<{
+          extracted?: AssistPasteExtracted;
+          error?: string;
+        }>(
+          '/api/ai/parse-paste',
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              rawText: assistPasteText,
+              societe: assistModalFiche.societe,
+              ville: assistModalFiche.ville,
+              secteur: assistModalFiche.secteur,
+              allowedSecteurs: Object.keys(SECTEURS_META).join(','),
+            }),
+          },
+          { timeoutMs: 25000, maxNetworkRetries: 1, fallbackLabel: 'Erreur réseau Gemini' }
+        );
+        if (res.ok && res.data?.extracted) {
+          ex = res.data.extracted;
+          usedSource = 'Gemini Paste IA';
+        }
+      }
+
+      if (!ex) {
+        const pastePrompt = `Extrais UNIQUEMENT les données présentes dans ce texte pour "${assistModalFiche.societe}" (${assistModalFiche.ville || 'Maroc'}). Ne rien inventer.
+Secteurs valides : ${Object.keys(SECTEURS_META).join(',')}
+Réponds UNIQUEMENT en JSON strict : {"telephones":[],"emails":[],"contact":"","role":"","effectif":"","siteWeb":"","secteur":"","ville":"","resume":""}
+
+TEXTE :
+${assistPasteText.slice(0, 6000)}`;
+        const fb = await handleCopilotFallbackPrompt(
+          pastePrompt,
+          'Tu es un extracteur de données CRM B2B Maroc. Retourne uniquement du JSON valide.'
+        );
+        if (fb.ok && fb.text) {
+          const parsedObj = parseJsonObjectFromLlmText<AssistPasteExtracted>(fb.text);
+          if (parsedObj) {
+            ex = parsedObj;
+            usedSource = fb.sourceLabel || 'IA Alternative';
+          }
+        }
+      }
+
+      if (!ex) {
+        notify('Aucune IA disponible pour le moment — extraction locale appliquée.', 'warn');
         handleApplyAssistedPaste();
         return;
       }
-      const ex = data.extracted || {};
-      const localEx = extractAllFromAssistedPaste(assistPasteText, assistModalFiche.societe);
+
       const allPhones = Array.from(new Set([...(Array.isArray(ex.telephones) ? ex.telephones : []), ...localEx.phones]));
       const allEmails = Array.from(new Set([...(Array.isArray(ex.emails) ? ex.emails : []), ...localEx.emails]));
-      if (ex.resume) setAssistAiSummary(String(ex.resume));
+      setAssistAiSummary(
+        ex.resume ? `${String(ex.resume)} (${usedSource})` : `Extraction terminée via ${usedSource}.`
+      );
       applyExtractedDataToAssistFiche(
         {
           phones: allPhones,
@@ -5603,11 +5997,11 @@ Réponds UNIQUEMENT en JSON strict : {"telephone":"","email":"","contact":"","ro
           secteur: ex.secteur || '',
           ville: ex.ville || '',
         },
-        'Gemini Paste IA',
+        usedSource,
         assistPasteText
       );
     } catch {
-      notify('Erreur réseau Gemini — extraction locale appliquée.', 'warn');
+      notify('Erreur réseau IA — extraction locale appliquée.', 'warn');
       handleApplyAssistedPaste();
     } finally {
       setAssistAiLoading(false);
@@ -5619,31 +6013,69 @@ Réponds UNIQUEMENT en JSON strict : {"telephone":"","email":"","contact":"","ro
     setAssistAiLoading(true);
     setAssistAiSummary('');
     try {
-      const res = await fetch('/api/ai/enrich-web', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          societe: assistModalFiche.societe,
-          ville: assistModalFiche.ville || defaultVille,
-          secteur: SECTEURS_META[assistModalFiche.secteur].label,
-          allowedSecteurs: Object.keys(SECTEURS_META).join(','),
-        }),
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        notify(data?.error || 'Recherche IA Google indisponible.', 'warn');
-        return;
-      }
-      const rawText = String(data.text || '');
-      const jm = rawText.match(/\{[\s\S]*\}/);
-      let parsed: Record<string, unknown> = {};
-      if (jm) {
-        try {
-          parsed = JSON.parse(jm[0]);
-        } catch {
-          parsed = {};
+      let rawText = '';
+      let srcCount = 0;
+      let usedSource = 'Gemini Search';
+
+      if (serverAiStatus.available) {
+        const res = await fetchJsonWithRetry<{ text?: string; sources?: unknown[]; error?: string }>(
+          '/api/ai/enrich-web',
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              societe: assistModalFiche.societe,
+              ville: assistModalFiche.ville || defaultVille,
+              secteur: SECTEURS_META[assistModalFiche.secteur].label,
+              allowedSecteurs: Object.keys(SECTEURS_META).join(','),
+            }),
+          },
+          { timeoutMs: 25000, maxNetworkRetries: 1, fallbackLabel: 'Recherche IA Google indisponible' }
+        );
+        if (res.ok && res.data?.text) {
+          rawText = String(res.data.text);
+          srcCount = Array.isArray(res.data.sources) ? res.data.sources.length : 0;
         }
       }
+
+      if (!rawText) {
+        const poolWithCloud = mergeHubAndCloudKeys(apiKeysRef.current, cloudApiKeys);
+        const tavilyRes = await callTavilySearchPool(
+          poolWithCloud,
+          `"${assistModalFiche.societe}" "${assistModalFiche.ville || defaultVille}" Maroc telephone email directeur`,
+          undefined,
+          updateApiKeyStatus
+        );
+        if (tavilyRes.ok && tavilyRes.combinedText) {
+          srcCount = tavilyRes.urls.length;
+          usedSource = `Tavily (${tavilyRes.usedLabel})`;
+          const fb = await handleCopilotFallbackPrompt(
+            `Extrais uniquement les infos réelles de "${assistModalFiche.societe}" (${assistModalFiche.ville || 'Maroc'}) depuis ces résultats web en JSON strict {"telephone":"","telephones":[],"email":"","emails":[],"contact":"","role":"","effectif":"","siteWeb":"","secteur":""} :\n${tavilyRes.combinedText.slice(0, 4500)}`,
+            'Retourne uniquement du JSON valide.'
+          );
+          rawText = fb.ok && fb.text ? fb.text : tavilyRes.combinedText;
+          if (fb.ok && fb.sourceLabel) usedSource = `Tavily + ${fb.sourceLabel}`;
+        } else {
+          const geminiPool = await callGeminiGroundingPool(
+            poolWithCloud,
+            `Recherche les coordonnées réelles de l'entreprise marocaine "${assistModalFiche.societe}" (${assistModalFiche.ville || 'Maroc'}) et réponds uniquement en JSON {"telephone":"","telephones":[],"email":"","emails":[],"contact":"","role":"","effectif":"","siteWeb":"","secteur":""}`,
+            undefined,
+            updateApiKeyStatus
+          );
+          if (geminiPool.ok && geminiPool.rawText) {
+            rawText = geminiPool.rawText;
+            srcCount = geminiPool.chunkUrls.length;
+            usedSource = `Gemini (${geminiPool.usedLabel})`;
+          }
+        }
+      }
+
+      if (!rawText) {
+        notify('Recherche web IA indisponible sur Gemini ou Tavily pour cette requête.', 'warn');
+        return;
+      }
+
+      const parsed = parseJsonObjectFromLlmText<Record<string, unknown>>(rawText) || {};
       const localFromText = extractAllFromAssistedPaste(rawText, assistModalFiche.societe);
       const phones = [
         ...(typeof parsed.telephone === 'string' ? [parsed.telephone] : []),
@@ -5655,11 +6087,10 @@ Réponds UNIQUEMENT en JSON strict : {"telephone":"","email":"","contact":"","ro
         ...(Array.isArray(parsed.emails) ? parsed.emails.map(String) : []),
         ...localFromText.emails,
       ];
-      const srcCount = Array.isArray(data.sources) ? data.sources.length : 0;
       setAssistAiSummary(
         srcCount > 0
-          ? `Recherche Google Search Grounding terminée (${srcCount} source(s) web analysée(s)).`
-          : 'Recherche Google IA terminée.'
+          ? `Recherche web terminée via ${usedSource} (${srcCount} source(s)).`
+          : `Recherche IA terminée via ${usedSource}.`
       );
       applyExtractedDataToAssistFiche(
         {
@@ -5671,11 +6102,11 @@ Réponds UNIQUEMENT en JSON strict : {"telephone":"","email":"","contact":"","ro
           siteWeb: typeof parsed.siteWeb === 'string' ? parsed.siteWeb : localFromText.siteWeb,
           secteur: typeof parsed.secteur === 'string' ? parsed.secteur : '',
         },
-        'Google IA Grounding',
+        usedSource,
         rawText
       );
     } catch {
-      notify('Impossible de contacter la recherche Google IA.', 'err');
+      notify('Erreur réseau lors de la recherche web IA.', 'warn');
     } finally {
       setAssistAiLoading(false);
     }
@@ -6327,10 +6758,11 @@ Réponds UNIQUEMENT en JSON strict : {"telephone":"","email":"","contact":"","ro
 
   const handleGenerateEmailWithAI = async () => {
     if (!emailModalFiche) return;
-    const emailKeys = getOrderedKeysForTask(apiKeysRef.current, 'email');
-    if (emailKeys.length === 0 && !serverAiStatus.available) {
+    const pool = mergeHubAndCloudKeys(apiKeysRef.current, cloudApiKeys);
+    const anyEmailCandidates = getAnyAvailableLlmKeys(pool, 'email');
+    if (anyEmailCandidates.length === 0 && !serverAiStatus.available && !cloudUser) {
       regenerateLocalEmail(emailModalFiche, emailCycle, emailTon, emailSignature, activeSkill);
-      notify('Modèle du skill appliqué localement. Ajoute une clé dans le Hub API ou configure GEMINI_API_KEY pour la rédaction IA.', 'warn');
+      notify('Modèle du skill appliqué localement. Ajoutez n’importe quelle clé IA dans le Hub API pour la rédaction IA.', 'warn');
       return;
     }
     setIsGeneratingEmail(true);
@@ -6363,12 +6795,11 @@ ${emailCustomPrompt.trim() ? `Consigne ponctuelle : ${emailCustomPrompt.trim()}`
 
 Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
 
-      if (emailKeys.length > 0) {
-        const rRes = await callRouterLLM(apiKeysRef.current, 'email', prompt, undefined, updateApiKeyStatus);
+      if (anyEmailCandidates.length > 0) {
+        const rRes = await callAnyAvailableLLM(pool, 'email', prompt, undefined, updateApiKeyStatus);
         if (rRes.ok && rRes.text) {
-          const jm = rRes.text.match(/\{[\s\S]*\}/);
-          if (jm) {
-            const parsed = JSON.parse(jm[0]);
+          const parsed = parseJsonObjectFromLlmText<{ objet?: string; corps?: string }>(rRes.text);
+          if (parsed?.objet || parsed?.corps) {
             if (parsed.objet) setEmailObjet(String(parsed.objet));
             if (parsed.corps) setEmailCorps(String(parsed.corps));
             setEmailProviderUsed(`${rRes.providerLabel} · ${rRes.usedModel}`);
@@ -6379,24 +6810,45 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
       }
 
       if (serverAiStatus.available) {
-        const res = await fetch('/api/ai/generate-email', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ prompt }),
-        });
-        const data = await res.json();
-        if (res.ok && data?.objet && data?.corps) {
-          setEmailObjet(String(data.objet));
-          setEmailCorps(String(data.corps));
-          setEmailProviderUsed(`Gemini IA intégré · ${data.model || serverAiStatus.model}`);
-          notify(`Email rédigé par Gemini IA intégré (${data.model || serverAiStatus.model}).`);
+        const res = await fetchJsonWithRetry<{
+          objet?: string;
+          corps?: string;
+          model?: string;
+          error?: string;
+        }>(
+          '/api/ai/generate-email',
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ prompt }),
+          },
+          { timeoutMs: 28000, maxNetworkRetries: 1, fallbackLabel: 'Erreur réseau lors de la génération email' }
+        );
+        if (res.ok && res.data?.objet && res.data?.corps) {
+          setEmailObjet(String(res.data.objet));
+          setEmailCorps(String(res.data.corps));
+          setEmailProviderUsed(`Gemini IA intégré · ${res.data.model || serverAiStatus.model}`);
+          notify(`Email rédigé par Gemini IA intégré (${res.data.model || serverAiStatus.model}).`);
           return;
         }
-        notify(data?.error || 'Réponse IA indisponible — modèle du skill conservé.', 'warn');
-        return;
       }
 
-      notify('Réponse IA indisponible — modèle du skill conservé.', 'warn');
+      const fallbackRes = await handleCopilotFallbackPrompt(
+        prompt,
+        'Tu es un expert en rédaction commerciale B2B Orange Pro Maroc. Retourne uniquement du JSON {"objet":"...","corps":"..."}.'
+      );
+      if (fallbackRes.ok && fallbackRes.text) {
+        const parsed = parseJsonObjectFromLlmText<{ objet?: string; corps?: string }>(fallbackRes.text);
+        if (parsed?.objet || parsed?.corps) {
+          if (parsed.objet) setEmailObjet(String(parsed.objet));
+          if (parsed.corps) setEmailCorps(String(parsed.corps));
+          setEmailProviderUsed(fallbackRes.sourceLabel || 'IA Alternative');
+          notify(`Email rédigé par ${fallbackRes.sourceLabel || 'IA disponible'}.`);
+          return;
+        }
+      }
+
+      notify('Réponse IA indisponible pour le moment — modèle du skill conservé.', 'warn');
     } catch {
       notify('Erreur réseau IA — modèle du skill conservé.', 'err');
     } finally {
@@ -6802,14 +7254,14 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
                 </div>
               </div>
 
-              {/* Formulaire d'ajout multi-clés */}
+              {/* Formulaire d'ajout multi-clés avec détection automatique du distributeur */}
               <form
-                onSubmit={handleAddApiKey}
+                onSubmit={(e) => void handleAddApiKey(e)}
                 className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-12 gap-2 bg-white p-3 rounded-xl border border-stone-200 text-xs"
               >
                 <div className="lg:col-span-2">
                   <label htmlFor="hub-provider" className="block font-semibold text-stone-600 mb-1">
-                    Fournisseur
+                    Fournisseur (auto)
                   </label>
                   <select
                     id="hub-provider"
@@ -6817,11 +7269,13 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
                     onChange={(e) => handleProviderSelectChange(e.target.value as ApiProvider)}
                     className="w-full px-2.5 py-2 rounded-lg border border-stone-300 bg-stone-50 text-stone-900"
                   >
-                    <option value="tavily">Tavily (Search Web)</option>
-                    <option value="openrouter">OpenRouter (Free / Custom)</option>
                     <option value="groq">Groq (Llama 3.3 / Fast)</option>
                     <option value="mistral">Mistral AI (FR B2B)</option>
+                    <option value="openrouter">OpenRouter (Free / Custom)</option>
                     <option value="gemini">Google Gemini (Grounding + IA)</option>
+                    <option value="openai">OpenAI (GPT-4o mini)</option>
+                    <option value="deepseek">DeepSeek (Chat)</option>
+                    <option value="tavily">Tavily (Search Web)</option>
                   </select>
                 </div>
 
@@ -6841,16 +7295,24 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
 
                 <div className="lg:col-span-3">
                   <label htmlFor="hub-secret" className="block font-semibold text-stone-600 mb-1">
-                    Clé API *
+                    Clé API * (détection auto)
                   </label>
                   <input
                     id="hub-secret"
                     type="password"
                     value={newKeySecret}
-                    onChange={(e) => setNewKeySecret(e.target.value)}
-                    placeholder={PROVIDER_META[newKeyProvider].placeholderKey}
+                    onChange={(e) => handleHubSecretChange(e.target.value)}
+                    placeholder="Collez n'importe quelle clé (gsk_, sk-or-, AIza, sk-...)"
                     className="w-full px-2.5 py-2 rounded-lg border border-stone-300 bg-white font-mono"
                   />
+                  {detectedKeyInfo && (
+                    <p
+                      data-testid="hub-key-detected"
+                      className="mt-1 text-[11px] font-medium text-emerald-700 truncate"
+                    >
+                      Distributeur détecté : {detectedKeyInfo.label} · {detectedKeyInfo.reason}
+                    </p>
+                  )}
                 </div>
 
                 <div className="lg:col-span-2">
@@ -6889,7 +7351,7 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
                     onChange={(e) => setNewKeyScope(e.target.value as ApiTaskScope)}
                     className="w-full px-2.5 py-2 rounded-lg border border-stone-300 bg-stone-50"
                   >
-                    <option value="all">Toutes tâches</option>
+                    <option value="all">Toutes tâches (recommandé)</option>
                     <option value="search">Recherche Web</option>
                     <option value="extract">Extraction / Audit</option>
                     <option value="email">Rédaction Email</option>
@@ -6899,10 +7361,11 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
                 <div className="lg:col-span-1 flex items-end">
                   <button
                     type="submit"
-                    className="w-full py-2 px-3 rounded-lg bg-orange-600 hover:bg-orange-700 text-white font-semibold flex items-center justify-center gap-1 whitespace-nowrap"
+                    disabled={detectingKeyProvider}
+                    className="w-full py-2 px-3 rounded-lg bg-orange-600 hover:bg-orange-700 disabled:opacity-60 text-white font-semibold flex items-center justify-center gap-1 whitespace-nowrap"
                   >
                     <Plus className="w-3.5 h-3.5" />
-                    Ajouter
+                    {detectingKeyProvider ? 'Détection...' : 'Ajouter'}
                   </button>
                 </div>
               </form>
@@ -6910,7 +7373,7 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
               {/* Liste des clés configurées avec priorité P1/P2, Active/Off, Tester, Supprimer */}
               {sortedApiKeys.length === 0 ? (
                 <div className="p-4 rounded-xl border border-dashed border-stone-300 bg-white text-xs text-stone-500 text-center">
-                  Aucune clé configurée. Ajoute une ou plusieurs clés (ex. Tavily #1, Tavily #2, OpenRouter #1, Groq, Mistral, Gemini) pour activer l’enrichissement multi-sources IA et la rotation automatique sur quota.
+                  Aucune clé configurée. Collez n’importe quelle clé (Groq, Mistral, OpenRouter, OpenAI, DeepSeek, Gemini ou Tavily) : son distributeur est détecté automatiquement et prend le relais sur toute tâche disponible.
                 </div>
               ) : (
                 <div className="divide-y divide-stone-200 bg-white rounded-xl border border-stone-200 overflow-hidden">
@@ -9042,7 +9505,7 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
                 <p className="text-xs font-bold text-stone-700">
                   1. Lancer une recherche (Google Aperçu IA, LinkedIn, Annuaires) ou recherche IA directe :
                 </p>
-                {serverAiStatus.available && (
+                {(serverAiStatus.available || activeApiCount > 0 || cloudApiKeys.length > 0) && (
                   <button
                     type="button"
                     disabled={assistAiLoading}
@@ -9050,7 +9513,7 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
                     className="px-2.5 py-1 rounded-lg bg-stone-900 hover:bg-stone-800 disabled:opacity-50 text-orange-300 text-[11px] font-semibold flex items-center gap-1"
                   >
                     <Sparkles className={`w-3 h-3 ${assistAiLoading ? 'animate-spin' : ''}`} />
-                    {assistAiLoading ? 'Recherche IA...' : 'Recherche Google IA directe'}
+                    {assistAiLoading ? 'Recherche IA...' : 'Recherche Web IA directe'}
                   </button>
                 )}
               </div>
@@ -9199,7 +9662,7 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
                   <ArrowRight className="w-3.5 h-3.5" />
                   <span className="text-[11px] opacity-75">({incompleteFilteredFiches.length})</span>
                 </button>
-                {serverAiStatus.available && (
+                {(serverAiStatus.available || activeApiCount > 0 || cloudApiKeys.length > 0 || Boolean(cloudUser)) && (
                   <button
                     type="button"
                     disabled={assistAiLoading || !assistPasteText.trim()}
@@ -9207,7 +9670,7 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
                     className="px-3 py-2 rounded-lg border border-stone-300 bg-white hover:bg-stone-100 disabled:opacity-50 text-stone-900 text-xs font-semibold flex items-center gap-1.5"
                   >
                     <Sparkles className={`w-3.5 h-3.5 text-orange-600 ${assistAiLoading ? 'animate-spin' : ''}`} />
-                    Extraction IA (Gemini)
+                    Extraction IA (Multi-IA)
                   </button>
                 )}
                 <button
@@ -9855,7 +10318,7 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
         onConfirm={handleConfirmSignContract}
       />
 
-      {/* Copilote Commercial IA Orange Pro (Gemini intégré côté serveur) */}
+      {/* Copilote Commercial IA Orange Pro (Gemini intégré + bascule automatique multi-IA) */}
       <AiCopilotDrawer
         open={showAiCopilot}
         onClose={() => setShowAiCopilot(false)}
@@ -9864,9 +10327,16 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
         onClearFocusedFiche={() => setCopilotFiche(null)}
         aiAvailable={serverAiStatus.available}
         aiModel={serverAiStatus.model}
+        hasConfiguredFallbackKeys={activeApiCount > 0 || cloudApiKeys.length > 0}
+        onOpenApiHub={() => {
+          setShowAiCopilot(false);
+          setShowApiHub(true);
+        }}
         onOpenEmailStudio={openEmailStudio}
         onMoveFiche={handleMoveFicheKanban}
         onSelectFicheForBrief={(f) => setCopilotFiche(f)}
+        onFallbackLlmPrompt={handleCopilotFallbackPrompt}
+        onRefreshAiStatus={refreshServerAiStatus}
       />
     </div>
   );

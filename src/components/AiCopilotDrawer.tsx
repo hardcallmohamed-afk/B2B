@@ -19,34 +19,22 @@ import {
   type StatutCRM,
 } from '../App';
 import { buildPortfolioAiSummary } from '../utils/analytics';
+import {
+  buildFallbackBriefPrompt,
+  buildFallbackChatPrompt,
+  buildFallbackInsightsPrompt,
+  fetchJsonWithRetry,
+  normalizeCommercialBrief,
+  normalizePortfolioInsights,
+  parseJsonObjectFromLlmText,
+  type CommercialBrief,
+  type PortfolioInsights,
+} from '../utils/aiCopilotClient';
 
 interface ChatMessage {
   id: string;
   role: 'user' | 'assistant';
   content: string;
-}
-
-interface CommercialBrief {
-  priorite: string;
-  resume: string;
-  pitch3Points: string[];
-  objectionPrincipale: string;
-  reponseObjection: string;
-  canalRecommande: string;
-  prochaineAction: string;
-}
-
-interface PortfolioInsights {
-  scoreSante: number;
-  constatCle: string;
-  alertePipeline: string;
-  actionsPrioritaires: string[];
-  opportunitesCibles: Array<{
-    numeroFiche: string;
-    societe: string;
-    raison: string;
-    action: string;
-  }>;
 }
 
 interface AiCopilotDrawerProps {
@@ -57,9 +45,16 @@ interface AiCopilotDrawerProps {
   onClearFocusedFiche: () => void;
   aiAvailable: boolean;
   aiModel: string;
+  hasConfiguredFallbackKeys?: boolean;
+  onOpenApiHub?: () => void;
   onOpenEmailStudio: (fiche: FicheEntreprise) => void;
   onMoveFiche: (ficheId: string, statut: StatutCRM) => void;
   onSelectFicheForBrief?: (fiche: FicheEntreprise) => void;
+  onFallbackLlmPrompt?: (
+    prompt: string,
+    systemInstruction?: string
+  ) => Promise<{ ok: boolean; text: string; sourceLabel?: string; error?: string }>;
+  onRefreshAiStatus?: () => void;
 }
 
 const QUICK_PROMPTS = [
@@ -93,9 +88,13 @@ export const AiCopilotDrawer: React.FC<AiCopilotDrawerProps> = ({
   onClearFocusedFiche,
   aiAvailable,
   aiModel,
+  hasConfiguredFallbackKeys = false,
+  onOpenApiHub,
   onOpenEmailStudio,
   onMoveFiche,
   onSelectFicheForBrief,
+  onFallbackLlmPrompt,
+  onRefreshAiStatus,
 }) => {
   const [mode, setMode] = useState<'chat' | 'brief' | 'diagnostic'>('chat');
   const [messages, setMessages] = useState<ChatMessage[]>([
@@ -109,6 +108,8 @@ export const AiCopilotDrawer: React.FC<AiCopilotDrawerProps> = ({
   const [input, setInput] = useState('');
   const [isSending, setIsSending] = useState(false);
   const [chatError, setChatError] = useState('');
+  const [lastFailedChatText, setLastFailedChatText] = useState('');
+  const [activeProviderHint, setActiveProviderHint] = useState('');
 
   const [brief, setBrief] = useState<CommercialBrief | null>(null);
   const [briefLoading, setBriefLoading] = useState(false);
@@ -120,6 +121,12 @@ export const AiCopilotDrawer: React.FC<AiCopilotDrawerProps> = ({
   const [insightsError, setInsightsError] = useState('');
 
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (open) {
+      onRefreshAiStatus?.();
+    }
+  }, [open, onRefreshAiStatus]);
 
   useEffect(() => {
     if (open && focusedFiche) {
@@ -141,30 +148,77 @@ export const AiCopilotDrawer: React.FC<AiCopilotDrawerProps> = ({
     setBriefLoading(true);
     try {
       const reco = getOrangeProRecommendation(fiche);
-      const res = await fetch('/api/ai/next-action', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          societe: fiche.societe,
-          secteur: SECTEURS_META[fiche.secteur].label,
-          ville: fiche.ville,
-          effectif: fiche.effectif,
-          statut: fiche.statut,
-          contact: fiche.contact,
-          role: fiche.role,
-          tier: reco.tier,
-          offre: reco.offre,
-          maturite: computeMaturityScore(fiche),
-        }),
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        setBriefError(data?.error || 'Impossible de générer le Brief IA.');
+      const briefPayload = {
+        societe: fiche.societe,
+        secteur: SECTEURS_META[fiche.secteur].label,
+        ville: fiche.ville,
+        effectif: fiche.effectif,
+        statut: fiche.statut,
+        contact: fiche.contact,
+        role: fiche.role,
+        tier: reco.tier,
+        offre: reco.offre,
+        maturite: computeMaturityScore(fiche),
+      };
+
+      let fallbackErr = '';
+      if (!aiAvailable && onFallbackLlmPrompt) {
+        const fb = await onFallbackLlmPrompt(
+          buildFallbackBriefPrompt(briefPayload),
+          'Tu es Directeur Commercial B2B Orange Pro Maroc. Retourne uniquement un objet JSON valide.'
+        );
+        if (fb.ok && fb.text) {
+          const parsedBrief = normalizeCommercialBrief(parseJsonObjectFromLlmText(fb.text));
+          if (parsedBrief) {
+            setBrief(parsedBrief);
+            setActiveProviderHint(fb.sourceLabel || 'IA disponible');
+            return;
+          }
+        }
+        fallbackErr = fb.error || '';
+      }
+
+      const res = await fetchJsonWithRetry<{
+        brief?: CommercialBrief;
+        model?: string;
+        error?: string;
+      }>(
+        '/api/ai/next-action',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(briefPayload),
+        },
+        {
+          timeoutMs: 28000,
+          maxNetworkRetries: 1,
+          fallbackLabel: 'Erreur réseau lors de l’appel au service Gemini IA',
+        }
+      );
+
+      if (res.ok && res.data?.brief) {
+        setBrief(res.data.brief);
+        setActiveProviderHint(res.data.model ? `Gemini · ${res.data.model}` : '');
         return;
       }
-      setBrief(data.brief || null);
-    } catch {
-      setBriefError('Erreur réseau lors de l’appel au service Gemini IA.');
+
+      if (res.shouldFallback && onFallbackLlmPrompt) {
+        const fb = await onFallbackLlmPrompt(
+          buildFallbackBriefPrompt(briefPayload),
+          'Tu es Directeur Commercial B2B Orange Pro Maroc. Retourne uniquement un objet JSON valide.'
+        );
+        if (fb.ok && fb.text) {
+          const parsedBrief = normalizeCommercialBrief(parseJsonObjectFromLlmText(fb.text));
+          if (parsedBrief) {
+            setBrief(parsedBrief);
+            setActiveProviderHint(fb.sourceLabel || 'Fournisseur IA alternatif');
+            return;
+          }
+        }
+        if (fb.error) fallbackErr = fb.error;
+      }
+
+      setBriefError(fallbackErr || res.error || 'Impossible de générer le Brief IA.');
     } finally {
       setBriefLoading(false);
     }
@@ -175,37 +229,91 @@ export const AiCopilotDrawer: React.FC<AiCopilotDrawerProps> = ({
     setInsightsLoading(true);
     try {
       const portfolioSummary = buildPortfolioAiSummary(fiches);
-      const res = await fetch('/api/ai/portfolio-insights', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ portfolioSummary }),
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        setInsightsError(data?.error || 'Impossible de générer le Diagnostic IA.');
+      let fallbackErr = '';
+
+      if (!aiAvailable && onFallbackLlmPrompt) {
+        const fb = await onFallbackLlmPrompt(
+          buildFallbackInsightsPrompt(portfolioSummary),
+          'Tu es Directeur des Ventes B2B Orange Pro Maroc. Retourne uniquement un objet JSON valide.'
+        );
+        if (fb.ok && fb.text) {
+          const parsedInsights = normalizePortfolioInsights(parseJsonObjectFromLlmText(fb.text));
+          if (parsedInsights) {
+            setInsights(parsedInsights);
+            setActiveProviderHint(fb.sourceLabel || 'IA disponible');
+            return;
+          }
+        }
+        fallbackErr = fb.error || '';
+      }
+
+      const res = await fetchJsonWithRetry<{
+        insights?: PortfolioInsights;
+        model?: string;
+        error?: string;
+      }>(
+        '/api/ai/portfolio-insights',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ portfolioSummary }),
+        },
+        {
+          timeoutMs: 28000,
+          maxNetworkRetries: 1,
+          fallbackLabel: 'Erreur réseau lors du diagnostic du portefeuille',
+        }
+      );
+
+      if (res.ok && res.data?.insights) {
+        setInsights(res.data.insights);
+        setActiveProviderHint(res.data.model ? `Gemini · ${res.data.model}` : '');
         return;
       }
-      setInsights(data.insights || null);
-    } catch {
-      setInsightsError('Erreur réseau lors du diagnostic du portefeuille.');
+
+      if (res.shouldFallback && onFallbackLlmPrompt) {
+        const fb = await onFallbackLlmPrompt(
+          buildFallbackInsightsPrompt(portfolioSummary),
+          'Tu es Directeur des Ventes B2B Orange Pro Maroc. Retourne uniquement un objet JSON valide.'
+        );
+        if (fb.ok && fb.text) {
+          const parsedInsights = normalizePortfolioInsights(parseJsonObjectFromLlmText(fb.text));
+          if (parsedInsights) {
+            setInsights(parsedInsights);
+            setActiveProviderHint(fb.sourceLabel || 'Fournisseur IA alternatif');
+            return;
+          }
+        }
+        if (fb.error) fallbackErr = fb.error;
+      }
+
+      setInsightsError(fallbackErr || res.error || 'Impossible de générer le Diagnostic IA.');
     } finally {
       setInsightsLoading(false);
     }
   };
 
-  const handleSendChat = async (customText?: string) => {
+  const handleSendChat = async (customText?: string, isRetry = false) => {
     const text = (customText ?? input).trim();
     if (!text || isSending) return;
     setChatError('');
+    setLastFailedChatText('');
 
-    const userMsg: ChatMessage = {
-      id: `u_${Date.now()}`,
-      role: 'user',
-      content: text,
-    };
-    const nextHistory = [...messages, userMsg];
-    setMessages(nextHistory);
-    if (!customText) setInput('');
+    const nextHistory: ChatMessage[] = isRetry
+      ? messages
+      : [
+          ...messages,
+          {
+            id: `u_${Date.now()}`,
+            role: 'user',
+            content: text,
+          },
+        ];
+
+    if (!isRetry) {
+      setMessages(nextHistory);
+      if (!customText) setInput('');
+    }
     setIsSending(true);
 
     try {
@@ -214,32 +322,88 @@ export const AiCopilotDrawer: React.FC<AiCopilotDrawerProps> = ({
         ? `[${focusedFiche.numeroFiche || 'N/A'}] ${focusedFiche.societe} (${SECTEURS_META[focusedFiche.secteur].label}, ${focusedFiche.ville}, statut: ${focusedFiche.statut}, contact: ${focusedFiche.contact || 'absent'}, effectif: ${focusedFiche.effectif || 'N/A'})`
         : '';
 
-      const res = await fetch('/api/ai/chat', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          messages: nextHistory
-            .filter((m) => m.id !== 'welcome')
-            .map((m) => ({ role: m.role, content: m.content })),
-          portfolioSummary,
-          focusedFiche: focusedSummary,
-        }),
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        setChatError(data?.error || 'Le service IA a renvoyé une erreur.');
+      const chatHistoryPayload = nextHistory
+        .filter((m) => m.id !== 'welcome')
+        .map((m) => ({ role: m.role, content: m.content }));
+
+      let fallbackErr = '';
+      if (!aiAvailable && onFallbackLlmPrompt) {
+        const fb = await onFallbackLlmPrompt(
+          buildFallbackChatPrompt(chatHistoryPayload, portfolioSummary, focusedSummary),
+          'Tu es le Copilote Commercial B2B Orange Pro Maroc.'
+        );
+        if (fb.ok && fb.text.trim()) {
+          setActiveProviderHint(fb.sourceLabel || 'IA disponible');
+          setMessages((prev) => [
+            ...prev,
+            {
+              id: `a_${Date.now()}`,
+              role: 'assistant',
+              content: fb.text.trim(),
+            },
+          ]);
+          return;
+        }
+        fallbackErr = fb.error || '';
+      }
+
+      const res = await fetchJsonWithRetry<{
+        reply?: string;
+        model?: string;
+        error?: string;
+      }>(
+        '/api/ai/chat',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            messages: chatHistoryPayload,
+            portfolioSummary,
+            focusedFiche: focusedSummary,
+          }),
+        },
+        {
+          timeoutMs: 28000,
+          maxNetworkRetries: 1,
+          fallbackLabel: 'Impossible de joindre le serveur IA local',
+        }
+      );
+
+      if (res.ok && res.data?.reply) {
+        setActiveProviderHint(res.data.model ? `Gemini · ${res.data.model}` : '');
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: `a_${Date.now()}`,
+            role: 'assistant',
+            content: String(res.data?.reply || '').trim(),
+          },
+        ]);
         return;
       }
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: `a_${Date.now()}`,
-          role: 'assistant',
-          content: String(data.reply || '').trim(),
-        },
-      ]);
-    } catch {
-      setChatError('Impossible de joindre le serveur IA local.');
+
+      if (res.shouldFallback && onFallbackLlmPrompt) {
+        const fb = await onFallbackLlmPrompt(
+          buildFallbackChatPrompt(chatHistoryPayload, portfolioSummary, focusedSummary),
+          'Tu es le Copilote Commercial B2B Orange Pro Maroc.'
+        );
+        if (fb.ok && fb.text.trim()) {
+          setActiveProviderHint(fb.sourceLabel || 'Fournisseur IA alternatif');
+          setMessages((prev) => [
+            ...prev,
+            {
+              id: `a_${Date.now()}`,
+              role: 'assistant',
+              content: fb.text.trim(),
+            },
+          ]);
+          return;
+        }
+        if (fb.error) fallbackErr = fb.error;
+      }
+
+      setLastFailedChatText(text);
+      setChatError(fallbackErr || res.error || 'Le service IA a renvoyé une erreur.');
     } finally {
       setIsSending(false);
     }
@@ -267,9 +431,13 @@ export const AiCopilotDrawer: React.FC<AiCopilotDrawerProps> = ({
                 Copilote Commercial IA
               </h2>
               <p className="text-[11px] text-stone-500 truncate">
-                {aiAvailable
-                  ? `Intégration Gemini active (${aiModel})`
-                  : 'Clé serveur GEMINI_API_KEY requise dans Settings > Secrets'}
+                {activeProviderHint
+                  ? `Connecté · ${activeProviderHint}`
+                  : hasConfiguredFallbackKeys
+                    ? `Multi-IA prêt (Hub API / Coffre${aiAvailable ? ` · ${aiModel}` : ''})`
+                    : aiAvailable
+                      ? `Gemini (${aiModel}) · bascule auto multi-IA active`
+                      : 'Ajoutez n’importe quelle clé IA dans le Hub API'}
               </p>
             </div>
           </div>
@@ -376,10 +544,33 @@ export const AiCopilotDrawer: React.FC<AiCopilotDrawerProps> = ({
               {chatError && (
                 <div
                   role="alert"
-                  className="rounded-lg bg-red-50 border border-red-200 p-3 text-xs text-red-800 flex items-start gap-2"
+                  className="rounded-lg bg-red-50 border border-red-200 p-3 text-xs text-red-800 space-y-2"
                 >
-                  <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5 text-red-600" />
-                  <span>{chatError}</span>
+                  <div className="flex items-start gap-2 min-w-0">
+                    <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5 text-red-600" />
+                    <span>{chatError}</span>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2 pl-6">
+                    {onOpenApiHub && (
+                      <button
+                        type="button"
+                        onClick={onOpenApiHub}
+                        className="px-2.5 py-1 rounded-md bg-stone-900 text-white hover:bg-stone-800 text-[11px] font-semibold"
+                      >
+                        Ajouter une clé dans le Hub API
+                      </button>
+                    )}
+                    {lastFailedChatText && (
+                      <button
+                        type="button"
+                        disabled={isSending}
+                        onClick={() => void handleSendChat(lastFailedChatText, true)}
+                        className="px-2.5 py-1 rounded-md bg-white border border-red-300 text-red-800 hover:bg-red-100 text-[11px] font-semibold"
+                      >
+                        Réessayer
+                      </button>
+                    )}
+                  </div>
                 </div>
               )}
               <div ref={messagesEndRef} />
@@ -448,10 +639,31 @@ export const AiCopilotDrawer: React.FC<AiCopilotDrawerProps> = ({
             {insightsError && (
               <div
                 role="alert"
-                className="rounded-lg bg-red-50 border border-red-200 p-3 text-xs text-red-800 flex items-start gap-2"
+                className="rounded-lg bg-red-50 border border-red-200 p-3 text-xs text-red-800 space-y-2"
               >
-                <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5 text-red-600" />
-                <span>{insightsError}</span>
+                <div className="flex items-start gap-2 min-w-0">
+                  <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5 text-red-600" />
+                  <span>{insightsError}</span>
+                </div>
+                <div className="flex flex-wrap items-center gap-2 pl-6">
+                  {onOpenApiHub && (
+                    <button
+                      type="button"
+                      onClick={onOpenApiHub}
+                      className="px-2.5 py-1 rounded-md bg-stone-900 text-white hover:bg-stone-800 text-[11px] font-semibold"
+                    >
+                      Ajouter une clé dans le Hub API
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    disabled={insightsLoading || fiches.length === 0}
+                    onClick={() => void loadPortfolioInsights()}
+                    className="px-2.5 py-1 rounded-md bg-white border border-red-300 text-red-800 hover:bg-red-100 text-[11px] font-semibold"
+                  >
+                    Réessayer
+                  </button>
+                </div>
               </div>
             )}
 
@@ -685,10 +897,31 @@ export const AiCopilotDrawer: React.FC<AiCopilotDrawerProps> = ({
                 {briefError && (
                   <div
                     role="alert"
-                    className="rounded-lg bg-red-50 border border-red-200 p-3 text-xs text-red-800 flex items-start gap-2"
+                    className="rounded-lg bg-red-50 border border-red-200 p-3 text-xs text-red-800 space-y-2"
                   >
-                    <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5 text-red-600" />
-                    <span>{briefError}</span>
+                    <div className="flex items-start gap-2 min-w-0">
+                      <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5 text-red-600" />
+                      <span>{briefError}</span>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2 pl-6">
+                      {onOpenApiHub && (
+                        <button
+                          type="button"
+                          onClick={onOpenApiHub}
+                          className="px-2.5 py-1 rounded-md bg-stone-900 text-white hover:bg-stone-800 text-[11px] font-semibold"
+                        >
+                          Ajouter une clé dans le Hub API
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        disabled={briefLoading}
+                        onClick={() => void loadBriefForFiche(focusedFiche)}
+                        className="px-2.5 py-1 rounded-md bg-white border border-red-300 text-red-800 hover:bg-red-100 text-[11px] font-semibold"
+                      >
+                        Réessayer
+                      </button>
+                    </div>
                   </div>
                 )}
 

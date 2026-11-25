@@ -68,6 +68,11 @@ import {
 } from '../utils/attendance';
 import { BadgeArtwork } from './BadgeArtwork';
 import { RoleBadge } from './RoleBadge';
+import {
+  detectApiKeyProviderSync,
+  probeApiKeyProviderViaServer,
+  type ApiKeyDetectionResult,
+} from '../utils/apiKeyDetector';
 
 const CLOUD_API_PROVIDERS = [
   { id: 'groq', label: 'Groq (Llama / Mixtral)' },
@@ -178,6 +183,7 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
   // Coffre Cloud /api_keys/{provider} (Super-Admin uniquement)
   const [apiProvider, setApiProvider] = useState<string>('groq');
   const [apiKeyInput, setApiKeyInput] = useState('');
+  const [vaultDetectedInfo, setVaultDetectedInfo] = useState<ApiKeyDetectionResult | null>(null);
   const [showApiKeyInput, setShowApiKeyInput] = useState(false);
   const [apiKeyBusy, setApiKeyBusy] = useState(false);
   const [revealedProviders, setRevealedProviders] = useState<Record<string, boolean>>({});
@@ -597,6 +603,15 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
     }
   };
 
+  const handleVaultKeyInputChange = (rawValue: string) => {
+    setApiKeyInput(rawValue);
+    const detected = detectApiKeyProviderSync(rawValue);
+    setVaultDetectedInfo(detected);
+    if (detected && CLOUD_API_PROVIDERS.some((p) => p.id === detected.provider)) {
+      setApiProvider(detected.provider);
+    }
+  };
+
   const handleSaveCloudApiKey = async (e: React.FormEvent) => {
     e.preventDefault();
     const trimmedKey = apiKeyInput.trim();
@@ -604,17 +619,49 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
       onNotify('Saisissez une clé API valide (au moins 8 caractères).', 'warn');
       return;
     }
-    const providerMeta = CLOUD_API_PROVIDERS.find((p) => p.id === apiProvider);
+
     setApiKeyBusy(true);
     try {
+      let resolvedProvider = apiProvider;
+      const syncDetected = detectApiKeyProviderSync(trimmedKey);
+      if (
+        syncDetected &&
+        syncDetected.confidence === 'high' &&
+        CLOUD_API_PROVIDERS.some((p) => p.id === syncDetected.provider)
+      ) {
+        resolvedProvider = syncDetected.provider;
+      } else if (!syncDetected || syncDetected.needsServerProbe) {
+        const probed = await probeApiKeyProviderViaServer(trimmedKey, [
+          'groq',
+          'mistral',
+          'gemini',
+          'openrouter',
+          'openai',
+          'anthropic',
+          'deepseek',
+        ]);
+        if (
+          probed.provider &&
+          CLOUD_API_PROVIDERS.some((p) => p.id === probed.provider) &&
+          (probed.verified || !syncDetected)
+        ) {
+          resolvedProvider = probed.provider;
+        }
+      }
+
+      const providerMeta = CLOUD_API_PROVIDERS.find((p) => p.id === resolvedProvider);
       await adminUpsertApiKey(adminUid, {
-        provider: apiProvider,
-        label: providerMeta?.label || apiProvider.toUpperCase(),
+        provider: resolvedProvider,
+        label: providerMeta?.label || resolvedProvider.toUpperCase(),
         key: trimmedKey,
         active: true,
       });
+      setApiProvider(resolvedProvider);
       setApiKeyInput('');
-      onNotify(`Clé API "${providerMeta?.label || apiProvider}" sauvegardée dans Firestore (/api_keys/${apiProvider}).`);
+      setVaultDetectedInfo(null);
+      onNotify(
+        `Clé "${providerMeta?.label || resolvedProvider}" détectée et sauvegardée dans Firestore (/api_keys/${resolvedProvider}).`
+      );
     } catch {
       onNotify('Échec de sauvegarde de la clé API dans /api_keys (accès Super-Admin requis).', 'err');
     } finally {
@@ -1728,10 +1775,10 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
 }`}</pre>
         )}
 
-        <form onSubmit={handleSaveCloudApiKey} className="grid grid-cols-1 sm:grid-cols-12 gap-2.5 items-end">
+        <form onSubmit={handleSaveCloudApiKey} className="grid grid-cols-1 sm:grid-cols-12 gap-2.5 items-start">
           <div className="sm:col-span-3 space-y-1">
             <label htmlFor="vault-provider" className="block text-[11px] font-semibold text-stone-700">
-              Fournisseur IA
+              Fournisseur IA (auto)
             </label>
             <select
               id="vault-provider"
@@ -1749,15 +1796,15 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
 
           <div className="sm:col-span-6 space-y-1">
             <label htmlFor="vault-apikey" className="block text-[11px] font-semibold text-stone-700">
-              Clé API secrète (nouvelle ou mise à jour)
+              Clé API secrète (détection automatique du distributeur)
             </label>
             <div className="relative">
               <input
                 id="vault-apikey"
                 type={showApiKeyInput ? 'text' : 'password'}
                 value={apiKeyInput}
-                onChange={(e) => setApiKeyInput(e.target.value)}
-                placeholder="Ex. gsk_... ou AIza..."
+                onChange={(e) => handleVaultKeyInputChange(e.target.value)}
+                placeholder="Collez n'importe quelle clé (gsk_, sk-or-, AIza, sk-proj-, sk-...)"
                 className="w-full pl-3 pr-9 py-2 rounded-lg border border-stone-300 font-mono text-xs focus:outline-none focus:border-orange-600"
               />
               <button
@@ -1769,16 +1816,24 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
                 {showApiKeyInput ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
               </button>
             </div>
+            {vaultDetectedInfo && (
+              <p
+                data-testid="vault-key-detected"
+                className="text-[11px] font-medium text-emerald-700 truncate"
+              >
+                Distributeur détecté : {vaultDetectedInfo.label} · {vaultDetectedInfo.reason}
+              </p>
+            )}
           </div>
 
-          <div className="sm:col-span-3">
+          <div className="sm:col-span-3 sm:pt-5">
             <button
               type="submit"
               disabled={apiKeyBusy || apiKeyInput.trim().length < 8}
               className="w-full py-2 px-3 rounded-lg bg-stone-900 hover:bg-stone-800 disabled:opacity-50 text-white text-xs font-semibold flex items-center justify-center gap-1.5"
             >
               <Lock className="w-3.5 h-3.5" />
-              {apiKeyBusy ? 'Enregistrement...' : 'Sauvegarder en Cloud'}
+              {apiKeyBusy ? 'Détection & Enreg...' : 'Sauvegarder en Cloud'}
             </button>
           </div>
         </form>
