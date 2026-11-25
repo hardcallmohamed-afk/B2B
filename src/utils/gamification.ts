@@ -160,7 +160,7 @@ export interface TeamStatRecord {
   uid: string;
   orgScope: 'orange_pro_team';
   displayName: string;
-  role: 'super_admin' | 'manager' | 'commercial';
+  role: TeamRole;
   zone: string;
   active: boolean;
   totalProspects: number;
@@ -196,7 +196,15 @@ export interface ManualBadgeDefinition {
   category?: 'distinction' | 'role';
 }
 
-export type TeamRole = 'super_admin' | 'manager' | 'commercial';
+export type TeamRole = 'super_admin' | 'manager' | 'team_lead' | 'grand_compte' | 'commercial';
+
+export const TEAM_ROLE_ORDER: TeamRole[] = [
+  'super_admin',
+  'manager',
+  'team_lead',
+  'grand_compte',
+  'commercial',
+];
 
 export const ROLE_BADGE_META: Record<
   TeamRole,
@@ -216,9 +224,21 @@ export const ROLE_BADGE_META: Record<
   },
   manager: {
     label: 'Superviseur / Manager',
-    shortLabel: 'MANAGER',
+    shortLabel: 'SUPERVISEUR',
     description: 'Pilotage commercial & suivi d’équipe Orange Pro',
     className: 'bg-violet-100 text-violet-900 border border-violet-300',
+  },
+  team_lead: {
+    label: 'Chef d’Équipe',
+    shortLabel: 'CHEF ÉQUIPE',
+    description: 'Animation d’escouade terrain & accompagnement commercial',
+    className: 'bg-indigo-100 text-indigo-900 border border-indigo-300',
+  },
+  grand_compte: {
+    label: 'Expert Grand Compte',
+    shortLabel: 'GRAND COMPTE',
+    description: 'Négociation Fibre Dédiée, flottes corporate & dossiers grands comptes',
+    className: 'bg-amber-100 text-amber-900 border border-amber-300',
   },
   commercial: {
     label: 'Commercial B2B',
@@ -846,7 +866,7 @@ export interface LeaderboardRow {
   rank: number;
   uid: string;
   displayName: string;
-  role: 'super_admin' | 'manager' | 'commercial';
+  role: TeamRole;
   zone: string;
   active: boolean;
   contractsCount: number;

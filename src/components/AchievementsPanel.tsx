@@ -26,6 +26,8 @@ import {
   ADMIN_DISTINCTION_BADGES,
   RARITY_META,
   RARITY_ORDER,
+  ROLE_BADGE_META,
+  TEAM_ROLE_ORDER,
   evaluateAchievements,
   type BadgeRarity,
   type CollaboratorMetrics,
@@ -90,10 +92,19 @@ export const AchievementsPanel: React.FC<AchievementsPanelProps> = ({
   const [selectedUid, setSelectedUid] = useState<string>(
     initialSelectedUid || currentUserUid
   );
+  const [roleFilter, setRoleFilter] = useState<'all' | TeamRole>('all');
   const [hideUnlocked, setHideUnlocked] = useState(false);
   const [hideLocked, setHideLocked] = useState(false);
   const [sortMode, setSortMode] = useState<SortMode>('progress_desc');
   const [busyBadgeId, setBusyBadgeId] = useState<string | null>(null);
+
+  const roleFilteredMembers = useMemo(
+    () =>
+      teamStats.filter(
+        (s) => s.uid !== currentUserUid && (roleFilter === 'all' || s.role === roleFilter)
+      ),
+    [teamStats, currentUserUid, roleFilter]
+  );
 
   const effectiveUid = isSuperAdmin ? selectedUid || currentUserUid : currentUserUid;
   const selectedStat = useMemo(
@@ -341,21 +352,35 @@ export const AchievementsPanel: React.FC<AchievementsPanelProps> = ({
                 des distinctions officielles Orange Pro.
               </p>
             </div>
-            <select
-              aria-label="Collaborateur cible pour attribution de badges"
-              value={effectiveUid}
-              onChange={(e) => setSelectedUid(e.target.value)}
-              className="rounded-xl border border-violet-300 bg-white px-3 py-2 text-xs font-bold text-stone-900 focus:border-violet-500 focus:outline-none"
-            >
-              <option value={currentUserUid}>Moi-même ({currentUserName})</option>
-              {teamStats
-                .filter((s) => s.uid !== currentUserUid)
-                .map((s) => (
-                  <option key={s.uid} value={s.uid}>
-                    {s.displayName} ({s.zone || 'Meknès'})
+            <div className="flex flex-wrap items-center gap-2">
+              <select
+                aria-label="Filtrer collaborateurs par rôle"
+                data-testid="badges-role-filter"
+                value={roleFilter}
+                onChange={(e) => setRoleFilter(e.target.value as 'all' | TeamRole)}
+                className="rounded-xl border border-stone-300 bg-white px-3 py-2 text-xs font-semibold text-stone-800 focus:border-violet-500 focus:outline-none"
+              >
+                <option value="all">Tous les rôles</option>
+                {TEAM_ROLE_ORDER.map((r) => (
+                  <option key={r} value={r}>
+                    {ROLE_BADGE_META[r].label}
                   </option>
                 ))}
-            </select>
+              </select>
+              <select
+                aria-label="Collaborateur cible pour attribution de badges"
+                value={effectiveUid}
+                onChange={(e) => setSelectedUid(e.target.value)}
+                className="rounded-xl border border-violet-300 bg-white px-3 py-2 text-xs font-bold text-stone-900 focus:border-violet-500 focus:outline-none"
+              >
+                <option value={currentUserUid}>Moi-même ({currentUserName})</option>
+                {roleFilteredMembers.map((s) => (
+                  <option key={s.uid} value={s.uid}>
+                    {s.displayName} · {ROLE_BADGE_META[s.role]?.shortLabel || s.role} ({s.zone || 'Meknès'})
+                  </option>
+                ))}
+              </select>
+            </div>
           </div>
 
           <div className="mt-4 space-y-4">

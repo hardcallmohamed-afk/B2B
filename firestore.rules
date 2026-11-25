@@ -55,11 +55,11 @@ service cloud.firestore {
     }
 
     function isValidManagedRole(val) {
-      return val is string && val in ['commercial', 'manager'];
+      return val is string && val in ['commercial', 'grand_compte', 'team_lead', 'manager'];
     }
 
     function isValidTeamRole(val) {
-      return val is string && val in ['super_admin', 'manager', 'commercial'];
+      return val is string && val in ['super_admin', 'manager', 'team_lead', 'grand_compte', 'commercial'];
     }
 
     function isValidOrangeTier(val) {

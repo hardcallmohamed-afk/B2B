@@ -126,7 +126,15 @@ export interface SanitizedEmailSkillDoc {
   isBuiltin?: boolean;
 }
 
-export const VALID_MANAGED_ROLES = new Set(['commercial', 'manager'] as const);
+export const VALID_MANAGED_ROLES = new Set([
+  'commercial',
+  'grand_compte',
+  'team_lead',
+  'manager',
+] as const);
+
+export type SanitizedManagedRole = 'commercial' | 'grand_compte' | 'team_lead' | 'manager';
+export type SanitizedTeamRole = 'super_admin' | SanitizedManagedRole;
 
 export interface AppUserLike {
   uid: string;
@@ -142,7 +150,7 @@ export interface SanitizedAppUserDoc {
   uid: string;
   email: string;
   displayName: string;
-  role: 'commercial' | 'manager';
+  role: SanitizedManagedRole;
   zone: string;
   active: boolean;
   createdBy: string;
@@ -318,8 +326,8 @@ export function sanitizeAppUserPayload(input: AppUserLike): SanitizedAppUserDoc 
   const email = rawEmail.length >= 3 ? rawEmail : 'user@orangepro.ma';
   const rawName = clampString((input.displayName || '').trim(), 120);
   const displayName = rawName.length >= 1 ? rawName : email.split('@')[0] || 'Utilisateur';
-  const role: 'commercial' | 'manager' = VALID_MANAGED_ROLES.has(input.role as never)
-    ? (input.role as 'commercial' | 'manager')
+  const role: SanitizedManagedRole = VALID_MANAGED_ROLES.has(input.role as never)
+    ? (input.role as SanitizedManagedRole)
     : 'commercial';
 
   return {
@@ -333,7 +341,13 @@ export function sanitizeAppUserPayload(input: AppUserLike): SanitizedAppUserDoc 
   };
 }
 
-export const VALID_TEAM_ROLES = new Set(['super_admin', 'manager', 'commercial'] as const);
+export const VALID_TEAM_ROLES = new Set([
+  'super_admin',
+  'manager',
+  'team_lead',
+  'grand_compte',
+  'commercial',
+] as const);
 export const VALID_ORANGE_TIERS = new Set(['Grand Compte', 'PME', 'TPE / Libéral'] as const);
 export const VALID_PAYOUT_STATUSES = new Set(['En attente', 'Validé', 'Versé'] as const);
 
@@ -358,7 +372,7 @@ export interface SanitizedTeamStatDoc {
   uid: string;
   orgScope: 'orange_pro_team';
   displayName: string;
-  role: 'super_admin' | 'manager' | 'commercial';
+  role: SanitizedTeamRole;
   zone: string;
   active: boolean;
   totalProspects: number;
@@ -376,8 +390,8 @@ export function sanitizeTeamStatPayload(input: TeamStatLike): SanitizedTeamStatD
   const cleanUid = sanitizeDocId(input.uid, 'usr');
   const rawName = clampString((input.displayName || '').trim(), 120);
   const displayName = rawName.length >= 1 ? rawName : 'Collaborateur';
-  const role: 'super_admin' | 'manager' | 'commercial' = VALID_TEAM_ROLES.has(input.role as never)
-    ? (input.role as 'super_admin' | 'manager' | 'commercial')
+  const role: SanitizedTeamRole = VALID_TEAM_ROLES.has(input.role as never)
+    ? (input.role as SanitizedTeamRole)
     : 'commercial';
 
   const clampInt = (n: unknown, maxVal: number) =>
@@ -577,3 +591,86 @@ export function computeCollectionSyncDiff<T extends { id: string; statut?: strin
 
   return { toCreate, toUpdate, toDelete };
 }
+
+export interface FriendlyCloudError {
+  code: 'permission-denied' | 'offline' | 'unavailable' | 'unauthenticated' | 'not-found' | 'failed-precondition' | 'unknown';
+  shortTag: string;
+  userMessage: string;
+  retryable: boolean;
+}
+
+export function parseFriendlyCloudError(err: unknown): FriendlyCloudError {
+  const rawBase = err instanceof Error ? err.message : String(err || '');
+  let innerError = rawBase;
+  let path = '';
+  try {
+    const parsed = JSON.parse(rawBase) as { error?: string; path?: string };
+    if (parsed && typeof parsed.error === 'string') {
+      innerError = parsed.error;
+      if (typeof parsed.path === 'string') path = parsed.path;
+    }
+  } catch {
+    // Not JSON
+  }
+
+  const lower = `${innerError} ${rawBase}`.toLowerCase();
+
+  if (lower.includes('permission-denied') || lower.includes('missing or insufficient permissions')) {
+    return {
+      code: 'permission-denied',
+      shortTag: ' (permission-denied)',
+      userMessage:
+        'Accès refusé par Cloud Firestore. Vérifiez que votre email est bien vérifié et cliquez sur « Réessayer la synchro » pour rafraîchir votre jeton de sécurité.',
+      retryable: true,
+    };
+  }
+  if (lower.includes('client is offline') || lower.includes('network') || lower.includes('failed to get document')) {
+    return {
+      code: 'offline',
+      shortTag: ' (hors-ligne)',
+      userMessage:
+        'Connexion Cloud Firestore interrompue ou bloquée par le réseau. Vérifiez votre accès internet puis cliquez sur « Réessayer la synchro ».',
+      retryable: true,
+    };
+  }
+  if (lower.includes('unavailable') || lower.includes('deadline-exceeded') || lower.includes('aborted')) {
+    return {
+      code: 'unavailable',
+      shortTag: ' (réseau indisponible)',
+      userMessage:
+        'Service Cloud Firestore momentanément indisponible. Nouvelle tentative possible immédiatement.',
+      retryable: true,
+    };
+  }
+  if (lower.includes('unauthenticated')) {
+    return {
+      code: 'unauthenticated',
+      shortTag: ' (session expirée)',
+      userMessage: 'Votre session Firebase a expiré. Rafraîchissez la session ou reconnectez-vous.',
+      retryable: true,
+    };
+  }
+  if (lower.includes('failed-precondition')) {
+    return {
+      code: 'failed-precondition',
+      shortTag: ' (précondition)',
+      userMessage: `Condition Firestore non satisfaite${path ? ` sur ${path}` : ''}. Cliquez sur « Réessayer la synchro ».`,
+      retryable: false,
+    };
+  }
+  if (lower.includes('not-found')) {
+    return {
+      code: 'not-found',
+      shortTag: ' (introuvable)',
+      userMessage: `Document Cloud introuvable${path ? ` (${path})` : ''}.`,
+      retryable: false,
+    };
+  }
+  return {
+    code: 'unknown',
+    shortTag: '',
+    userMessage: 'Erreur temporaire de synchronisation Cloud Firestore.',
+    retryable: true,
+  };
+}
+

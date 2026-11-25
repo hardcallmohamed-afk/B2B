@@ -3,7 +3,51 @@
 export const SUPER_ADMIN_EMAIL = 'hardcallmohamed@gmail.com';
 export const FIREBASE_PROJECT_ID = 'gen-lang-client-0884936685';
 
-export type ManagedUserRole = 'commercial' | 'manager';
+export type ManagedUserRole = 'commercial' | 'grand_compte' | 'team_lead' | 'manager';
+
+export const MANAGED_ROLE_OPTIONS: ReadonlyArray<{
+  value: ManagedUserRole;
+  label: string;
+  shortLabel: string;
+  description: string;
+}> = [
+  {
+    value: 'commercial',
+    label: 'Commercial B2B',
+    shortLabel: 'Commercial',
+    description: 'Prospection terrain, qualification & signatures TPE/PME',
+  },
+  {
+    value: 'grand_compte',
+    label: 'Expert Grand Compte',
+    shortLabel: 'Grand Compte',
+    description: 'Fibre Dédiée, flottes corporate & dossiers grands comptes',
+  },
+  {
+    value: 'team_lead',
+    label: 'Chef d’Équipe',
+    shortLabel: 'Chef d’Équipe',
+    description: 'Animation d’escouade terrain & accompagnement commercial',
+  },
+  {
+    value: 'manager',
+    label: 'Superviseur / Manager',
+    shortLabel: 'Superviseur',
+    description: 'Pilotage commercial, suivi territorial & performance équipe',
+  },
+];
+
+export function normalizeManagedRole(raw: unknown): ManagedUserRole {
+  if (raw === 'manager' || raw === 'team_lead' || raw === 'grand_compte' || raw === 'commercial') {
+    return raw;
+  }
+  return 'commercial';
+}
+
+export function getManagedRoleLabel(role: ManagedUserRole): string {
+  const found = MANAGED_ROLE_OPTIONS.find((opt) => opt.value === role);
+  return found ? found.label : 'Commercial B2B';
+}
 
 export interface ManagedAppUser {
   uid: string;
@@ -82,7 +126,7 @@ export function evaluateUserAccess(params: {
   return {
     status: 'allowed',
     isAdmin: false,
-    roleLabel: params.appUserProfile.role === 'manager' ? 'Superviseur' : 'Commercial B2B',
+    roleLabel: getManagedRoleLabel(params.appUserProfile.role),
     profile: params.appUserProfile,
   };
 }

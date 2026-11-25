@@ -16,6 +16,7 @@ import {
 } from 'firebase/auth';
 import {
   getFirestore,
+  initializeFirestore,
   doc,
   collection,
   query,
@@ -29,6 +30,7 @@ import {
   writeBatch,
   serverTimestamp,
   type DocumentData,
+  type Firestore,
 } from 'firebase/firestore';
 import firebaseConfig from '../firebase-applet-config.json';
 import {
@@ -51,12 +53,28 @@ import {
   type SanitizedSignedContractDoc,
   type SyncDiff,
 } from './utils/firestoreSanitize';
-import type { ManagedAppUser, ManagedUserRole } from './utils/authAccess';
+import { normalizeManagedRole, type ManagedAppUser, type ManagedUserRole } from './utils/authAccess';
+import type { TeamRole } from './utils/gamification';
 
-const app = initializeApp(firebaseConfig);
+const app = getApps().find((a) => a.name === '[DEFAULT]') || initializeApp(firebaseConfig);
 
 // CRITICAL: Pass the provisioned named firestoreDatabaseId from firebase-applet-config.json
-export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
+// Enable auto-detect long polling so mobile Chrome / GitHub Pages / restrictive proxies never hang on WebChannel.
+function createResilientFirestore(): Firestore {
+  try {
+    return initializeFirestore(
+      app,
+      {
+        experimentalAutoDetectLongPolling: true,
+      },
+      firebaseConfig.firestoreDatabaseId
+    );
+  } catch {
+    return getFirestore(app, firebaseConfig.firestoreDatabaseId);
+  }
+}
+
+export const db = createResilientFirestore();
 export const auth = getAuth(app);
 export const googleProvider = new GoogleAuthProvider();
 googleProvider.setCustomParameters({ prompt: 'select_account' });
@@ -208,7 +226,7 @@ export async function fetchAppUserProfile(uid: string): Promise<ManagedAppUser |
       uid: snap.id,
       email: typeof d.email === 'string' ? d.email : '',
       displayName: typeof d.displayName === 'string' ? d.displayName : '',
-      role: d.role === 'manager' ? 'manager' : 'commercial',
+      role: normalizeManagedRole(d.role),
       zone: typeof d.zone === 'string' ? d.zone : '',
       active: Boolean(d.active),
       createdBy: typeof d.createdBy === 'string' ? d.createdBy : '',
@@ -307,6 +325,7 @@ export async function adminCreateManagedUser(params: {
   password: string;
   role: ManagedUserRole;
   zone: string;
+  initialManualBadges?: string[];
 }): Promise<ManagedAppUser> {
   const secondaryAuth = getSecondaryProvisioningAuth();
   const cleanEmail = params.email.trim().toLowerCase();
@@ -355,7 +374,16 @@ export async function adminCreateManagedUser(params: {
     handleFirestoreError(error, OperationType.CREATE, targetPath);
   }
 
-  // Seed initial /team_stats/{uid} record so the collaborator immediately appears in Team Leaderboard & Badges.
+  const initialBadges = Array.from(
+    new Set(
+      (params.initialManualBadges || [])
+        .filter((b) => typeof b === 'string' && b.trim().length > 0)
+        .map((b) => b.trim().slice(0, 64))
+    )
+  ).slice(0, 20);
+
+  // Seed initial /team_stats/{uid} record so the collaborator immediately appears in Team Leaderboard & Badges
+  // with an empty portfolio (0 prospects, 0 contracts, 0 payout).
   try {
     const initialStat = sanitizeTeamStatPayload({
       uid: sanitized.uid,
@@ -368,8 +396,8 @@ export async function adminCreateManagedUser(params: {
       totalContracts: 0,
       totalPayoutMad: 0,
       xp: 0,
-      unlockedCount: 0,
-      manualBadges: [],
+      unlockedCount: initialBadges.length,
+      manualBadges: initialBadges,
       monthlyHistory: [],
     });
     await setDoc(doc(db, 'team_stats', sanitized.uid), {
@@ -399,7 +427,7 @@ export async function adminUpdateManagedUser(
   const targetPath = `app_users/${uid}`;
   const cleanName = updates.displayName.trim().slice(0, 120) || 'Utilisateur';
   const cleanZone = updates.zone.trim().slice(0, 100);
-  const cleanRole: ManagedUserRole = updates.role === 'manager' ? 'manager' : 'commercial';
+  const cleanRole: ManagedUserRole = normalizeManagedRole(updates.role);
   try {
     await updateDoc(doc(db, 'app_users', uid), {
       displayName: cleanName,
@@ -513,7 +541,7 @@ export async function adminUpdateUserManualBadges(
   manualBadges: string[],
   fallbackProfile?: {
     displayName: string;
-    role: 'super_admin' | 'manager' | 'commercial';
+    role: TeamRole;
     zone: string;
     active: boolean;
   }
@@ -649,7 +677,8 @@ export async function ensureUserWorkspace(
     handleFirestoreError(error, OperationType.CREATE, userPath);
   }
 
-  // Step 2: Migrate existing local fiches & skills to Firestore in chunked batches.
+  // Step 2: Seed initial skills (and any provided fiches — always [] for new accounts)
+  // resiliently so a pre-existing skill or single-doc collision NEVER aborts workspace creation.
   const ops: Array<{ type: 'fiche' | 'skill'; id: string; data: DocumentData }> = [];
   const seenFicheIds = new Set<string>();
   for (const fiche of localFiches) {
@@ -680,8 +709,19 @@ export async function ensureUserWorkspace(
     }
     try {
       await batch.commit();
-    } catch (error) {
-      handleFirestoreError(error, OperationType.WRITE, `users/${uid}`);
+    } catch {
+      // Resilient fallback: upsert each doc individually without crashing workspace bootstrap
+      for (const op of chunk) {
+        try {
+          if (op.type === 'skill') {
+            await upsertSkillResilient(uid, op.data as SanitizedEmailSkillDoc);
+          } else {
+            await upsertFicheResilient(uid, op.data as SanitizedFicheDoc, false);
+          }
+        } catch {
+          // Non-fatal during initial seed; outgoing sync will reconcile if needed
+        }
+      }
     }
   }
 
@@ -703,6 +743,19 @@ export async function syncWorkspaceToFirestore(
       updatedAt: serverTimestamp(),
     });
   } catch (error) {
+    const msg = error instanceof Error ? error.message.toLowerCase() : '';
+    if (msg.includes('not-found') || msg.includes('no document to update')) {
+      try {
+        await setDoc(userRef, {
+          ...sanitized,
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        });
+        return;
+      } catch (createErr) {
+        handleFirestoreError(createErr, OperationType.CREATE, userPath);
+      }
+    }
     handleFirestoreError(error, OperationType.UPDATE, userPath);
   }
 }
@@ -945,11 +998,28 @@ export async function fetchInitialUserCollectionDocs(uid: string): Promise<{
   fichesSnap: Awaited<ReturnType<typeof getDocs>>;
   skillsSnap: Awaited<ReturnType<typeof getDocs>>;
 }> {
-  const [userSnap, fichesSnap, skillsSnap] = await Promise.all([
-    getDoc(doc(db, 'users', uid)),
-    getDocs(query(collection(db, 'users', uid, 'fiches'), where('ownerId', '==', uid))),
-    getDocs(query(collection(db, 'users', uid, 'skills'), where('ownerId', '==', uid))),
-  ]);
+  const userPath = `users/${uid}`;
+  let userSnap: Awaited<ReturnType<typeof getDoc>>;
+  try {
+    userSnap = await getDoc(doc(db, 'users', uid));
+  } catch (error) {
+    handleFirestoreError(error, OperationType.GET, userPath);
+  }
+
+  let fichesSnap: Awaited<ReturnType<typeof getDocs>>;
+  try {
+    fichesSnap = await getDocs(query(collection(db, 'users', uid, 'fiches'), where('ownerId', '==', uid)));
+  } catch (error) {
+    handleFirestoreError(error, OperationType.LIST, `users/${uid}/fiches`);
+  }
+
+  let skillsSnap: Awaited<ReturnType<typeof getDocs>>;
+  try {
+    skillsSnap = await getDocs(query(collection(db, 'users', uid, 'skills'), where('ownerId', '==', uid)));
+  } catch (error) {
+    handleFirestoreError(error, OperationType.LIST, `users/${uid}/skills`);
+  }
+
   return { userSnap, fichesSnap, skillsSnap };
 }
 

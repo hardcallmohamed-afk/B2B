@@ -1,5 +1,5 @@
 import React from 'react';
-import { Briefcase, ShieldCheck, UserCog } from 'lucide-react';
+import { Briefcase, Crown, ShieldCheck, UserCog, Users } from 'lucide-react';
 import { ROLE_BADGE_META, type TeamRole } from '../utils/gamification';
 
 interface RoleBadgeProps {
@@ -21,7 +21,11 @@ export const RoleBadge: React.FC<RoleBadgeProps> = ({
       ? ShieldCheck
       : role === 'manager'
         ? UserCog
-        : Briefcase;
+        : role === 'team_lead'
+          ? Users
+          : role === 'grand_compte'
+            ? Crown
+            : Briefcase;
 
   const sizeClasses =
     size === 'sm'
@@ -41,3 +45,4 @@ export const RoleBadge: React.FC<RoleBadgeProps> = ({
     </span>
   );
 };
+

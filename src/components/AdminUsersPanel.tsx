@@ -32,6 +32,7 @@ import {
 } from '../firebase';
 import {
   FIREBASE_PROJECT_ID,
+  MANAGED_ROLE_OPTIONS,
   SUPER_ADMIN_EMAIL,
   validateNewUserInput,
   generateStrongTempPassword,
@@ -39,6 +40,7 @@ import {
   type ManagedAppUser,
   type ManagedUserRole,
 } from '../utils/authAccess';
+import { ADMIN_DISTINCTION_BADGES } from '../utils/gamification';
 import { RoleBadge } from './RoleBadge';
 
 const CLOUD_API_PROVIDERS = [
@@ -82,6 +84,7 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
   const [password, setPassword] = useState(() => generateStrongTempPassword(12));
   const [showPwd, setShowPwd] = useState(true);
   const [role, setRole] = useState<ManagedUserRole>('commercial');
+  const [selectedInitialRoleBadges, setSelectedInitialRoleBadges] = useState<string[]>([]);
   const [zone, setZone] = useState(villesOptions[0] || 'Meknès');
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState('');
@@ -89,13 +92,21 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
     displayName: string;
     email: string;
     password: string;
+    role: ManagedUserRole;
   } | null>(null);
   const [copiedCreds, setCopiedCreds] = useState(false);
 
-  // Recherche & actions sur la liste
+  // Recherche, filtre rôle & actions sur la liste
   const [search, setSearch] = useState('');
+  const [roleFilter, setRoleFilter] = useState<'all' | ManagedUserRole>('all');
+  const [statusFilter, setStatusFilter] = useState<'all' | 'active' | 'suspended'>('all');
   const [busyUid, setBusyUid] = useState<string | null>(null);
   const [confirmDeleteUid, setConfirmDeleteUid] = useState<string | null>(null);
+
+  const roleDistinctionOptions = useMemo(
+    () => ADMIN_DISTINCTION_BADGES.filter((b) => b.category === 'role'),
+    []
+  );
 
   // Mot de passe du compte Super-Admin lui-même
   const [adminNewPwd, setAdminNewPwd] = useState('');
@@ -131,15 +142,25 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
   const filteredUsers = useMemo(() => {
     const q = search.trim().toLowerCase();
     const sorted = [...users].sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
-    if (!q) return sorted;
-    return sorted.filter(
-      (u) =>
+    return sorted.filter((u) => {
+      if (roleFilter !== 'all' && u.role !== roleFilter) return false;
+      if (statusFilter === 'active' && !u.active) return false;
+      if (statusFilter === 'suspended' && u.active) return false;
+      if (!q) return true;
+      return (
         u.displayName.toLowerCase().includes(q) ||
         u.email.toLowerCase().includes(q) ||
         u.zone.toLowerCase().includes(q) ||
         u.role.toLowerCase().includes(q)
+      );
+    });
+  }, [users, search, roleFilter, statusFilter]);
+
+  const toggleInitialRoleBadge = (badgeId: string) => {
+    setSelectedInitialRoleBadges((prev) =>
+      prev.includes(badgeId) ? prev.filter((id) => id !== badgeId) : [...prev, badgeId]
     );
-  }, [users, search]);
+  };
 
   const handleCreateUser = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -161,17 +182,20 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
         password,
         role,
         zone,
+        initialManualBadges: selectedInitialRoleBadges,
       });
       setLastCreatedCreds({
         displayName: created.displayName,
         email: created.email,
         password,
+        role: created.role,
       });
       setDisplayName('');
       setEmail('');
+      setSelectedInitialRoleBadges([]);
       setPassword(generateStrongTempPassword(12));
       onNotify(
-        `Utilisateur ${created.displayName} (${created.email}) créé. Un email de vérification lui a été envoyé.`
+        `Utilisateur ${created.displayName} (${created.email}) créé avec un portefeuille initial vide. Email de vérification envoyé.`
       );
     } catch (err) {
       const formatted = formatFirebaseAuthError(err, currentHostname);
@@ -467,41 +491,88 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
                 </div>
               </div>
 
-              <div className="grid grid-cols-2 gap-2.5">
-                <div className="space-y-1">
-                  <label htmlFor="admin-new-role" className="block text-xs font-semibold text-stone-700">
-                    Rôle
-                  </label>
-                  <select
-                    id="admin-new-role"
-                    value={role}
-                    onChange={(e) => setRole(e.target.value as ManagedUserRole)}
-                    className="w-full px-2.5 py-2 rounded-lg border border-stone-300 bg-white text-xs focus:outline-none focus:border-orange-600"
-                  >
-                    <option value="commercial">Commercial B2B</option>
-                    <option value="manager">Superviseur</option>
-                  </select>
+              {/* Sélecteur visuel de rôle CRM */}
+              <div className="space-y-1.5" data-testid="admin-create-role-selector">
+                <label className="block text-xs font-semibold text-stone-700">
+                  Sélecteur de rôle CRM
+                </label>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  {MANAGED_ROLE_OPTIONS.map((opt) => {
+                    const active = role === opt.value;
+                    return (
+                      <button
+                        key={opt.value}
+                        type="button"
+                        onClick={() => setRole(opt.value)}
+                        aria-pressed={active}
+                        className={`rounded-xl border p-2.5 text-left transition-all ${
+                          active
+                            ? 'border-orange-500 bg-orange-50/70 ring-1 ring-orange-500/30'
+                            : 'border-stone-200 bg-white hover:border-stone-300'
+                        }`}
+                      >
+                        <div className="flex items-center justify-between gap-1.5">
+                          <RoleBadge role={opt.value} showShort />
+                          {active && <Check className="w-3.5 h-3.5 text-orange-600 shrink-0" />}
+                        </div>
+                        <p className="mt-1.5 text-[11px] leading-snug text-stone-600">
+                          {opt.description}
+                        </p>
+                      </button>
+                    );
+                  })}
                 </div>
+              </div>
 
-                <div className="space-y-1">
-                  <label htmlFor="admin-new-zone" className="block text-xs font-semibold text-stone-700">
-                    Zone / Ville
-                  </label>
-                  <input
-                    id="admin-new-zone"
-                    type="text"
-                    value={zone}
-                    onChange={(e) => setZone(e.target.value)}
-                    list="admin-zone-suggestions"
-                    placeholder="Meknès"
-                    className="w-full px-2.5 py-2 rounded-lg border border-stone-300 text-xs focus:outline-none focus:border-orange-600"
-                  />
-                  <datalist id="admin-zone-suggestions">
-                    {villesOptions.map((v) => (
-                      <option key={v} value={v} />
-                    ))}
-                  </datalist>
+              {/* Badges de rôle initiaux optionnels */}
+              <div className="space-y-1.5">
+                <span className="block text-xs font-semibold text-stone-700">
+                  Badges de responsabilités initiaux (optionnel)
+                </span>
+                <div className="flex flex-wrap gap-1.5">
+                  {roleDistinctionOptions.map((badge) => {
+                    const picked = selectedInitialRoleBadges.includes(badge.id);
+                    return (
+                      <button
+                        key={badge.id}
+                        type="button"
+                        onClick={() => toggleInitialRoleBadge(badge.id)}
+                        className={`px-2 py-1 rounded-lg border text-[11px] font-semibold transition-colors inline-flex items-center gap-1 ${
+                          picked
+                            ? 'border-indigo-500 bg-indigo-50 text-indigo-900'
+                            : 'border-stone-200 bg-stone-50 text-stone-600 hover:border-stone-300'
+                        }`}
+                      >
+                        {picked && <Check className="w-3 h-3 text-indigo-600" />}
+                        {badge.title.replace(/^Rôle\s*:\s*/i, '')}
+                      </button>
+                    );
+                  })}
                 </div>
+              </div>
+
+              <div className="space-y-1">
+                <label htmlFor="admin-new-zone" className="block text-xs font-semibold text-stone-700">
+                  Zone / Ville principale
+                </label>
+                <input
+                  id="admin-new-zone"
+                  type="text"
+                  value={zone}
+                  onChange={(e) => setZone(e.target.value)}
+                  list="admin-zone-suggestions"
+                  placeholder="Meknès"
+                  className="w-full px-2.5 py-2 rounded-lg border border-stone-300 text-xs focus:outline-none focus:border-orange-600"
+                />
+                <datalist id="admin-zone-suggestions">
+                  {villesOptions.map((v) => (
+                    <option key={v} value={v} />
+                  ))}
+                </datalist>
+              </div>
+
+              <div className="rounded-lg border border-stone-200 bg-stone-50 px-3 py-2 text-[11px] text-stone-600">
+                Tout nouveau compte démarre automatiquement avec un <strong>portefeuille initial vide (0 fiche)</strong> isolé sur Cloud Firestore.
               </div>
 
               {createError && (
@@ -524,7 +595,10 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
             {lastCreatedCreds && (
               <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-3 space-y-2 text-xs text-emerald-950">
                 <div className="flex items-center justify-between gap-2">
-                  <span className="font-bold">Identifiants créés (à transmettre)</span>
+                  <div className="flex items-center gap-1.5 flex-wrap">
+                    <span className="font-bold">Identifiants créés</span>
+                    <RoleBadge role={lastCreatedCreds.role} showShort />
+                  </div>
                   <button
                     type="button"
                     onClick={handleCopyCredentials}
@@ -539,7 +613,7 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
                   <div>Mot de passe : {lastCreatedCreds.password}</div>
                 </div>
                 <p className="text-[11px] text-emerald-800">
-                  Un email de vérification a été envoyé automatiquement ; l&apos;utilisateur doit le valider pour activer la synchro Cloud.
+                  Portefeuille initial vide (0 fiche) prêt. Un email de vérification a été envoyé ; l&apos;utilisateur doit le valider avant sa première connexion.
                 </p>
               </div>
             )}
@@ -624,15 +698,41 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
             <h3 className="text-xs font-bold text-stone-900">
               Comptes utilisateurs autorisés ({filteredUsers.length})
             </h3>
-            <div className="relative w-full sm:w-64">
-              <Search className="w-3.5 h-3.5 text-stone-400 absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
-              <input
-                type="search"
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-                placeholder="Rechercher nom, email, zone..."
-                className="w-full pl-8 pr-3 py-1.5 rounded-lg border border-stone-300 text-xs focus:outline-none focus:border-orange-600"
-              />
+            <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto">
+              <select
+                aria-label="Filtrer par rôle"
+                data-testid="admin-directory-role-filter"
+                value={roleFilter}
+                onChange={(e) => setRoleFilter(e.target.value as 'all' | ManagedUserRole)}
+                className="px-2.5 py-1.5 rounded-lg border border-stone-300 bg-stone-50 text-xs font-semibold text-stone-800 focus:outline-none focus:border-orange-600"
+              >
+                <option value="all">Tous les rôles</option>
+                {MANAGED_ROLE_OPTIONS.map((opt) => (
+                  <option key={opt.value} value={opt.value}>
+                    {opt.label}
+                  </option>
+                ))}
+              </select>
+              <select
+                aria-label="Filtrer par statut"
+                value={statusFilter}
+                onChange={(e) => setStatusFilter(e.target.value as 'all' | 'active' | 'suspended')}
+                className="px-2.5 py-1.5 rounded-lg border border-stone-300 bg-stone-50 text-xs font-semibold text-stone-800 focus:outline-none focus:border-orange-600"
+              >
+                <option value="all">Tous statuts</option>
+                <option value="active">Actifs</option>
+                <option value="suspended">Suspendus</option>
+              </select>
+              <div className="relative flex-1 sm:w-52">
+                <Search className="w-3.5 h-3.5 text-stone-400 absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+                <input
+                  type="search"
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                  placeholder="Nom, email, zone..."
+                  className="w-full pl-8 pr-3 py-1.5 rounded-lg border border-stone-300 text-xs focus:outline-none focus:border-orange-600"
+                />
+              </div>
             </div>
           </div>
 
@@ -691,8 +791,11 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
                         onChange={(e) => void handleRoleChange(u, e.target.value as ManagedUserRole)}
                         className="px-2 py-1 rounded-lg border border-stone-300 bg-white text-[11px] font-medium text-stone-800"
                       >
-                        <option value="commercial">Commercial B2B</option>
-                        <option value="manager">Superviseur</option>
+                        {MANAGED_ROLE_OPTIONS.map((opt) => (
+                          <option key={opt.value} value={opt.value}>
+                            {opt.label}
+                          </option>
+                        ))}
                       </select>
 
                       <button

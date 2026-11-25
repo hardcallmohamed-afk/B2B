@@ -17,12 +17,15 @@ import {
 } from 'lucide-react';
 import {
   ADMIN_DISTINCTION_BADGES,
+  ROLE_BADGE_META,
+  TEAM_ROLE_ORDER,
   buildTeamLeaderboard,
   buildTeamMonthlyEvolution,
   formatMad,
   type OrangeProTier,
   type PayoutStatus,
   type SignedContractRecord,
+  type TeamRole,
   type TeamStatRecord,
 } from '../utils/gamification';
 import { getUserInitials } from '../utils/avatarResize';
@@ -59,25 +62,55 @@ export const TeamPerformancePanel: React.FC<TeamPerformancePanelProps> = ({
   onAdminUpdateContract,
   onJumpToBadges,
 }) => {
+  const [selectedRole, setSelectedRole] = useState<'all' | TeamRole>('all');
   const [selectedUid, setSelectedUid] = useState<string>('all');
   const [editingContractId, setEditingContractId] = useState<string | null>(null);
   const [editPayout, setEditPayout] = useState<number>(0);
   const [editStatus, setEditStatus] = useState<PayoutStatus>('En attente');
   const [savingContractId, setSavingContractId] = useState<string | null>(null);
 
-  const leaderboard = useMemo(
-    () => buildTeamLeaderboard(teamStats, signedContracts),
-    [teamStats, signedContracts]
+  const roleFilteredStats = useMemo(
+    () =>
+      selectedRole === 'all'
+        ? teamStats
+        : teamStats.filter((m) => m.role === selectedRole),
+    [teamStats, selectedRole]
   );
 
+  const roleAllowedUids = useMemo(
+    () => new Set(roleFilteredStats.map((m) => m.uid)),
+    [roleFilteredStats]
+  );
+
+  const roleFilteredContracts = useMemo(
+    () =>
+      selectedRole === 'all'
+        ? signedContracts
+        : signedContracts.filter((c) => roleAllowedUids.has(c.ownerId)),
+    [signedContracts, selectedRole, roleAllowedUids]
+  );
+
+  const leaderboard = useMemo(
+    () => buildTeamLeaderboard(roleFilteredStats, roleFilteredContracts),
+    [roleFilteredStats, roleFilteredContracts]
+  );
+
+  const effectiveSelectedUid =
+    selectedUid !== 'all' && leaderboard.some((m) => m.uid === selectedUid)
+      ? selectedUid
+      : 'all';
+
   const selectedMember = useMemo(
-    () => (selectedUid === 'all' ? null : leaderboard.find((m) => m.uid === selectedUid) || null),
-    [leaderboard, selectedUid]
+    () =>
+      effectiveSelectedUid === 'all'
+        ? null
+        : leaderboard.find((m) => m.uid === effectiveSelectedUid) || null,
+    [leaderboard, effectiveSelectedUid]
   );
 
   const monthlyEvolution = useMemo(
-    () => buildTeamMonthlyEvolution(teamStats, signedContracts, selectedUid),
-    [teamStats, signedContracts, selectedUid]
+    () => buildTeamMonthlyEvolution(roleFilteredStats, roleFilteredContracts, effectiveSelectedUid),
+    [roleFilteredStats, roleFilteredContracts, effectiveSelectedUid]
   );
 
   const maxMonthContracts = useMemo(
@@ -90,7 +123,7 @@ export const TeamPerformancePanel: React.FC<TeamPerformancePanelProps> = ({
     [monthlyEvolution]
   );
 
-  // Scoped KPIs (Global Team vs Selected Collaborator)
+  // Scoped KPIs (Global Team vs Role vs Selected Collaborator)
   const kpis = useMemo(() => {
     if (selectedMember) {
       return {
@@ -116,16 +149,16 @@ export const TeamPerformancePanel: React.FC<TeamPerformancePanelProps> = ({
   }, [leaderboard, selectedMember]);
 
   // Signed Contracts Ledger:
-  // - Super-Admin sees all (filtered by selectedUid if chosen)
+  // - Super-Admin sees all (filtered by selectedRole and selectedUid if chosen)
   // - Collaborator sees ONLY their own signed contracts (without client phone/email PII)
   const visibleContracts = useMemo(() => {
     const base = isSuperAdmin
-      ? selectedUid === 'all'
-        ? signedContracts
-        : signedContracts.filter((c) => c.ownerId === selectedUid)
+      ? effectiveSelectedUid === 'all'
+        ? roleFilteredContracts
+        : roleFilteredContracts.filter((c) => c.ownerId === effectiveSelectedUid)
       : signedContracts.filter((c) => c.ownerId === currentUserUid);
     return [...base].sort((a, b) => (b.signedAt || '').localeCompare(a.signedAt || ''));
-  }, [signedContracts, isSuperAdmin, selectedUid, currentUserUid]);
+  }, [signedContracts, roleFilteredContracts, isSuperAdmin, effectiveSelectedUid, currentUserUid]);
 
   const payoutBreakdown = useMemo(() => {
     let enAttente = 0;
@@ -186,15 +219,41 @@ export const TeamPerformancePanel: React.FC<TeamPerformancePanelProps> = ({
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
+          {/* Sélecteur de rôle */}
           <div className="flex items-center gap-1.5 rounded-xl border border-stone-300 bg-stone-50 px-3 py-2">
-            <Filter className="h-3.5 w-3.5 text-stone-500" />
+            <Filter className="h-3.5 w-3.5 text-orange-600" />
+            <select
+              aria-label="Filtrer par rôle"
+              data-testid="team-role-filter"
+              value={selectedRole}
+              onChange={(e) => {
+                setSelectedRole(e.target.value as 'all' | TeamRole);
+                setSelectedUid('all');
+              }}
+              className="bg-transparent text-xs font-semibold text-stone-800 focus:outline-none"
+            >
+              <option value="all">Tous les rôles</option>
+              {TEAM_ROLE_ORDER.map((r) => (
+                <option key={r} value={r}>
+                  {ROLE_BADGE_META[r].label}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div className="flex items-center gap-1.5 rounded-xl border border-stone-300 bg-stone-50 px-3 py-2">
+            <Users className="h-3.5 w-3.5 text-stone-500" />
             <select
               aria-label="Filtrer par collaborateur"
-              value={selectedUid}
+              value={effectiveSelectedUid}
               onChange={(e) => setSelectedUid(e.target.value)}
               className="bg-transparent text-xs font-semibold text-stone-800 focus:outline-none"
             >
-              <option value="all">Vue Globale Équipe (Tous)</option>
+              <option value="all">
+                {selectedRole === 'all'
+                  ? 'Vue Globale Équipe (Tous)'
+                  : `Tous (${ROLE_BADGE_META[selectedRole].label})`}
+              </option>
               {leaderboard.map((m) => (
                 <option key={m.uid} value={m.uid}>
                   #{m.rank} {m.displayName} ({m.contractsCount} contrats)
@@ -202,13 +261,16 @@ export const TeamPerformancePanel: React.FC<TeamPerformancePanelProps> = ({
               ))}
             </select>
           </div>
-          {selectedUid !== 'all' && (
+          {(effectiveSelectedUid !== 'all' || selectedRole !== 'all') && (
             <button
               type="button"
-              onClick={() => setSelectedUid('all')}
+              onClick={() => {
+                setSelectedRole('all');
+                setSelectedUid('all');
+              }}
               className="rounded-xl border border-orange-200 bg-orange-50 px-3 py-2 text-xs font-semibold text-orange-700 hover:bg-orange-100"
             >
-              Retour Vue Globale
+              Réinitialiser
             </button>
           )}
         </div>
