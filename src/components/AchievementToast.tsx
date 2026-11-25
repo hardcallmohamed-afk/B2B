@@ -1,28 +1,27 @@
 import React from 'react';
-import { Award, ShieldCheck, Sparkles, Trophy, X } from 'lucide-react';
+import { Sparkles, X } from 'lucide-react';
 import { RARITY_META } from '../utils/gamification';
 import type { AppNotification } from '../utils/notifications';
+import { BadgeArtwork, resolveBadgeMeta } from './BadgeArtwork';
 
 interface AchievementToastProps {
   notification: AppNotification | null;
+  queueCount?: number;
   onDismiss: () => void;
   onOpenBadges: () => void;
 }
 
 export const AchievementToast: React.FC<AchievementToastProps> = ({
   notification,
+  queueCount = 1,
   onDismiss,
   onOpenBadges,
 }) => {
   if (!notification) return null;
 
   const meta = RARITY_META[notification.rarity];
-  const Icon =
-    notification.kind === 'role_badge_awarded'
-      ? ShieldCheck
-      : notification.kind === 'distinction_awarded'
-        ? Award
-        : Trophy;
+  const resolved = resolveBadgeMeta(notification.badgeId);
+  const badgeName = resolved?.title || notification.title;
 
   const kicker =
     notification.kind === 'role_badge_awarded'
@@ -43,21 +42,31 @@ export const AchievementToast: React.FC<AchievementToastProps> = ({
           <Sparkles className="w-3.5 h-3.5" />
           {kicker}
         </span>
-        <span className="tabular-nums">+{notification.xpBoost} XP</span>
+        <span className="inline-flex items-center gap-2 tabular-nums">
+          {queueCount > 1 && (
+            <span className="rounded bg-black/15 px-1.5 py-0.2 text-[10px]">
+              1/{queueCount}
+            </span>
+          )}
+          <span>+{notification.xpBoost} XP</span>
+        </span>
       </div>
 
       <div className="p-3.5 flex items-start gap-3">
-        <div className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 ${meta.headerBg} ${meta.headerText} shadow-2xs`}>
-          <Icon className="w-5 h-5" />
-        </div>
+        <BadgeArtwork badgeId={notification.badgeId} rarity={notification.rarity} size="lg" />
         <div className="min-w-0 flex-1">
-          <div className="text-xs font-extrabold text-stone-900 leading-snug">
-            {notification.title}
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className="text-xs font-extrabold text-stone-900 leading-snug">
+              {badgeName}
+            </span>
+            <span className={`rounded px-1.5 py-0.2 text-[9px] font-extrabold ${meta.pillBg} ${meta.pillText}`}>
+              {meta.label}
+            </span>
           </div>
           <p className="text-[11px] text-stone-600 mt-0.5 leading-snug">
             {notification.message}
           </p>
-          <div className="mt-2 flex items-center gap-2">
+          <div className="mt-2 flex items-center justify-between gap-2">
             <button
               type="button"
               onClick={() => {
@@ -68,6 +77,15 @@ export const AchievementToast: React.FC<AchievementToastProps> = ({
             >
               Voir mes succès →
             </button>
+            {queueCount > 1 && (
+              <button
+                type="button"
+                onClick={onDismiss}
+                className="text-[11px] font-semibold text-stone-500 hover:text-stone-800"
+              >
+                Suivant ({queueCount - 1}) →
+              </button>
+            )}
           </div>
         </div>
         <button

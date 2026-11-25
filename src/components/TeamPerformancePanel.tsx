@@ -5,7 +5,6 @@ import {
   Crown,
   Filter,
   Lock,
-  Medal,
   Package,
   TrendingUp,
   Users,
@@ -16,7 +15,6 @@ import {
   X,
 } from 'lucide-react';
 import {
-  ADMIN_DISTINCTION_BADGES,
   ROLE_BADGE_META,
   TEAM_ROLE_ORDER,
   buildTeamLeaderboard,
@@ -29,6 +27,7 @@ import {
   type TeamStatRecord,
 } from '../utils/gamification';
 import { getUserInitials } from '../utils/avatarResize';
+import { BadgeChipWithDrawing } from './BadgeArtwork';
 import { RoleBadge } from './RoleBadge';
 
 interface TeamPerformancePanelProps {
@@ -171,12 +170,6 @@ export const TeamPerformancePanel: React.FC<TeamPerformancePanelProps> = ({
     }
     return { enAttente, valide, verse, total: enAttente + valide + verse };
   }, [visibleContracts]);
-
-  const badgeTitleById = useMemo(() => {
-    const m = new Map<string, string>();
-    for (const b of ADMIN_DISTINCTION_BADGES) m.set(b.id, b.title);
-    return m;
-  }, []);
 
   const startEditContract = (c: SignedContractRecord) => {
     setEditingContractId(c.id);
@@ -332,6 +325,18 @@ export const TeamPerformancePanel: React.FC<TeamPerformancePanelProps> = ({
           </div>
         </div>
       </div>
+
+      {/* Selected Collaborator Distinctions Strip */}
+      {selectedMember && selectedMember.manualBadges.length > 0 && (
+        <div className="rounded-2xl border border-stone-200 bg-white px-4 py-3 shadow-xs flex flex-wrap items-center gap-2">
+          <span className="text-xs font-bold text-stone-700 mr-1">
+            Distinctions de {selectedMember.displayName} :
+          </span>
+          {selectedMember.manualBadges.map((bid) => (
+            <BadgeChipWithDrawing key={bid} badgeId={bid} size="sm" showXp />
+          ))}
+        </div>
+      )}
 
       {/* 6-Month Sales & Payout Evolution Chart */}
       <div className="rounded-2xl border border-stone-200 bg-white p-5 shadow-xs">
@@ -509,16 +514,10 @@ export const TeamPerformancePanel: React.FC<TeamPerformancePanelProps> = ({
                         ) : (
                           <div className="flex flex-wrap gap-1">
                             {row.manualBadges.slice(0, 2).map((bid) => (
-                              <span
-                                key={bid}
-                                className="inline-flex items-center gap-1 rounded-md border border-violet-200 bg-violet-50 px-1.5 py-0.5 text-[10px] font-semibold text-violet-800"
-                              >
-                                <Medal className="h-3 w-3" />
-                                {badgeTitleById.get(bid) || bid}
-                              </span>
+                              <BadgeChipWithDrawing key={bid} badgeId={bid} size="xs" />
                             ))}
                             {row.manualBadges.length > 2 && (
-                              <span className="text-[10px] font-semibold text-violet-700">
+                              <span className="inline-flex items-center rounded-md border border-stone-200 bg-stone-50 px-1.5 py-0.5 text-[10px] font-semibold text-stone-700">
                                 +{row.manualBadges.length - 2}
                               </span>
                             )}

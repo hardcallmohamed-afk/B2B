@@ -1,7 +1,8 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Award, Bell, CheckCheck, ShieldCheck, Trophy } from 'lucide-react';
+import { Bell, CheckCheck } from 'lucide-react';
 import { RARITY_META } from '../utils/gamification';
 import { countUnreadNotifications, type AppNotification } from '../utils/notifications';
+import { BadgeArtwork } from './BadgeArtwork';
 
 interface NotificationBellProps {
   notifications: AppNotification[];
@@ -98,12 +99,6 @@ export const NotificationBell: React.FC<NotificationBellProps> = ({
             ) : (
               notifications.map((n) => {
                 const meta = RARITY_META[n.rarity];
-                const Icon =
-                  n.kind === 'role_badge_awarded'
-                    ? ShieldCheck
-                    : n.kind === 'distinction_awarded'
-                      ? Award
-                      : Trophy;
                 return (
                   <button
                     key={n.id}
@@ -117,11 +112,7 @@ export const NotificationBell: React.FC<NotificationBellProps> = ({
                       n.read ? 'bg-white' : 'bg-orange-50/40'
                     }`}
                   >
-                    <div
-                      className={`w-8 h-8 rounded-lg flex items-center justify-center shrink-0 ${meta.headerBg} ${meta.headerText}`}
-                    >
-                      <Icon className="w-4 h-4" />
-                    </div>
+                    <BadgeArtwork badgeId={n.badgeId} rarity={n.rarity} size="sm" />
                     <div className="min-w-0 flex-1">
                       <div className="flex items-center justify-between gap-2">
                         <span className="text-xs font-bold text-stone-900 truncate">{n.title}</span>

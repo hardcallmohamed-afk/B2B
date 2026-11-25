@@ -41,6 +41,7 @@ import {
   type ManagedUserRole,
 } from '../utils/authAccess';
 import { ADMIN_DISTINCTION_BADGES } from '../utils/gamification';
+import { BadgeArtwork } from './BadgeArtwork';
 import { RoleBadge } from './RoleBadge';
 
 const CLOUD_API_PROVIDERS = [
@@ -537,14 +538,20 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
                         key={badge.id}
                         type="button"
                         onClick={() => toggleInitialRoleBadge(badge.id)}
-                        className={`px-2 py-1 rounded-lg border text-[11px] font-semibold transition-colors inline-flex items-center gap-1 ${
+                        className={`px-2 py-1 rounded-lg border text-[11px] font-semibold transition-colors inline-flex items-center gap-1.5 ${
                           picked
                             ? 'border-indigo-500 bg-indigo-50 text-indigo-900'
-                            : 'border-stone-200 bg-stone-50 text-stone-600 hover:border-stone-300'
+                            : 'border-stone-200 bg-stone-50 text-stone-700 hover:border-stone-300'
                         }`}
                       >
-                        {picked && <Check className="w-3 h-3 text-indigo-600" />}
-                        {badge.title.replace(/^Rôle\s*:\s*/i, '')}
+                        <BadgeArtwork
+                          badgeId={badge.id}
+                          iconKey={badge.iconKey}
+                          rarity={badge.rarity}
+                          size="xs"
+                        />
+                        <span>{badge.title.replace(/^Rôle\s*:\s*/i, '')}</span>
+                        {picked && <Check className="w-3 h-3 text-indigo-600 shrink-0" />}
                       </button>
                     );
                   })}

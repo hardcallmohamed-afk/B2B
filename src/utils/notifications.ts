@@ -147,3 +147,47 @@ export function playCelebrationChime(): void {
     // Audio playback blocked or unsupported; ignore safely
   }
 }
+
+export type PushNotificationStatus = NotificationPermission | 'unsupported';
+
+export function getPushNotificationStatus(): PushNotificationStatus {
+  if (typeof window === 'undefined' || !('Notification' in window)) {
+    return 'unsupported';
+  }
+  return window.Notification.permission;
+}
+
+export async function requestPushNotificationPermission(): Promise<PushNotificationStatus> {
+  if (typeof window === 'undefined' || !('Notification' in window)) {
+    return 'unsupported';
+  }
+  if (window.Notification.permission === 'granted') {
+    return 'granted';
+  }
+  try {
+    return await window.Notification.requestPermission();
+  } catch {
+    return window.Notification.permission;
+  }
+}
+
+export function triggerBrowserPushNotification(notification: AppNotification): void {
+  if (typeof window === 'undefined' || !('Notification' in window)) return;
+  if (window.Notification.permission !== 'granted') return;
+  try {
+    const push = new window.Notification(notification.title, {
+      body: notification.message,
+      tag: `orange_pro_${notification.badgeId}`,
+    });
+    window.setTimeout(() => {
+      try {
+        push.close();
+      } catch {
+        // Ignore close error
+      }
+    }, 6500);
+  } catch {
+    // Some browsers require service-worker registration for Notification; toast fallback handles it gracefully
+  }
+}
+

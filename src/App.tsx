@@ -44,6 +44,7 @@ import {
   User as UserIcon,
   ChevronDown,
   Settings,
+  Menu,
 } from 'lucide-react';
 import { onAuthStateChanged, type User } from 'firebase/auth';
 import { doc, onSnapshot, query, where } from 'firebase/firestore';
@@ -59,12 +60,14 @@ import { SignContractModal, type SignContractTarget } from './components/SignCon
 import { AccountSettingsPanel, type UserProfileSettings } from './components/AccountSettingsPanel';
 import { NotificationBell } from './components/NotificationBell';
 import { AchievementToast } from './components/AchievementToast';
+import { CrmSidebar, CRM_TAB_META, type CrmTabId } from './components/CrmSidebar';
 import { getUserInitials } from './utils/avatarResize';
 import {
   detectNewUnlockNotifications,
   mergeNotificationsFeed,
   markAllNotificationsRead,
   playCelebrationChime,
+  triggerBrowserPushNotification,
   type AppNotification,
   type BadgeBaselineSnapshot,
 } from './utils/notifications';
@@ -73,6 +76,7 @@ import { findSmartDuplicateGroups } from './utils/deduplication';
 import {
   evaluateUserAccess,
   isSuperAdminEmail,
+  normalizeManagedRole,
   type ManagedAppUser,
 } from './utils/authAccess';
 import {
@@ -124,6 +128,7 @@ import {
   sanitizeWorkspacePayload,
   serializeDocCanonical,
   computeCollectionSyncDiff,
+  parseFriendlyCloudError,
   type SanitizedFicheDoc,
   type SanitizedEmailSkillDoc,
 } from './utils/firestoreSanitize';
@@ -2435,8 +2440,8 @@ export default function App() {
   const [profileMenuOpen, setProfileMenuOpen] = useState(false);
   const profileMenuRef = useRef<HTMLDivElement | null>(null);
   const [notifications, setNotifications] = useState<AppNotification[]>([]);
-  const [activeAchievementToast, setActiveAchievementToast] = useState<AppNotification | null>(null);
-  const achievementToastTimerRef = useRef<number | null>(null);
+  const [achievementToastQueue, setAchievementToastQueue] = useState<AppNotification[]>([]);
+  const activeAchievementToast = achievementToastQueue[0] || null;
   const badgeBaselineRef = useRef<BadgeBaselineSnapshot>({ initialized: false, unlockedIds: [] });
   const seenBadgesUidRef = useRef<string>('');
   const teamStatsHydratedRef = useRef<boolean>(false);
@@ -2538,10 +2543,25 @@ export default function App() {
     [apiKeys]
   );
 
-  // 4. Navigation, Vue Kanban, Équipe/Payouts, Succès/Badges, Mon Compte, Copilote IA & Filtres Portefeuille
-  const [activeTab, setActiveTab] = useState<
-    'portefeuille' | 'kanban' | 'team' | 'badges' | 'crawler' | 'paste' | 'dedup' | 'admin' | 'compte'
-  >('portefeuille');
+  // 4. Navigation CRM verticale, Vue Kanban, Équipe/Payouts, Succès/Badges, Mon Compte, Copilote IA & Filtres Portefeuille
+  const [activeTab, setActiveTab] = useState<CrmTabId>('portefeuille');
+  const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(() => {
+    try {
+      return window.localStorage.getItem('op_sidebar_collapsed') === '1';
+    } catch {
+      return false;
+    }
+  });
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [confirmEmptyPortfolio, setConfirmEmptyPortfolio] = useState(false);
+  useEffect(() => {
+    try {
+      window.localStorage.setItem('op_sidebar_collapsed', sidebarCollapsed ? '1' : '0');
+    } catch {
+      // Ignore quota
+    }
+  }, [sidebarCollapsed]);
+
   const [teamStats, setTeamStats] = useState<TeamStatRecord[]>([]);
   const [signedContracts, setSignedContracts] = useState<SignedContractRecord[]>([]);
   const [signContractTarget, setSignContractTarget] = useState<SignContractTarget | null>(null);
@@ -2739,6 +2759,8 @@ export default function App() {
   const [cloudApiKeys, setCloudApiKeys] = useState<CloudApiKeyRecord[]>([]);
   const [cloudSynced, setCloudSynced] = useState(false);
   const [cloudBusy, setCloudBusy] = useState(false);
+  const [cloudSyncError, setCloudSyncError] = useState<{ message: string; code: string } | null>(null);
+  const [cloudSyncRetryTick, setCloudSyncRetryTick] = useState(0);
 
   const knownCloudFichesRef = useRef<Map<string, { hash: string; doc: SanitizedFicheDoc }>>(new Map());
   const knownCloudSkillsRef = useRef<Map<string, { hash: string; doc: SanitizedEmailSkillDoc }>>(new Map());
@@ -2764,12 +2786,13 @@ export default function App() {
       // Toujours réinitialiser le portefeuille et le profil lors d'un changement/déconnexion de compte
       setFiches([]);
       setUserProfile(DEFAULT_USER_PROFILE);
-      setActiveAchievementToast(null);
+      setAchievementToastQueue([]);
       badgeBaselineRef.current = { initialized: false, unlockedIds: [] };
       seenBadgesUidRef.current = '';
       teamStatsHydratedRef.current = false;
       if (!u) {
         setCloudSynced(false);
+        setCloudSyncError(null);
         setAppUserProfile(null);
         setProfileChecked(true);
         setManagedUsers([]);
@@ -2783,6 +2806,7 @@ export default function App() {
         lastTeamStatHashRef.current = '';
       } else {
         setCloudSynced(false);
+        setCloudSyncError(null);
         setProfileChecked(false);
         try {
           const savedNotifs = window.localStorage.getItem(`op_notifications_${u.uid}`);
@@ -2848,14 +2872,10 @@ export default function App() {
   const canAccessWorkspace = accessDecision?.status === 'allowed';
   const currentUserRole: TeamRole = isSuperAdmin
     ? 'super_admin'
-    : appUserProfile?.role === 'manager'
-      ? 'manager'
-      : 'commercial';
+    : normalizeManagedRole(appUserProfile?.role);
 
   const extractShortCloudError = (err: unknown): string => {
-    const raw = err instanceof Error ? err.message : String(err || '');
-    const m = raw.match(/(permission-denied|unauthenticated|failed-precondition|unavailable|not-found)/i);
-    return m ? ` (${m[1]})` : '';
+    return parseFriendlyCloudError(err).shortTag;
   };
 
   // Empêche tout non-admin d'accéder à l'onglet Utilisateurs & Accès
@@ -2881,7 +2901,7 @@ export default function App() {
             uid: docSnap.id,
             email: typeof d.email === 'string' ? d.email : '',
             displayName: typeof d.displayName === 'string' ? d.displayName : '',
-            role: d.role === 'manager' ? 'manager' : 'commercial',
+            role: normalizeManagedRole(d.role),
             zone: typeof d.zone === 'string' ? d.zone : '',
             active: Boolean(d.active),
             createdBy: typeof d.createdBy === 'string' ? d.createdBy : '',
@@ -2953,7 +2973,7 @@ export default function App() {
             orgScope: 'orange_pro_team',
             displayName: typeof d.displayName === 'string' ? d.displayName : 'Collaborateur',
             role:
-              d.role === 'super_admin' || d.role === 'manager' ? d.role : 'commercial',
+              d.role === 'super_admin' ? 'super_admin' : normalizeManagedRole(d.role),
             zone: typeof d.zone === 'string' ? d.zone : 'Meknès',
             active: typeof d.active === 'boolean' ? d.active : true,
             totalProspects: Number(d.totalProspects) || 0,
@@ -3038,6 +3058,7 @@ export default function App() {
 
     const uid = cloudUser.uid;
     setCloudBusy(true);
+    setCloudSyncError(null);
 
     const applyWorkspaceDoc = (data: Record<string, unknown>) => {
       const cleanWs = sanitizeWorkspacePayload(uid, {
@@ -3194,8 +3215,15 @@ export default function App() {
       return true;
     };
 
-    (async () => {
+    const runBootstrap = async (attempt = 0): Promise<void> => {
       try {
+        // Rafraîchir le jeton JWT avant la requête Firestore afin que email_verified soit à jour dans les règles
+        try {
+          await cloudUser.getIdToken(attempt > 0);
+        } catch {
+          // Non-blocking fallback
+        }
+
         const snapshotLocal = latestLocalStateRef.current;
         const initialDisplayName =
           appUserProfile?.displayName ||
@@ -3299,7 +3327,9 @@ export default function App() {
             try {
               handleFirestoreError(err, OperationType.GET, `users/${uid}`);
             } catch {
-              notify(`Erreur de lecture de la configuration Cloud${extractShortCloudError(err)}.`, 'err');
+              const parsedErr = parseFriendlyCloudError(err);
+              setCloudSyncError({ message: parsedErr.userMessage, code: parsedErr.code });
+              notify(`Erreur de lecture de la configuration Cloud${parsedErr.shortTag}.`, 'err');
             }
           }
         );
@@ -3323,7 +3353,9 @@ export default function App() {
             try {
               handleFirestoreError(err, OperationType.LIST, `users/${uid}/fiches`);
             } catch {
-              notify(`Erreur de synchronisation des fiches Cloud${extractShortCloudError(err)}.`, 'err');
+              const parsedErr = parseFriendlyCloudError(err);
+              setCloudSyncError({ message: parsedErr.userMessage, code: parsedErr.code });
+              notify(`Erreur de synchronisation des fiches Cloud${parsedErr.shortTag}.`, 'err');
             }
           }
         );
@@ -3347,7 +3379,9 @@ export default function App() {
             try {
               handleFirestoreError(err, OperationType.LIST, `users/${uid}/skills`);
             } catch {
-              notify(`Erreur de synchronisation des skills Cloud${extractShortCloudError(err)}.`, 'err');
+              const parsedErr = parseFriendlyCloudError(err);
+              setCloudSyncError({ message: parsedErr.userMessage, code: parsedErr.code });
+              notify(`Erreur de synchronisation des skills Cloud${parsedErr.shortTag}.`, 'err');
             }
           }
         );
@@ -3355,17 +3389,32 @@ export default function App() {
         // Laisse React commiter l'état hydraté avant d'activer la synchro sortante
         enableSyncTimer = window.setTimeout(() => {
           if (!cancelled) {
+            setCloudSyncError(null);
             setCloudSynced(true);
             setCloudBusy(false);
           }
         }, 60);
       } catch (err) {
-        if (!cancelled) {
-          notify(`Impossible d’initialiser la synchronisation Cloud Firestore${extractShortCloudError(err)}.`, 'err');
-          setCloudBusy(false);
+        if (cancelled) return;
+        const parsedErr = parseFriendlyCloudError(err);
+        if (attempt === 0 && parsedErr.retryable) {
+          try {
+            await cloudUser.getIdToken(true);
+          } catch {
+            // Ignore token refresh failure on fallback retry
+          }
+          await new Promise((r) => window.setTimeout(r, 550));
+          if (!cancelled) {
+            return runBootstrap(1);
+          }
         }
+        setCloudSyncError({ message: parsedErr.userMessage, code: parsedErr.code });
+        notify(`Impossible d’initialiser la synchronisation Cloud Firestore${parsedErr.shortTag}.`, 'err');
+        setCloudBusy(false);
       }
-    })();
+    };
+
+    void runBootstrap(0);
 
     return () => {
       cancelled = true;
@@ -3375,7 +3424,7 @@ export default function App() {
       unsubFiches?.();
       unsubSkills?.();
     };
-  }, [authReady, cloudUser, canAccessWorkspace]);
+  }, [authReady, cloudUser, canAccessWorkspace, cloudSyncRetryTick]);
 
   // Synchroniser automatiquement toute modification de fiches vers Firestore
   useEffect(() => {
@@ -3579,13 +3628,8 @@ export default function App() {
     });
 
     if (userProfile.notifyBadges !== false) {
-      setActiveAchievementToast(created[0]);
-      if (achievementToastTimerRef.current) {
-        window.clearTimeout(achievementToastTimerRef.current);
-      }
-      achievementToastTimerRef.current = window.setTimeout(() => {
-        setActiveAchievementToast(null);
-      }, 6500);
+      setAchievementToastQueue((prev) => [...prev, ...created]);
+      created.forEach((item) => triggerBrowserPushNotification(item));
       if (userProfile.notifySound !== false) {
         playCelebrationChime();
       }
@@ -3599,6 +3643,38 @@ export default function App() {
     userProfile.notifyBadges,
     userProfile.notifySound,
   ]);
+
+  // Avance automatique de la file d'alertes toast de succès/badges
+  const currentToastId = achievementToastQueue[0]?.id || null;
+  useEffect(() => {
+    if (!currentToastId) return;
+    const timer = window.setTimeout(() => {
+      setAchievementToastQueue((prev) => prev.slice(1));
+    }, 6500);
+    return () => window.clearTimeout(timer);
+  }, [currentToastId]);
+
+  const handleTestBadgeAlert = () => {
+    const sampleItem =
+      myAchievementSummary.items.find((i) => i.unlocked) || myAchievementSummary.items[0];
+    if (!sampleItem) return;
+    const sampleNotif: AppNotification = {
+      id: `notif_test_${Date.now()}`,
+      kind: sampleItem.isManualAdminBadge ? 'distinction_awarded' : 'achievement_unlocked',
+      badgeId: sampleItem.id,
+      title: sampleItem.title,
+      message: `${sampleItem.description} (+${sampleItem.xpBoost} XP)`,
+      rarity: sampleItem.rarity,
+      xpBoost: sampleItem.xpBoost,
+      createdAt: new Date().toISOString(),
+      read: false,
+    };
+    setAchievementToastQueue((prev) => [...prev, sampleNotif]);
+    triggerBrowserPushNotification(sampleNotif);
+    if (userProfile.notifySound !== false) {
+      playCelebrationChime();
+    }
+  };
 
   const handleMarkAllNotificationsRead = () => {
     setNotifications((prev) => {
@@ -3622,11 +3698,9 @@ export default function App() {
   useEffect(() => {
     if (!cloudUser || !cloudSynced || !canAccessWorkspace) return;
     const uid = cloudUser.uid;
-    const role: 'super_admin' | 'manager' | 'commercial' = isSuperAdmin
+    const role: TeamRole = isSuperAdmin
       ? 'super_admin'
-      : appUserProfile?.role === 'manager'
-        ? 'manager'
-        : 'commercial';
+      : normalizeManagedRole(appUserProfile?.role);
     const zone = userProfile.zone || appUserProfile?.zone || villesState.defaultVille || 'Meknès';
     const monthlyHistory = buildMonthlyHistoryStrings(mySignedContracts);
     const payload = {
@@ -5721,76 +5795,129 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
       {/* Notification célébration lors d'un déblocage de succès ou d'attribution de badge */}
       <AchievementToast
         notification={activeAchievementToast}
-        onDismiss={() => setActiveAchievementToast(null)}
+        queueCount={achievementToastQueue.length}
+        onDismiss={() => setAchievementToastQueue((prev) => prev.slice(1))}
         onOpenBadges={() => setActiveTab('badges')}
       />
 
-      {/* En-tête Executive B2B Workspace */}
-      <header className="bg-white border-b border-stone-200 sm:sticky sm:top-0 z-30">
-        <div className="max-w-[1440px] mx-auto px-4 py-3 flex flex-wrap items-center justify-between gap-3">
-          <div className="flex items-center gap-3 min-w-0">
-            <div className="w-9 h-9 rounded-lg bg-orange-600 text-white flex items-center justify-center font-extrabold text-lg shrink-0">
-              O
-            </div>
-            <div className="min-w-0">
-              <h1 className="text-base sm:text-lg font-bold tracking-tight text-stone-900 leading-tight truncate">
-                Orange Pro B2B — Collecte, MDM, Hub API &amp; Studio Email IA
-              </h1>
-              <p className="text-xs text-stone-500 truncate">
-                Portefeuille Meknès &amp; Région · 9 colonnes CSV (;) · Routage Multi-LLM
-              </p>
-            </div>
-          </div>
+      {/* Shell CRM B2B avec barre verticale persistante + colonne principale */}
+      <div className="min-h-screen bg-[#F7F5F0] text-stone-900 flex">
+        <CrmSidebar
+          activeTab={activeTab}
+          onSelectTab={(tab) => setActiveTab(tab)}
+          onNewFiche={() => setShowQuickAdd(true)}
+          collapsed={sidebarCollapsed}
+          onToggleCollapse={() => setSidebarCollapsed((c) => !c)}
+          mobileOpen={mobileMenuOpen}
+          onCloseMobile={() => setMobileMenuOpen(false)}
+          isSuperAdmin={isSuperAdmin}
+          counts={{
+            fiches: accessibleFiches.length,
+            contracts: signedContracts.length,
+            duplicates: duplicateGroups.length,
+            unlockedBadges: myAchievementSummary.unlockedCount,
+            totalBadges: myAchievementSummary.totalCount,
+            managedUsers: managedUsers.length,
+          }}
+          user={{
+            displayName: currentUserDisplayName,
+            email: cloudUser.email || '',
+            role: currentUserRole,
+            avatarDataUrl: userProfile.avatarDataUrl,
+            cloudSynced,
+            cloudBusy,
+            hasSyncError: Boolean(cloudSyncError),
+          }}
+          onSignOut={handleGoogleSignOut}
+        />
 
-          <div className="flex flex-wrap items-center gap-2">
-            <NotificationBell
-              notifications={notifications}
-              onMarkAllRead={handleMarkAllNotificationsRead}
-              onOpenBadges={() => setActiveTab('badges')}
-            />
-
-            {/* Menu Profil Utilisateur (Photo, Rôle, Paramètres & Déconnexion) */}
-            <div ref={profileMenuRef} className="relative">
-              <button
-                type="button"
-                onClick={() => setProfileMenuOpen((v) => !v)}
-                aria-expanded={profileMenuOpen}
-                aria-label="Menu de mon compte"
-                data-testid="header-profile-menu-btn"
-                className="flex items-center gap-2 rounded-lg border border-emerald-200 bg-emerald-50/80 hover:bg-emerald-100/70 px-2 py-1 text-xs text-emerald-950 shrink-0 transition-colors"
-              >
-                <div className="w-6 h-6 rounded-md overflow-hidden border border-emerald-300 bg-white flex items-center justify-center shrink-0">
-                  {userProfile.avatarDataUrl ? (
-                    <img
-                      src={userProfile.avatarDataUrl}
-                      alt={currentUserDisplayName}
-                      className="w-full h-full object-cover"
-                    />
-                  ) : (
-                    <span className="text-[10px] font-extrabold text-orange-700">
-                      {getUserInitials(currentUserDisplayName)}
+        <div className="flex-1 min-w-0 flex flex-col">
+          {/* En-tête compact workspace (fil d'Ariane + actions rapides + notifications + profil) */}
+          <header className="bg-white border-b border-stone-200 sticky top-0 z-20">
+            <div className="max-w-[1440px] mx-auto px-3 sm:px-5 h-14 flex items-center justify-between gap-2.5">
+              <div className="flex items-center gap-2.5 min-w-0">
+                <button
+                  type="button"
+                  onClick={() => setMobileMenuOpen(true)}
+                  aria-label="Ouvrir le menu CRM"
+                  data-testid="mobile-menu-trigger"
+                  className="lg:hidden p-2 -ml-1 rounded-lg border border-stone-200 bg-stone-50 hover:bg-stone-100 text-stone-800 shrink-0"
+                >
+                  <Menu className="w-4 h-4" />
+                </button>
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2">
+                    <span className="hidden sm:inline text-[11px] font-bold uppercase tracking-wider text-stone-400">
+                      {CRM_TAB_META[activeTab].section}
                     </span>
-                  )}
+                    <span className="hidden sm:inline text-stone-300">/</span>
+                    <h1 className="text-sm sm:text-base font-bold tracking-tight text-stone-900 truncate">
+                      {CRM_TAB_META[activeTab].title}
+                    </h1>
+                  </div>
+                  <p className="hidden md:block text-[11px] text-stone-500 truncate">
+                    {CRM_TAB_META[activeTab].subtitle}
+                  </p>
                 </div>
-                <span
-                  className="font-semibold max-w-[125px] truncate"
-                  title={`Connecté et synchronisé (${cloudUser.email || ''})`}
-                >
-                  {cloudBusy ? 'Synchro...' : currentUserDisplayName}
-                </span>
-                {accessDecision?.status === 'allowed' && (
-                  <RoleBadge role={currentUserRole} showShort className="hidden sm:inline-flex" />
-                )}
-                <ChevronDown className="w-3.5 h-3.5 text-emerald-700 shrink-0" />
-              </button>
+              </div>
 
-              {profileMenuOpen && (
-                <div
-                  data-testid="header-profile-dropdown"
-                  className="absolute right-0 mt-2 w-72 rounded-2xl border border-stone-200 bg-white shadow-xl z-50 overflow-hidden"
+              <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
+                <button
+                  type="button"
+                  disabled={isAuditing}
+                  onClick={() => handleBatchAudit('portfolio')}
+                  className="hidden xl:flex px-2.5 py-1.5 rounded-lg border border-stone-300 bg-stone-50 hover:bg-stone-100 disabled:opacity-60 text-xs font-semibold text-stone-800 items-center gap-1.5 whitespace-nowrap shrink-0 transition-colors"
                 >
-                  <div className="p-3.5 bg-stone-50/80 border-b border-stone-100 flex items-center gap-3">
-                    <div className="w-11 h-11 rounded-xl overflow-hidden border border-stone-200 bg-white flex items-center justify-center shrink-0">
+                  <ShieldCheck className={`w-3.5 h-3.5 text-emerald-600 ${isAuditing ? 'animate-spin' : ''}`} />
+                  {isAuditing ? 'Vérification...' : 'Vérifier & Corriger'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setShowApiHub((v) => !v)}
+                  aria-expanded={showApiHub}
+                  className={`hidden sm:flex px-2.5 py-1.5 rounded-lg border text-xs font-semibold items-center gap-1.5 whitespace-nowrap shrink-0 transition-colors ${
+                    showApiHub || activeApiCount > 0
+                      ? 'border-orange-300 bg-orange-50 text-orange-900 hover:bg-orange-100'
+                      : 'border-stone-300 bg-white text-stone-700 hover:bg-stone-50'
+                  }`}
+                >
+                  <KeyRound className="w-3.5 h-3.5 text-orange-600" />
+                  <span className="tabular-nums">Hub API ({activeApiCount})</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setShowAiCopilot(true)}
+                  className="px-2.5 py-1.5 rounded-lg border border-stone-900 bg-stone-900 hover:bg-stone-800 text-white text-xs font-semibold flex items-center gap-1.5 whitespace-nowrap shrink-0 transition-colors"
+                >
+                  <Bot className="w-3.5 h-3.5 text-orange-400" />
+                  <span className="hidden sm:inline">Copilote IA</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setShowQuickAdd(true)}
+                  className="hidden sm:flex px-3 py-1.5 rounded-lg bg-orange-600 hover:bg-orange-700 text-white text-xs font-semibold items-center gap-1.5 whitespace-nowrap shrink-0 transition-colors"
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                  Nouvelle fiche
+                </button>
+
+                <NotificationBell
+                  notifications={notifications}
+                  onMarkAllRead={handleMarkAllNotificationsRead}
+                  onOpenBadges={() => setActiveTab('badges')}
+                />
+
+                {/* Menu Profil Utilisateur (Photo, Rôle, Paramètres & Déconnexion) */}
+                <div ref={profileMenuRef} className="relative">
+                  <button
+                    type="button"
+                    onClick={() => setProfileMenuOpen((v) => !v)}
+                    aria-expanded={profileMenuOpen}
+                    aria-label="Menu de mon compte"
+                    data-testid="header-profile-menu-btn"
+                    className="flex items-center gap-1.5 rounded-lg border border-stone-200 bg-stone-50 hover:bg-stone-100 px-2 py-1 text-xs text-stone-900 shrink-0 transition-colors"
+                  >
+                    <div className="w-6 h-6 rounded-md overflow-hidden border border-stone-300 bg-white flex items-center justify-center shrink-0">
                       {userProfile.avatarDataUrl ? (
                         <img
                           src={userProfile.avatarDataUrl}
@@ -5798,116 +5925,107 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
                           className="w-full h-full object-cover"
                         />
                       ) : (
-                        <span className="text-sm font-extrabold text-orange-700">
+                        <span className="text-[10px] font-extrabold text-orange-700">
                           {getUserInitials(currentUserDisplayName)}
                         </span>
                       )}
                     </div>
-                    <div className="min-w-0 flex-1">
-                      <div className="text-xs font-extrabold text-stone-900 truncate">
-                        {currentUserDisplayName}
+                    <span
+                      className="hidden md:inline font-semibold max-w-[110px] truncate"
+                      title={`Connecté (${cloudUser.email || ''})`}
+                    >
+                      {cloudBusy ? 'Synchro...' : currentUserDisplayName}
+                    </span>
+                    <RoleBadge role={currentUserRole} showShort className="hidden sm:inline-flex" />
+                    <ChevronDown className="w-3.5 h-3.5 text-stone-500 shrink-0" />
+                  </button>
+
+                  {profileMenuOpen && (
+                    <div
+                      data-testid="header-profile-dropdown"
+                      className="absolute right-0 mt-2 w-80 rounded-2xl border border-stone-200 bg-white shadow-xl z-50 overflow-hidden"
+                    >
+                      <div className="p-3.5 bg-stone-50/80 border-b border-stone-100 flex items-center gap-3">
+                        <div className="w-11 h-11 rounded-xl overflow-hidden border border-stone-200 bg-white flex items-center justify-center shrink-0">
+                          {userProfile.avatarDataUrl ? (
+                            <img
+                              src={userProfile.avatarDataUrl}
+                              alt={currentUserDisplayName}
+                              className="w-full h-full object-cover"
+                            />
+                          ) : (
+                            <span className="text-sm font-extrabold text-orange-700">
+                              {getUserInitials(currentUserDisplayName)}
+                            </span>
+                          )}
+                        </div>
+                        <div className="min-w-0 flex-1">
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            <span className="text-xs font-extrabold text-stone-900 truncate max-w-[130px]">
+                              {currentUserDisplayName}
+                            </span>
+                            <RoleBadge role={currentUserRole} showShort />
+                          </div>
+                          <div className="text-[11px] text-stone-500 truncate mt-0.5">{cloudUser.email}</div>
+                        </div>
                       </div>
-                      <div className="text-[11px] text-stone-500 truncate">{cloudUser.email}</div>
-                      <div className="mt-1">
-                        <RoleBadge role={currentUserRole} />
+
+                      <div className="p-1.5 space-y-0.5 text-xs">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setProfileMenuOpen(false);
+                            setActiveTab('compte');
+                          }}
+                          className="w-full px-3 py-2 rounded-lg text-left font-semibold text-stone-800 hover:bg-stone-100 flex items-center gap-2"
+                        >
+                          <Settings className="w-3.5 h-3.5 text-orange-600" />
+                          Paramètres du compte &amp; Photo
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setProfileMenuOpen(false);
+                            setActiveTab('badges');
+                          }}
+                          className="w-full px-3 py-2 rounded-lg text-left font-semibold text-stone-800 hover:bg-stone-100 flex items-center justify-between gap-2"
+                        >
+                          <span className="flex items-center gap-2">
+                            <Award className="w-3.5 h-3.5 text-amber-500" />
+                            Mes Succès &amp; Badges
+                          </span>
+                          <span className="text-[10px] font-bold text-stone-500 tabular-nums">
+                            {myAchievementSummary.unlockedCount}/{myAchievementSummary.totalCount}
+                          </span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setProfileMenuOpen(false);
+                            setActiveTab('team');
+                          }}
+                          className="w-full px-3 py-2 rounded-lg text-left font-semibold text-stone-800 hover:bg-stone-100 flex items-center gap-2"
+                        >
+                          <Trophy className="w-3.5 h-3.5 text-emerald-600" />
+                          Classement &amp; Mes Payouts
+                        </button>
+                      </div>
+
+                      <div className="p-1.5 border-t border-stone-100">
+                        <button
+                          type="button"
+                          onClick={handleGoogleSignOut}
+                          className="w-full px-3 py-2 rounded-lg text-left text-xs font-bold text-red-700 hover:bg-red-50 flex items-center gap-2"
+                        >
+                          <LogOut className="w-3.5 h-3.5" />
+                          Se déconnecter
+                        </button>
                       </div>
                     </div>
-                  </div>
-
-                  <div className="p-1.5 space-y-0.5 text-xs">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setProfileMenuOpen(false);
-                        setActiveTab('compte');
-                      }}
-                      className="w-full px-3 py-2 rounded-lg text-left font-semibold text-stone-800 hover:bg-stone-100 flex items-center gap-2"
-                    >
-                      <Settings className="w-3.5 h-3.5 text-orange-600" />
-                      Paramètres du compte &amp; Photo
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setProfileMenuOpen(false);
-                        setActiveTab('badges');
-                      }}
-                      className="w-full px-3 py-2 rounded-lg text-left font-semibold text-stone-800 hover:bg-stone-100 flex items-center justify-between gap-2"
-                    >
-                      <span className="flex items-center gap-2">
-                        <Award className="w-3.5 h-3.5 text-amber-500" />
-                        Mes Succès &amp; Badges
-                      </span>
-                      <span className="text-[10px] font-bold text-stone-500 tabular-nums">
-                        {myAchievementSummary.unlockedCount}/{myAchievementSummary.totalCount}
-                      </span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setProfileMenuOpen(false);
-                        setActiveTab('team');
-                      }}
-                      className="w-full px-3 py-2 rounded-lg text-left font-semibold text-stone-800 hover:bg-stone-100 flex items-center gap-2"
-                    >
-                      <Trophy className="w-3.5 h-3.5 text-emerald-600" />
-                      Classement &amp; Mes Payouts
-                    </button>
-                  </div>
-
-                  <div className="p-1.5 border-t border-stone-100">
-                    <button
-                      type="button"
-                      onClick={handleGoogleSignOut}
-                      className="w-full px-3 py-2 rounded-lg text-left text-xs font-bold text-red-700 hover:bg-red-50 flex items-center gap-2"
-                    >
-                      <LogOut className="w-3.5 h-3.5" />
-                      Se déconnecter
-                    </button>
-                  </div>
+                  )}
                 </div>
-              )}
+              </div>
             </div>
-            <button
-              type="button"
-              disabled={isAuditing}
-              onClick={() => handleBatchAudit('portfolio')}
-              className="px-3 py-2 rounded-lg border border-stone-300 bg-stone-50 hover:bg-stone-100 disabled:opacity-60 text-xs font-semibold text-stone-800 flex items-center gap-1.5 whitespace-nowrap shrink-0 transition-colors"
-            >
-              <ShieldCheck className={`w-4 h-4 text-emerald-600 ${isAuditing ? 'animate-spin' : ''}`} />
-              {isAuditing ? 'Vérification...' : 'Vérifier & Corriger Tout'}
-            </button>
-            <button
-              type="button"
-              onClick={() => setShowApiHub((v) => !v)}
-              aria-expanded={showApiHub}
-              className={`px-3 py-2 rounded-lg border text-xs font-semibold flex items-center gap-1.5 whitespace-nowrap shrink-0 transition-colors ${
-                showApiHub || activeApiCount > 0
-                  ? 'border-orange-300 bg-orange-50 text-orange-900 hover:bg-orange-100'
-                  : 'border-stone-300 bg-white text-stone-700 hover:bg-stone-50'
-              }`}
-            >
-              <KeyRound className="w-3.5 h-3.5 text-orange-600" />
-              <span className="tabular-nums">Hub API ({activeApiCount} actives)</span>
-            </button>
-            <button
-              type="button"
-              onClick={() => setShowAiCopilot(true)}
-              className="px-3 py-2 rounded-lg border border-stone-900 bg-stone-900 hover:bg-stone-800 text-white text-xs font-semibold flex items-center gap-1.5 whitespace-nowrap shrink-0 transition-colors"
-            >
-              <Bot className="w-4 h-4 text-orange-400" />
-              Copilote IA
-            </button>
-            <button
-              type="button"
-              onClick={() => setShowQuickAdd(true)}
-              className="px-3.5 py-2 rounded-lg bg-orange-600 hover:bg-orange-700 text-white text-xs font-semibold flex items-center gap-1.5 whitespace-nowrap shrink-0 transition-colors"
-            >
-              <Plus className="w-4 h-4" />
-              Nouvelle fiche
-            </button>
-          </div>
-        </div>
 
         {/* Panneau Hub API Multi-Fournisseurs (localStorage orange_pro_api_hub_v1) */}
         {showApiHub && (
@@ -6191,49 +6309,31 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
             </div>
           </div>
         )}
+          </header>
 
-        {/* Navigation 4 Modules Principaux */}
-        <nav
-          aria-label="Modules principaux"
-          className="max-w-[1440px] mx-auto px-4 flex gap-1 overflow-x-auto border-t border-stone-100"
-        >
-          {[
-            { id: 'portefeuille', label: `Portefeuille CRM (${accessibleFiches.length})`, icon: Building2 },
-            { id: 'kanban', label: 'Kanban Pipeline', icon: KanbanSquare },
-            { id: 'team', label: `Équipe & Payouts (${signedContracts.length})`, icon: Trophy },
-            { id: 'badges', label: `Succès & Badges (${myAchievementSummary.unlockedCount}/${myAchievementSummary.totalCount})`, icon: Award },
-            { id: 'crawler', label: 'Crawler Profond N1/N2', icon: Globe },
-            { id: 'paste', label: 'Extraction HTML / CSV / JSON', icon: FileText },
-            { id: 'dedup', label: `Déduplication MDM (${duplicateGroups.length})`, icon: GitMerge },
-            { id: 'compte', label: 'Mon Compte', icon: UserIcon },
-            ...(isSuperAdmin
-              ? [{ id: 'admin', label: `Utilisateurs & Accès (${managedUsers.length})`, icon: Users }]
-              : []),
-          ].map((t) => {
-            const Icon = t.icon;
-            const active = activeTab === t.id;
-            return (
+          {cloudSyncError && (
+            <div
+              role="alert"
+              data-testid="cloud-sync-error-banner"
+              className="mx-3 sm:mx-5 mt-3 rounded-xl border border-amber-300 bg-amber-50 px-4 py-2.5 text-xs text-amber-950 flex flex-wrap items-center justify-between gap-2.5"
+            >
+              <div className="flex items-center gap-2 min-w-0">
+                <AlertTriangle className="w-4 h-4 text-amber-700 shrink-0" />
+                <span className="font-medium">{cloudSyncError.message}</span>
+              </div>
               <button
-                key={t.id}
                 type="button"
-                role="tab"
-                aria-selected={active}
-                onClick={() => setActiveTab(t.id as typeof activeTab)}
-                className={`px-4 py-2.5 text-xs sm:text-sm font-semibold flex items-center gap-1.5 border-b-2 whitespace-nowrap shrink-0 transition-colors tabular-nums ${
-                  active
-                    ? 'border-orange-600 text-orange-700 bg-orange-50/40'
-                    : 'border-transparent text-stone-600 hover:text-stone-900'
-                }`}
+                onClick={() => setCloudSyncRetryTick((t) => t + 1)}
+                disabled={cloudBusy}
+                className="px-3 py-1.5 rounded-lg bg-stone-900 hover:bg-stone-800 disabled:opacity-50 text-white font-semibold inline-flex items-center gap-1.5 whitespace-nowrap shrink-0"
               >
-                <Icon className="w-4 h-4" />
-                {t.label}
+                <RefreshCw className={`w-3.5 h-3.5 ${cloudBusy ? 'animate-spin' : ''}`} />
+                Réessayer la synchro
               </button>
-            );
-          })}
-        </nav>
-      </header>
+            </div>
+          )}
 
-      <main className={`max-w-[1440px] mx-auto ${userProfile.compactUi ? 'p-2.5 space-y-2.5' : 'p-4 space-y-4'}`}>
+          <main className={`flex-1 max-w-[1440px] w-full mx-auto ${userProfile.compactUi ? 'p-2.5 space-y-2.5' : 'p-3 sm:p-5 space-y-4'}`}>
         {/* Barre de progression Audit & Enrichissement 8-Workers */}
         {auditProgress && (
           <section className="bg-stone-900 text-stone-50 rounded-xl p-3.5 border border-stone-700 space-y-2">
@@ -6735,8 +6835,64 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
                   <tbody className="divide-y divide-stone-100">
                     {filteredFiches.length === 0 ? (
                       <tr>
-                        <td colSpan={8} className="p-10 text-center text-stone-500">
-                          Aucune fiche ne correspond aux filtres actuels.
+                        <td colSpan={8} className="p-8 sm:p-10 text-center">
+                          {accessibleFiches.length === 0 ? (
+                            <div
+                              data-testid="empty-initial-portfolio"
+                              className="mx-auto max-w-md space-y-3 py-2"
+                            >
+                              <div className="mx-auto w-11 h-11 rounded-2xl bg-orange-50 border border-orange-200 text-orange-600 flex items-center justify-center">
+                                <Building2 className="w-5 h-5" />
+                              </div>
+                              <div>
+                                <h3 className="text-sm font-bold text-stone-900">
+                                  Portefeuille initial vide (0 fiche)
+                                </h3>
+                                <p className="mt-1 text-xs text-stone-500 leading-relaxed">
+                                  Votre espace démarre vierge et isolé. Ajoutez votre première entreprise prospect, importez un fichier CSV/JSON ou lancez le Crawler Profond.
+                                </p>
+                              </div>
+                              <div className="flex flex-wrap items-center justify-center gap-2 pt-1">
+                                <button
+                                  type="button"
+                                  onClick={() => setShowQuickAdd(true)}
+                                  className="px-3.5 py-2 rounded-lg bg-orange-600 hover:bg-orange-700 text-white text-xs font-semibold inline-flex items-center gap-1.5"
+                                >
+                                  <Plus className="w-3.5 h-3.5" />
+                                  Nouvelle fiche
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => setActiveTab('paste')}
+                                  className="px-3 py-2 rounded-lg border border-stone-300 bg-white hover:bg-stone-50 text-stone-800 text-xs font-semibold inline-flex items-center gap-1.5"
+                                >
+                                  <FileText className="w-3.5 h-3.5 text-orange-600" />
+                                  Extraction / Import
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => setActiveTab('crawler')}
+                                  className="px-3 py-2 rounded-lg border border-stone-300 bg-white hover:bg-stone-50 text-stone-800 text-xs font-semibold inline-flex items-center gap-1.5"
+                                >
+                                  <Globe className="w-3.5 h-3.5 text-emerald-600" />
+                                  Crawler Profond
+                                </button>
+                              </div>
+                            </div>
+                          ) : (
+                            <div className="space-y-2 text-stone-500">
+                              <p>Aucune fiche ne correspond aux filtres actuels.</p>
+                              {hasActiveFilters && (
+                                <button
+                                  type="button"
+                                  onClick={resetAllFilters}
+                                  className="text-xs font-semibold text-orange-700 hover:underline"
+                                >
+                                  Réinitialiser tous les filtres
+                                </button>
+                              )}
+                            </div>
+                          )}
                         </td>
                       </tr>
                     ) : (
@@ -7143,17 +7299,39 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
                 <span>
                   Astuce : clique directement sur n’importe quelle cellule (société, tél, email, contact, rôle, effectif) pour l’éditer en place.
                 </span>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setFiches(createInitialPortfolio());
-                    notify('Portefeuille exemple Meknès & Région rechargé.');
-                  }}
-                  className="text-stone-600 hover:text-orange-700 font-semibold flex items-center gap-1"
-                >
-                  <RefreshCw className="w-3 h-3" />
-                  Réinitialiser les exemples
-                </button>
+                {fiches.length > 0 && !confirmEmptyPortfolio && (
+                  <button
+                    type="button"
+                    onClick={() => setConfirmEmptyPortfolio(true)}
+                    className="text-stone-600 hover:text-red-700 font-semibold flex items-center gap-1"
+                  >
+                    <Trash2 className="w-3 h-3" />
+                    Vider mon portefeuille
+                  </button>
+                )}
+                {fiches.length > 0 && confirmEmptyPortfolio && (
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-red-700 font-semibold">Tout supprimer ?</span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setFiches([]);
+                        setConfirmEmptyPortfolio(false);
+                        notify('Portefeuille vidé (0 fiche).');
+                      }}
+                      className="px-2 py-0.5 rounded bg-red-600 text-white font-semibold"
+                    >
+                      Confirmer
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setConfirmEmptyPortfolio(false)}
+                      className="px-2 py-0.5 rounded border border-stone-300 bg-white text-stone-700 font-semibold"
+                    >
+                      Annuler
+                    </button>
+                  </div>
+                )}
               </div>
             </section>
             )}
@@ -7165,6 +7343,40 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
         {/* ================================================================== */}
         {activeTab === 'kanban' && (
           <div className="space-y-4">
+            {accessibleFiches.length === 0 && (
+              <div className="rounded-xl border border-stone-200 bg-white p-4 flex flex-wrap items-center justify-between gap-3">
+                <div className="flex items-center gap-3">
+                  <div className="w-9 h-9 rounded-xl bg-orange-50 border border-orange-200 text-orange-600 flex items-center justify-center shrink-0">
+                    <KanbanSquare className="w-4 h-4" />
+                  </div>
+                  <div>
+                    <div className="text-xs font-bold text-stone-900">
+                      Pipeline initial vierge (0 opportunité)
+                    </div>
+                    <p className="text-[11px] text-stone-500">
+                      Ajoutez votre première fiche pour démarrer le suivi par glisser-déposer.
+                    </p>
+                  </div>
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setShowQuickAdd(true)}
+                    className="px-3 py-1.5 rounded-lg bg-orange-600 hover:bg-orange-700 text-white text-xs font-semibold inline-flex items-center gap-1.5"
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                    Ajouter ma 1re fiche
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setActiveTab('paste')}
+                    className="px-3 py-1.5 rounded-lg border border-stone-300 bg-white hover:bg-stone-50 text-stone-800 text-xs font-semibold"
+                  >
+                    Importer CSV / HTML
+                  </button>
+                </div>
+              </div>
+            )}
             <KpiTrendChart fiches={filteredFiches} totalUnfilteredCount={fiches.length} />
             <KanbanBoard
               fiches={filteredFiches}
@@ -7747,6 +7959,7 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
             onExportBackup={handleExportFullBackup}
             onSignOut={handleGoogleSignOut}
             onJumpToBadges={() => setActiveTab('badges')}
+            onTestBadgeAlert={handleTestBadgeAlert}
             onNotify={notify}
           />
         )}
@@ -7766,6 +7979,8 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
           />
         )}
       </main>
+        </div>
+      </div>
 
       {/* ==================================================================== */}
       {/* MODAL ENRICHISSEMENT ASSISTÉ RAPIDE & MODE RAFALE                    */}

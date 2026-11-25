@@ -269,5 +269,63 @@ test('sanitizeAvatarDataUrl accepts valid JPEG/PNG/WebP base64 and blocks SVG/XS
   assert.equal(ws.compactUi, true);
 });
 
+test('sanitizeAppUserPayload and sanitizeTeamStatPayload preserve grand_compte and team_lead roles', async () => {
+  const { sanitizeTeamStatPayload } = await import('./firestoreSanitize');
+  const uGc = sanitizeAppUserPayload({
+    uid: 'u_gc',
+    email: 'gc@orangepro.ma',
+    displayName: 'Nadia Grand Compte',
+    role: 'grand_compte',
+    zone: 'Meknès',
+    active: true,
+    createdBy: 'admin_1',
+  });
+  const uLead = sanitizeAppUserPayload({
+    uid: 'u_lead',
+    email: 'lead@orangepro.ma',
+    displayName: 'Karim Chef',
+    role: 'team_lead',
+    zone: 'Fès',
+    active: true,
+    createdBy: 'admin_1',
+  });
+  assert.equal(uGc.role, 'grand_compte');
+  assert.equal(uLead.role, 'team_lead');
+
+  const statLead = sanitizeTeamStatPayload({
+    uid: 'u_lead',
+    displayName: 'Karim Chef',
+    role: 'team_lead',
+    zone: 'Fès',
+    active: true,
+    totalProspects: 0,
+    totalQualified: 0,
+    totalContracts: 0,
+    totalPayoutMad: 0,
+    xp: 0,
+    unlockedCount: 0,
+  });
+  assert.equal(statLead.role, 'team_lead');
+  assert.equal(statLead.totalProspects, 0);
+});
+
+test('parseFriendlyCloudError classifies permission-denied, offline, and unauthenticated errors cleanly', async () => {
+  const { parseFriendlyCloudError } = await import('./firestoreSanitize');
+  const perm = parseFriendlyCloudError(
+    new Error(JSON.stringify({ error: 'FirebaseError: Missing or insufficient permissions (permission-denied)', path: 'users/u1' }))
+  );
+  assert.equal(perm.code, 'permission-denied');
+  assert.equal(perm.shortTag, ' (permission-denied)');
+  assert.equal(perm.retryable, true);
+
+  const offline = parseFriendlyCloudError(new Error('Failed to get document because the client is offline.'));
+  assert.equal(offline.code, 'offline');
+  assert.equal(offline.retryable, true);
+
+  const unauth = parseFriendlyCloudError(new Error('unauthenticated'));
+  assert.equal(unauth.code, 'unauthenticated');
+});
+
+
 
 

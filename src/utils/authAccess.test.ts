@@ -100,3 +100,16 @@ test('generateStrongTempPassword creates 12-char mixed password and formatFireba
   assert.equal(err.code, 'unauthorized_domain');
   assert.equal(err.domainToAuthorize, 'hardcallmohamed-afk.github.io');
 });
+
+test('normalizeManagedRole and getManagedRoleLabel support all 4 CRM roles and safely default unknown strings', async () => {
+  const { normalizeManagedRole, getManagedRoleLabel, MANAGED_ROLE_OPTIONS } = await import('./authAccess');
+  assert.equal(MANAGED_ROLE_OPTIONS.length, 4);
+  assert.equal(normalizeManagedRole('grand_compte'), 'grand_compte');
+  assert.equal(normalizeManagedRole('team_lead'), 'team_lead');
+  assert.equal(normalizeManagedRole('manager'), 'manager');
+  assert.equal(normalizeManagedRole('commercial'), 'commercial');
+  assert.equal(normalizeManagedRole('unknown_role'), 'commercial');
+  assert.equal(getManagedRoleLabel('grand_compte'), 'Expert Grand Compte');
+  assert.equal(getManagedRoleLabel('team_lead'), 'Chef d’Équipe');
+});
+

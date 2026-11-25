@@ -28,7 +28,13 @@ import {
   type TeamRole,
 } from '../utils/gamification';
 import { getUserInitials, resizeAvatarImageFile } from '../utils/avatarResize';
-import { playCelebrationChime } from '../utils/notifications';
+import {
+  getPushNotificationStatus,
+  playCelebrationChime,
+  requestPushNotificationPermission,
+  type PushNotificationStatus,
+} from '../utils/notifications';
+import { BadgeChipWithDrawing } from './BadgeArtwork';
 import { RoleBadge } from './RoleBadge';
 import {
   requestPasswordReset,
@@ -67,6 +73,7 @@ interface AccountSettingsPanelProps {
   onExportBackup: () => void;
   onSignOut: () => void;
   onJumpToBadges: () => void;
+  onTestBadgeAlert?: () => void;
   onNotify: (msg: string, type?: 'ok' | 'warn' | 'err') => void;
 }
 
@@ -88,6 +95,7 @@ export const AccountSettingsPanel: React.FC<AccountSettingsPanelProps> = ({
   onExportBackup,
   onSignOut,
   onJumpToBadges,
+  onTestBadgeAlert,
   onNotify,
 }) => {
   const [displayName, setDisplayName] = useState(profile.displayName);
@@ -103,6 +111,7 @@ export const AccountSettingsPanel: React.FC<AccountSettingsPanelProps> = ({
 
   const [uploadingPhoto, setUploadingPhoto] = useState(false);
   const [savingProfile, setSavingProfile] = useState(false);
+  const [pushStatus, setPushStatus] = useState<PushNotificationStatus>(() => getPushNotificationStatus());
 
   // Sécurité / Mot de passe
   const [newPassword, setNewPassword] = useState('');
@@ -415,21 +424,7 @@ export const AccountSettingsPanel: React.FC<AccountSettingsPanelProps> = ({
           <div className="mt-4 pt-3 border-t border-stone-100 flex flex-wrap items-center gap-2">
             <span className="text-[11px] font-bold text-stone-600">Badges attribués :</span>
             {awardedBadgeObjects.map((b) => (
-              <span
-                key={b.id}
-                className={`inline-flex items-center gap-1 rounded-lg border px-2 py-0.5 text-[11px] font-bold ${
-                  b.category === 'role'
-                    ? 'border-indigo-200 bg-indigo-50 text-indigo-800'
-                    : 'border-violet-200 bg-violet-50 text-violet-800'
-                }`}
-              >
-                {b.category === 'role' ? (
-                  <ShieldCheck className="w-3 h-3" />
-                ) : (
-                  <Award className="w-3 h-3" />
-                )}
-                {b.title}
-              </span>
+              <BadgeChipWithDrawing key={b.id} badgeId={b.id} size="xs" showXp />
             ))}
           </div>
         )}
@@ -589,6 +584,47 @@ export const AccountSettingsPanel: React.FC<AccountSettingsPanelProps> = ({
               >
                 Tester le son
               </button>
+            </div>
+
+            <div className="flex flex-wrap items-center justify-between gap-2 pt-1 border-t border-stone-200/80 text-xs text-stone-700">
+              <span className="text-[11px] text-stone-600">
+                Push navigateur :{' '}
+                <strong className={pushStatus === 'granted' ? 'text-emerald-700' : 'text-stone-800'}>
+                  {pushStatus === 'granted'
+                    ? 'Activées'
+                    : pushStatus === 'denied'
+                      ? 'Bloquées par le navigateur'
+                      : pushStatus === 'unsupported'
+                        ? 'Non supportées'
+                        : 'En attente'}
+                </strong>
+              </span>
+              <div className="flex items-center gap-2">
+                {pushStatus === 'default' && (
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      const next = await requestPushNotificationPermission();
+                      setPushStatus(next);
+                      if (next === 'granted') {
+                        onNotify('Notifications push activées pour vos badges et succès.', 'ok');
+                      }
+                    }}
+                    className="px-2.5 py-1 rounded-lg border border-orange-300 bg-orange-50 hover:bg-orange-100 text-[11px] font-semibold text-orange-800"
+                  >
+                    Activer les notifications push
+                  </button>
+                )}
+                {onTestBadgeAlert && (
+                  <button
+                    type="button"
+                    onClick={onTestBadgeAlert}
+                    className="px-2.5 py-1 rounded-lg border border-stone-300 bg-white hover:bg-stone-100 text-[11px] font-semibold text-stone-800"
+                  >
+                    Tester l’alerte badge
+                  </button>
+                )}
+              </div>
             </div>
 
             <label className="flex items-center justify-between gap-3 cursor-pointer text-xs text-stone-700">

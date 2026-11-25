@@ -1,27 +1,5 @@
 import React, { useMemo, useState } from 'react';
-import {
-  Award,
-  Briefcase,
-  Building2,
-  CalendarCheck,
-  Check,
-  Crown,
-  Flame,
-  Heart,
-  Layers,
-  Lock,
-  MapPin,
-  Medal,
-  PhoneCall,
-  ShieldCheck,
-  Sparkles,
-  Star,
-  Target,
-  TrendingUp,
-  Trophy,
-  Wallet,
-  Zap,
-} from 'lucide-react';
+import { Check, Lock, Sparkles } from 'lucide-react';
 import {
   ADMIN_DISTINCTION_BADGES,
   RARITY_META,
@@ -29,13 +7,15 @@ import {
   ROLE_BADGE_META,
   TEAM_ROLE_ORDER,
   evaluateAchievements,
-  type BadgeRarity,
   type CollaboratorMetrics,
   type EvaluatedAchievement,
   type TeamRole,
   type TeamStatRecord,
 } from '../utils/gamification';
+import { BadgeArtwork, BadgeChipWithDrawing } from './BadgeArtwork';
 import { RoleBadge } from './RoleBadge';
+
+type SortMode = 'progress_desc' | 'xp_desc' | 'unlocked_first';
 
 interface AchievementsPanelProps {
   currentUserUid: string;
@@ -47,37 +27,6 @@ interface AchievementsPanelProps {
   initialSelectedUid?: string | null;
   onAdminToggleManualBadge?: (targetUid: string, nextBadges: string[]) => Promise<void>;
 }
-
-const ICON_MAP: Record<string, React.ComponentType<{ className?: string }>> = {
-  award: Award,
-  briefcase: Briefcase,
-  building: Building2,
-  calendar: CalendarCheck,
-  crown: Crown,
-  flame: Flame,
-  heart: Heart,
-  layers: Layers,
-  map: MapPin,
-  medal: Medal,
-  phone: PhoneCall,
-  shield: ShieldCheck,
-  star: Star,
-  target: Target,
-  trending: TrendingUp,
-  trophy: Trophy,
-  wallet: Wallet,
-  zap: Zap,
-};
-
-const RARITY_ICON_BG: Record<BadgeRarity, string> = {
-  commun: 'from-amber-400 to-yellow-600',
-  peu_commun: 'from-emerald-400 to-green-600',
-  rare: 'from-sky-400 to-blue-600',
-  epique: 'from-violet-500 to-purple-700',
-  legendaire: 'from-orange-500 to-red-600',
-};
-
-type SortMode = 'progress_desc' | 'xp_desc' | 'unlocked_first';
 
 export const AchievementsPanel: React.FC<AchievementsPanelProps> = ({
   currentUserUid,
@@ -186,23 +135,39 @@ export const AchievementsPanel: React.FC<AchievementsPanelProps> = ({
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-12">
         {/* Left Hero Summary Card */}
         <div className="flex flex-col justify-between rounded-2xl border border-stone-200 bg-white p-5 shadow-xs lg:col-span-5">
-          <div className="flex items-start gap-4">
-            <div className="flex h-16 w-16 shrink-0 items-center justify-center rounded-2xl bg-gradient-to-br from-amber-400 via-orange-500 to-orange-600 text-white shadow-md">
-              <Trophy className="h-9 w-9" />
-            </div>
-            <div className="min-w-0 flex-1">
-              <div className="flex flex-wrap items-center gap-2">
-                <h2 className="text-lg font-extrabold text-stone-900">Succès &amp; Badges</h2>
-                <RoleBadge role={viewedRole} size="sm" />
-                <span className="rounded-lg bg-orange-100 px-2 py-0.5 text-[11px] font-bold text-orange-800">
-                  Rang {evaluated.rankNumber} · {evaluated.rankTitle}
-                </span>
+          <div>
+            <div className="flex items-start gap-4">
+              <BadgeArtwork
+                badgeId="admin_legend_hall"
+                iconKey="trophy"
+                rarity="legendaire"
+                size="xl"
+              />
+              <div className="min-w-0 flex-1">
+                <div className="flex flex-wrap items-center gap-2">
+                  <h2 className="text-lg font-extrabold text-stone-900">Succès &amp; Badges</h2>
+                  <RoleBadge role={viewedRole} size="sm" />
+                  <span className="rounded-lg bg-orange-100 px-2 py-0.5 text-[11px] font-bold text-orange-800">
+                    Rang {evaluated.rankNumber} · {evaluated.rankTitle}
+                  </span>
+                </div>
+                <p className="mt-1 text-xs leading-relaxed text-stone-600">
+                  Suivez votre progression commerciale Orange Pro, débloquez des récompenses par
+                  palier de rareté et cumulez de l’XP en signant des contrats B2B.
+                </p>
               </div>
-              <p className="mt-1 text-xs leading-relaxed text-stone-600">
-                Suivez votre progression commerciale Orange Pro, débloquez des récompenses par
-                palier de rareté et cumulez de l’XP en signant des contrats B2B.
-              </p>
             </div>
+
+            {(selectedStat?.manualBadges?.length || 0) > 0 && (
+              <div className="mt-3.5 flex flex-wrap items-center gap-1.5 border-t border-stone-100 pt-3">
+                <span className="text-[10px] font-bold uppercase tracking-wide text-stone-500 mr-1">
+                  Badges attribués :
+                </span>
+                {(selectedStat?.manualBadges || []).map((bid) => (
+                  <BadgeChipWithDrawing key={bid} badgeId={bid} size="xs" />
+                ))}
+              </div>
+            )}
           </div>
 
           {/* 3 Main Stat Blocks */}
@@ -298,11 +263,15 @@ export const AchievementsPanel: React.FC<AchievementsPanelProps> = ({
                       key={item.id}
                       className="rounded-xl border border-stone-200 bg-stone-50/60 p-3"
                     >
-                      <div className="flex items-start justify-between gap-1.5">
+                      <div className="flex items-start justify-between gap-2">
                         <div className="flex items-center gap-2 min-w-0">
-                          <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-stone-800 text-white">
-                            <Lock className="h-3.5 w-3.5" />
-                          </div>
+                          <BadgeArtwork
+                            badgeId={item.id}
+                            iconKey={item.iconKey}
+                            rarity={item.rarity}
+                            unlocked={false}
+                            size="sm"
+                          />
                           <span className="truncate text-xs font-bold text-stone-900">
                             {item.title}
                           </span>
@@ -393,7 +362,6 @@ export const AchievementsPanel: React.FC<AchievementsPanelProps> = ({
                 {roleDistinctionBadges.map((badge) => {
                   const awarded = (selectedStat?.manualBadges || []).includes(badge.id);
                   const meta = RARITY_META[badge.rarity];
-                  const Icon = ICON_MAP[badge.iconKey] || Award;
                   return (
                     <button
                       key={badge.id}
@@ -406,17 +374,19 @@ export const AchievementsPanel: React.FC<AchievementsPanelProps> = ({
                           : 'border-stone-200 bg-white hover:border-indigo-300'
                       }`}
                     >
-                      <div className="flex items-center gap-2 min-w-0">
-                        <div
-                          className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br text-white ${RARITY_ICON_BG[badge.rarity]}`}
-                        >
-                          <Icon className="h-4 w-4" />
-                        </div>
+                      <div className="flex items-center gap-2.5 min-w-0">
+                        <BadgeArtwork
+                          badgeId={badge.id}
+                          iconKey={badge.iconKey}
+                          rarity={badge.rarity}
+                          unlocked={true}
+                          size="md"
+                        />
                         <div className="min-w-0">
-                          <div className="truncate text-xs font-bold text-stone-900">
+                          <div className="line-clamp-2 text-xs font-bold text-stone-900 leading-snug">
                             {badge.title}
                           </div>
-                          <div className="flex items-center gap-1 text-[10px] text-stone-500">
+                          <div className="mt-0.5 flex items-center gap-1 text-[10px] text-stone-500">
                             <span
                               className={`rounded-xs px-1 py-0.2 font-bold ${meta.pillBg} ${meta.pillText}`}
                             >
@@ -456,7 +426,6 @@ export const AchievementsPanel: React.FC<AchievementsPanelProps> = ({
                 {perfDistinctionBadges.map((badge) => {
                   const awarded = (selectedStat?.manualBadges || []).includes(badge.id);
                   const meta = RARITY_META[badge.rarity];
-                  const Icon = ICON_MAP[badge.iconKey] || Award;
                   return (
                     <button
                       key={badge.id}
@@ -470,16 +439,18 @@ export const AchievementsPanel: React.FC<AchievementsPanelProps> = ({
                       }`}
                     >
                       <div className="flex items-center gap-2.5 min-w-0">
-                        <div
-                          className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br text-white ${RARITY_ICON_BG[badge.rarity]}`}
-                        >
-                          <Icon className="h-4 w-4" />
-                        </div>
+                        <BadgeArtwork
+                          badgeId={badge.id}
+                          iconKey={badge.iconKey}
+                          rarity={badge.rarity}
+                          unlocked={true}
+                          size="md"
+                        />
                         <div className="min-w-0">
-                          <div className="truncate text-xs font-bold text-stone-900">
+                          <div className="line-clamp-2 text-xs font-bold text-stone-900 leading-snug">
                             {badge.title}
                           </div>
-                          <div className="flex items-center gap-1.5 text-[10px] text-stone-500">
+                          <div className="mt-0.5 flex items-center gap-1.5 text-[10px] text-stone-500">
                             <span
                               className={`rounded-xs px-1.5 py-0.2 font-bold ${meta.pillBg} ${meta.pillText}`}
                             >
@@ -580,7 +551,6 @@ export const AchievementsPanel: React.FC<AchievementsPanelProps> = ({
               ) : (
                 <div className="grid grid-cols-1 gap-3 p-4 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">
                   {sectionItems.map((item) => {
-                    const Icon = ICON_MAP[item.iconKey] || Award;
                     return (
                       <div
                         key={item.id}
@@ -592,17 +562,13 @@ export const AchievementsPanel: React.FC<AchievementsPanelProps> = ({
                       >
                         <div>
                           <div className="flex flex-col items-center text-center">
-                            {item.unlocked ? (
-                              <div
-                                className={`flex h-14 w-14 items-center justify-center rounded-2xl bg-gradient-to-br text-white shadow-sm ${RARITY_ICON_BG[item.rarity]}`}
-                              >
-                                <Icon className="h-7 w-7" />
-                              </div>
-                            ) : (
-                              <div className="flex h-14 w-14 items-center justify-center rounded-2xl border-2 border-stone-300 bg-stone-700 text-stone-200">
-                                <Lock className="h-6 w-6" />
-                              </div>
-                            )}
+                            <BadgeArtwork
+                              badgeId={item.id}
+                              iconKey={item.iconKey}
+                              rarity={item.rarity}
+                              unlocked={item.unlocked}
+                              size="lg"
+                            />
 
                             <h4 className="mt-3 text-xs font-extrabold text-stone-900">
                               {item.title}

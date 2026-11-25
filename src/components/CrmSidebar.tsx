@@ -228,7 +228,7 @@ export const CrmSidebar: React.FC<CrmSidebarProps> = ({
         {/* Brand Header */}
         <div
           className={`flex items-center border-b border-stone-800/80 ${
-            compact ? 'justify-center px-2 py-3.5' : 'justify-between px-4 py-3.5'
+            compact ? 'justify-center px-2 py-2.5' : 'justify-between px-4 py-2.5'
           }`}
         >
           <div className="flex items-center gap-2.5 min-w-0">
@@ -273,13 +273,13 @@ export const CrmSidebar: React.FC<CrmSidebarProps> = ({
 
         {/* Expand button when collapsed on desktop */}
         {compact && (
-          <div className="flex justify-center pt-2.5 pb-1">
+          <div className="flex justify-center pt-2 pb-0.5">
             <button
               type="button"
               onClick={onToggleCollapse}
               aria-label="Agrandir la barre latérale"
               title="Agrandir le menu"
-              className="p-2 rounded-lg text-stone-400 hover:text-white hover:bg-stone-800 transition-colors"
+              className="p-1.5 rounded-lg text-stone-400 hover:text-white hover:bg-stone-800 transition-colors"
             >
               <PanelLeftOpen className="w-4 h-4" />
             </button>
@@ -287,7 +287,7 @@ export const CrmSidebar: React.FC<CrmSidebarProps> = ({
         )}
 
         {/* Primary Quick Create CTA */}
-        <div className={compact ? 'px-2.5 py-2.5' : 'px-3.5 py-3'}>
+        <div className={compact ? 'px-2.5 py-2' : 'px-3 py-2'}>
           <button
             type="button"
             onClick={() => {
@@ -296,7 +296,7 @@ export const CrmSidebar: React.FC<CrmSidebarProps> = ({
             }}
             title="Nouvelle fiche prospect"
             className={`w-full rounded-xl bg-orange-600 hover:bg-orange-500 text-white font-semibold text-xs flex items-center justify-center gap-2 transition-colors whitespace-nowrap ${
-              compact ? 'h-9 px-0' : 'h-9 px-3'
+              compact ? 'h-8 px-0' : 'h-8 px-3'
             }`}
           >
             <Plus className="w-4 h-4 shrink-0" />
@@ -307,16 +307,16 @@ export const CrmSidebar: React.FC<CrmSidebarProps> = ({
         {/* Vertical Navigation Groups */}
         <nav
           aria-label="Navigation principale CRM"
-          className="flex-1 overflow-y-auto px-2.5 py-1 space-y-4"
+          className="flex-1 overflow-y-auto [scrollbar-width:none] [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden px-2.5 py-0.5 space-y-2"
         >
           {groups.map((group) => (
             <div key={group.label} className="space-y-0.5">
               {!compact ? (
-                <div className="px-2.5 pb-1 text-[10px] font-bold uppercase tracking-wider text-stone-500">
+                <div className="px-2.5 pb-0.5 text-[9.5px] font-bold uppercase tracking-wider text-stone-500">
                   {group.label}
                 </div>
               ) : (
-                <div className="mx-2 my-1 border-t border-stone-800/80" />
+                <div className="mx-2 my-0.5 border-t border-stone-800/80" />
               )}
 
               {group.items.map((item) => {
@@ -333,8 +333,8 @@ export const CrmSidebar: React.FC<CrmSidebarProps> = ({
                     onClick={() => handleNavClick(item.id)}
                     className={`w-full flex items-center rounded-xl transition-colors text-xs whitespace-nowrap ${
                       compact
-                        ? 'justify-center px-0 py-2.5'
-                        : 'justify-between gap-2 px-2.5 py-2'
+                        ? 'justify-center px-0 py-2'
+                        : 'justify-between gap-2 px-2.5 py-1.5'
                     } ${
                       active
                         ? 'bg-orange-500/15 text-orange-400 border border-orange-500/25 font-semibold'
@@ -372,15 +372,15 @@ export const CrmSidebar: React.FC<CrmSidebarProps> = ({
         </nav>
 
         {/* Bottom Profile & Session Footer */}
-        <div className="border-t border-stone-800/80 p-2.5 space-y-2">
+        <div className="border-t border-stone-800/80 p-2 space-y-1.5">
           {!compact ? (
-            <div className="rounded-xl bg-stone-900/90 border border-stone-800 p-2.5 space-y-2">
+            <div className="rounded-xl bg-stone-900/90 border border-stone-800 p-2 space-y-1.5">
               <button
                 type="button"
                 onClick={() => handleNavClick('compte')}
-                className="w-full flex items-center gap-2.5 text-left group"
+                className="w-full flex items-center gap-2 text-left group"
               >
-                <div className="w-8 h-8 rounded-lg overflow-hidden border border-stone-700 bg-stone-800 flex items-center justify-center shrink-0">
+                <div className="w-7 h-7 rounded-lg overflow-hidden border border-stone-700 bg-stone-800 flex items-center justify-center shrink-0">
                   {user.avatarDataUrl ? (
                     <img
                       src={user.avatarDataUrl}
@@ -394,17 +394,17 @@ export const CrmSidebar: React.FC<CrmSidebarProps> = ({
                   )}
                 </div>
                 <div className="min-w-0 flex-1">
-                  <div className="text-xs font-bold text-stone-100 truncate group-hover:text-orange-300 transition-colors">
-                    {user.displayName}
-                  </div>
-                  <div className="mt-0.5 flex items-center gap-1.5">
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <span className="text-xs font-bold text-stone-100 truncate max-w-[105px] group-hover:text-orange-300 transition-colors">
+                      {user.displayName}
+                    </span>
                     <RoleBadge role={user.role} showShort />
                   </div>
                 </div>
                 <Settings className="w-3.5 h-3.5 text-stone-500 group-hover:text-stone-200 shrink-0" />
               </button>
 
-              <div className="flex items-center justify-between gap-2 pt-1.5 border-t border-stone-800 text-[10px]">
+              <div className="flex items-center justify-between gap-2 pt-1 border-t border-stone-800 text-[10px]">
                 <span className="text-stone-400 truncate">
                   {user.hasSyncError
                     ? 'Synchro Cloud à relancer'
@@ -425,12 +425,12 @@ export const CrmSidebar: React.FC<CrmSidebarProps> = ({
               </div>
             </div>
           ) : (
-            <div className="flex flex-col items-center gap-2">
+            <div className="flex flex-col items-center gap-1.5">
               <button
                 type="button"
                 onClick={() => handleNavClick('compte')}
                 title={`${user.displayName} — Mon Compte`}
-                className="w-9 h-9 rounded-lg overflow-hidden border border-stone-700 bg-stone-800 flex items-center justify-center hover:border-orange-500 transition-colors"
+                className="w-8 h-8 rounded-lg overflow-hidden border border-stone-700 bg-stone-800 flex items-center justify-center hover:border-orange-500 transition-colors"
               >
                 {user.avatarDataUrl ? (
                   <img
@@ -449,7 +449,7 @@ export const CrmSidebar: React.FC<CrmSidebarProps> = ({
                 onClick={onSignOut}
                 title="Se déconnecter"
                 aria-label="Se déconnecter"
-                className="p-2 rounded-lg text-stone-400 hover:text-red-400 hover:bg-stone-800 transition-colors"
+                className="p-1.5 rounded-lg text-stone-400 hover:text-red-400 hover:bg-stone-800 transition-colors"
               >
                 <LogOut className="w-4 h-4" />
               </button>
@@ -465,7 +465,7 @@ export const CrmSidebar: React.FC<CrmSidebarProps> = ({
       {/* Desktop Persistent Vertical CRM Sidebar */}
       <aside
         data-testid="crm-vertical-sidebar"
-        className={`hidden lg:flex lg:flex-col lg:sticky lg:top-0 lg:h-screen shrink-0 border-r border-stone-800/80 transition-[width] duration-200 z-30 ${
+        className={`hidden lg:flex lg:flex-col lg:sticky lg:top-0 lg:h-screen overflow-hidden shrink-0 border-r border-stone-800/80 transition-[width] duration-200 z-30 ${
           collapsed ? 'w-[72px]' : 'w-[256px]'
         }`}
       >
