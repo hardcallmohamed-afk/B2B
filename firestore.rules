@@ -18,6 +18,9 @@ service cloud.firestore {
     function isValidId(id) {
       return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
     }
+    function isValidNumeroFiche(val) {
+      return val is string && val.size() >= 1 && val.size() <= 32 && val.matches('^[A-Z0-9_\\-]+$');
+    }
     function isOwner(userId) {
       return isVerifiedUser() && request.auth.uid == userId;
     }
@@ -76,8 +79,9 @@ service cloud.firestore {
           'dateAjout', 'createdAt', 'updatedAt'
         ])
         && data.keys().hasOnly([
-          'ownerId', 'id', 'societe', 'secteur', 'ville', 'telephone',
-          'email', 'contact', 'role', 'source', 'effectif', 'statut',
+          'ownerId', 'id', 'numeroFiche', 'societe', 'secteur', 'ville',
+          'telephone', 'telephonesSupplementaires', 'email', 'emailsSupplementaires',
+          'contact', 'role', 'source', 'effectif', 'statut',
           'siteWeb', 'verifieWeb', 'pistesEnrichissement',
           'dateAjout', 'createdAt', 'updatedAt'
         ])
@@ -87,11 +91,14 @@ service cloud.firestore {
         && data.id is string
         && data.id == ficheId
         && isValidId(data.id)
+        && (!('numeroFiche' in data) || isValidNumeroFiche(data.numeroFiche))
         && data.societe is string && data.societe.size() >= 1 && data.societe.size() <= 200
         && isValidSecteur(data.secteur)
         && data.ville is string && data.ville.size() <= 100
         && data.telephone is string && data.telephone.size() <= 30
+        && (!('telephonesSupplementaires' in data) || isValidStringList(data.telephonesSupplementaires, 10, 30))
         && data.email is string && data.email.size() <= 160
+        && (!('emailsSupplementaires' in data) || isValidStringList(data.emailsSupplementaires, 10, 160))
         && data.contact is string && data.contact.size() <= 160
         && data.role is string && data.role.size() <= 120
         && data.source is string && data.source.size() <= 500
@@ -188,11 +195,12 @@ service cloud.firestore {
             // Action 1: Kanban pipeline status transition
             incoming().diff(existing()).affectedKeys().hasOnly(['statut', 'updatedAt'])
             ||
-            // Action 2: Full CRM edit, web enrichment, or MDM merge
+            // Action 2: Full CRM edit, multi-contact addition, web/AI enrichment, or MDM merge
             incoming().diff(existing()).affectedKeys().hasOnly([
-              'societe', 'secteur', 'ville', 'telephone', 'email', 'contact',
-              'role', 'source', 'effectif', 'statut', 'siteWeb', 'verifieWeb',
-              'pistesEnrichissement', 'dateAjout', 'updatedAt'
+              'numeroFiche', 'societe', 'secteur', 'ville', 'telephone',
+              'telephonesSupplementaires', 'email', 'emailsSupplementaires',
+              'contact', 'role', 'source', 'effectif', 'statut', 'siteWeb',
+              'verifieWeb', 'pistesEnrichissement', 'dateAjout', 'updatedAt'
             ])
           );
 

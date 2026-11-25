@@ -39,14 +39,17 @@ test('sanitizeWorkspacePayload enforces blueprint bounds for cities and signatur
   assert.equal(out.seeded, true);
 });
 
-test('sanitizeFichePayload clamps strings, validates enums, and caps enrichment clues', () => {
+test('sanitizeFichePayload clamps strings, validates enums, caps enrichment clues, and handles multi-contacts + numeroFiche', () => {
   const out = sanitizeFichePayload('uid_1', {
     id: 'fiche/bad!id',
+    numeroFiche: 'op-0042!!',
     societe: '  Société Test ' + 'A'.repeat(250),
     secteur: 'invalid_secteur',
     ville: 'Meknès',
     telephone: '0535521122',
+    telephonesSupplementaires: Array.from({ length: 14 }, (_, i) => `06610000${String(i).padStart(2, '0')}`),
     email: 'contact@test.ma',
+    emailsSupplementaires: Array.from({ length: 12 }, (_, i) => `user${i}@test.ma`),
     contact: 'M. Amine',
     role: 'Gérant',
     source: 'Pages Jaunes',
@@ -59,9 +62,12 @@ test('sanitizeFichePayload clamps strings, validates enums, and caps enrichment 
   });
 
   assert.equal(out.id, 'fiche_bad_id');
+  assert.equal(out.numeroFiche, 'OP-0042');
   assert.equal(out.societe.length, 200);
   assert.equal(out.secteur, 'pme');
   assert.equal(out.statut, 'À contacter');
+  assert.equal(out.telephonesSupplementaires?.length, 10);
+  assert.equal(out.emailsSupplementaires?.length, 10);
   assert.equal(out.siteWeb?.length, 500);
   assert.equal(out.pistesEnrichissement?.length, 15);
   assert.equal(out.pistesEnrichissement?.[0].length, 250);

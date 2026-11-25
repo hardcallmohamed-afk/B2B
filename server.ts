@@ -321,7 +321,7 @@ ${focusedFiche ? `\n=== FICHE CIBLÉE ===\n${focusedFiche}` : ''}`;
     }
   });
 
-  // 5. Enrichissement Web IA via Google Search Grounding (serveur)
+  // 5. Enrichissement Web IA via Google Search Grounding (serveur) — multi-téléphones & multi-emails
   app.post('/api/ai/enrich-web', async (req, res) => {
     const ai = getGeminiClient();
     if (!ai) {
@@ -341,14 +341,16 @@ ${focusedFiche ? `\n=== FICHE CIBLÉE ===\n${focusedFiche}` : ''}`;
       return;
     }
 
-    const prompt = `Tu es un enquêteur B2B au Maroc. Fais une recherche Google vérifiée (site officiel, Telecontact.ma, Kerix.net, LinkedIn Maroc, Google Maps) pour l'entreprise exacte :
+    const prompt = `Tu es un enquêteur B2B au Maroc. Fais une recherche Google vérifiée (Aperçu IA Google, site officiel, Telecontact.ma, Kerix.net, LinkedIn Maroc, Google Maps) pour l'entreprise exacte :
 - Nom : "${societe}"
 - Ville : "${ville}", Maroc
 - Secteur actuel : "${secteur}"
 
-Trouve UNIQUEMENT des données réellement trouvées sur le web (ne rien inventer, laisser "" si absent) :
-- telephone (format marocain 05XXXXXXXX, 06XXXXXXXX ou 07XXXXXXXX)
-- email (email professionnel officiel uniquement)
+Trouve UNIQUEMENT des données réellement trouvées sur le web (ne rien inventer, laisser "" ou [] si absent) :
+- telephone (numéro principal au format marocain 05XXXXXXXX, 06XXXXXXXX ou 07XXXXXXXX)
+- telephones (tableau de TOUS les numéros marocains trouvés pour cette entreprise, fixe + GSM + standard)
+- email (email professionnel principal officiel)
+- emails (tableau de TOUTES les adresses email professionnelles trouvées pour cette entreprise)
 - contact (nom complet du décideur : Gérant, DG, Associé, Fondateur, Dr, Me, Arch)
 - role (fonction du décideur)
 - effectif (nombre entier uniquement si prouvé, sinon "")
@@ -356,7 +358,7 @@ Trouve UNIQUEMENT des données réellement trouvées sur le web (ne rien invente
 - secteur (un code parmi : ${allowedSecteurs})
 
 Réponds UNIQUEMENT par un objet JSON valide :
-{"telephone":"","email":"","contact":"","role":"","effectif":"","siteWeb":"","secteur":""}`;
+{"telephone":"","telephones":[],"email":"","emails":[],"contact":"","role":"","effectif":"","siteWeb":"","secteur":""}`;
 
     try {
       const response = await ai.models.generateContent({
@@ -379,6 +381,175 @@ Réponds UNIQUEMENT par un objet JSON valide :
         .slice(0, 5);
 
       res.json({ text: rawText, sources, model: AI_MODEL });
+    } catch (err) {
+      const formatted = formatAiError(err);
+      res.status(formatted.status).json({ error: formatted.message });
+    }
+  });
+
+  // 6. Extraction structurée IA de texte collé (Aperçu IA Google, Google Maps, LinkedIn, sites web, annuaires)
+  app.post('/api/ai/parse-paste', async (req, res) => {
+    const ai = getGeminiClient();
+    if (!ai) {
+      res.status(503).json({
+        error: 'Service Gemini IA non configuré sur le serveur. Utilisez l’extraction locale instantanée.',
+      });
+      return;
+    }
+
+    const rawText = clampString(req.body?.rawText, 12000);
+    const societe = clampString(req.body?.societe, 200);
+    const ville = clampString(req.body?.ville, 100);
+    const secteur = clampString(req.body?.secteur, 80);
+    const allowedSecteurs = clampString(req.body?.allowedSecteurs, 300);
+
+    if (!rawText) {
+      res.status(400).json({ error: 'Texte collé vide.' });
+      return;
+    }
+
+    const prompt = `Analyse ce contenu brut copié-collé depuis Google (y compris un "Aperçu IA / AI Overview"), Google Maps, LinkedIn, un site officiel ou un annuaire marocain pour l'entreprise "${societe || 'Inconnue'}" (${ville || 'Maroc'}, secteur actuel: ${secteur || 'pme'}).
+
+Extrais EXCLUSIVEMENT les informations réellement présentes dans le texte ci-dessous (ne rien inventer, laisse "" ou [] si absent) :
+- Tous les numéros de téléphone marocains (convertis en 10 chiffres 05XXXXXXXX, 06XXXXXXXX ou 07XXXXXXXX)
+- Toutes les adresses email valides
+- Le décideur principal (nom complet) et sa fonction/rôle
+- L'effectif (nombre entier si mentionné, ex: "environ 35 salariés" -> "35")
+- Le site web officiel (hors google/linkedin/facebook/telecontact/kerix)
+- Le code secteur le plus pertinent parmi : ${allowedSecteurs}
+- La ville marocaine si explicitement mentionnée
+
+=== TEXTE COLLÉ ===
+${rawText}`;
+
+    try {
+      const response = await withRetry(() =>
+        ai.models.generateContent({
+          model: AI_MODEL,
+          contents: prompt,
+          config: {
+            systemInstruction:
+              'Tu es un extracteur de données CRM B2B ultra-précis pour le Maroc. Tu sais lire les synthèses Google Aperçu IA, les fiches Google Maps et les profils LinkedIn. Ne fabrique aucune donnée.',
+            responseMimeType: 'application/json',
+            responseSchema: {
+              type: Type.OBJECT,
+              properties: {
+                telephones: {
+                  type: Type.ARRAY,
+                  items: { type: Type.STRING },
+                  description: 'Liste de tous les numéros marocains au format 05/06/07XXXXXXXX',
+                },
+                emails: {
+                  type: Type.ARRAY,
+                  items: { type: Type.STRING },
+                  description: 'Liste de toutes les adresses email extraites',
+                },
+                contact: { type: Type.STRING, description: 'Nom complet du décideur ou chaîne vide' },
+                role: { type: Type.STRING, description: 'Fonction du décideur ou chaîne vide' },
+                effectif: { type: Type.STRING, description: 'Nombre entier en texte ou chaîne vide' },
+                siteWeb: { type: Type.STRING, description: 'URL officielle ou chaîne vide' },
+                secteur: { type: Type.STRING, description: 'Code secteur valide ou chaîne vide' },
+                ville: { type: Type.STRING, description: 'Ville marocaine détectée ou chaîne vide' },
+                resume: { type: Type.STRING, description: 'Courte synthèse (1 phrase) des éléments trouvés' },
+              },
+              required: ['telephones', 'emails', 'contact', 'role', 'effectif', 'siteWeb', 'secteur', 'ville', 'resume'],
+            },
+            thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+          },
+        })
+      );
+
+      const cleanText = (response.text ?? '{}').replace(/^```(?:json)?\s*|\s*```$/g, '').trim();
+      const parsed = JSON.parse(cleanText);
+      res.json({ extracted: parsed, model: AI_MODEL });
+    } catch (err) {
+      const formatted = formatAiError(err);
+      res.status(formatted.status).json({ error: formatted.message });
+    }
+  });
+
+  // 7. Diagnostic Exécutif IA du Portefeuille (Score santé, goulots pipeline & comptes cibles)
+  app.post('/api/ai/portfolio-insights', async (req, res) => {
+    const ai = getGeminiClient();
+    if (!ai) {
+      res.status(503).json({
+        error: 'Service Gemini IA non configuré sur le serveur. Vérifiez GEMINI_API_KEY dans Settings > Secrets.',
+      });
+      return;
+    }
+
+    const portfolioSummary = clampString(req.body?.portfolioSummary, 5000);
+    if (!portfolioSummary) {
+      res.status(400).json({ error: 'Résumé du portefeuille manquant.' });
+      return;
+    }
+
+    const prompt = `Réalise un diagnostic commercial exécutif Orange Pro B2B Maroc basé STRICTEMENT sur ces données réelles de portefeuille :
+
+${portfolioSummary}
+
+Produis un audit structuré, actionnable immédiatement sur le terrain (Meknès & Région / Maroc), en citant les vrais codes fiche (OP-XXXX) et noms d'entreprises présents ci-dessus.`;
+
+    try {
+      const response = await withRetry(() =>
+        ai.models.generateContent({
+          model: AI_MODEL,
+          contents: prompt,
+          config: {
+            systemInstruction:
+              'Tu es Directeur des Ventes B2B Orange Pro Maroc. Analyse le portefeuille CRM et livre un diagnostic chiffré, honnête et orienté signature Fibre Pro, Fibre Dédiée & Flotte Mobile. Ne fabrique aucun compte.',
+            responseMimeType: 'application/json',
+            responseSchema: {
+              type: Type.OBJECT,
+              properties: {
+                scoreSante: {
+                  type: Type.INTEGER,
+                  description: 'Score global de santé commerciale du portefeuille de 0 à 100',
+                },
+                constatCle: {
+                  type: Type.STRING,
+                  description: 'Constat exécutif en 2 phrases courtes sur la qualité et la dynamique du pipeline',
+                },
+                alertePipeline: {
+                  type: Type.STRING,
+                  description: 'Principal point de friction ou risque détecté dans le tunnel de conversion',
+                },
+                actionsPrioritaires: {
+                  type: Type.ARRAY,
+                  items: { type: Type.STRING },
+                  description: '3 à 4 actions terrain immédiates à fort impact',
+                },
+                opportunitesCibles: {
+                  type: Type.ARRAY,
+                  items: {
+                    type: Type.OBJECT,
+                    properties: {
+                      numeroFiche: { type: Type.STRING, description: 'Code OP-XXXX de la fiche si présent' },
+                      societe: { type: Type.STRING, description: 'Nom exact de l entreprise dans le portefeuille' },
+                      raison: { type: Type.STRING, description: 'Pourquoi ce compte est prioritaire' },
+                      action: { type: Type.STRING, description: 'Prochaine action concrète recommandée' },
+                    },
+                    required: ['numeroFiche', 'societe', 'raison', 'action'],
+                  },
+                  description: 'Top 3 des comptes à prioriser maintenant',
+                },
+              },
+              required: [
+                'scoreSante',
+                'constatCle',
+                'alertePipeline',
+                'actionsPrioritaires',
+                'opportunitesCibles',
+              ],
+            },
+            thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+          },
+        })
+      );
+
+      const cleanText = (response.text ?? '{}').replace(/^```(?:json)?\s*|\s*```$/g, '').trim();
+      const parsed = JSON.parse(cleanText);
+      res.json({ insights: parsed, model: AI_MODEL });
     } catch (err) {
       const formatted = formatAiError(err);
       res.status(formatted.status).json({ error: formatted.message });

@@ -70,6 +70,13 @@
           "maxLength": 128,
           "pattern": "^[a-zA-Z0-9_\\-]+$"
         },
+        "numeroFiche": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32,
+          "pattern": "^[A-Z0-9_\\-]+$",
+          "description": "Numéro de fiche unique client (ex. OP-0001)."
+        },
         "societe": {
           "type": "string",
           "minLength": 1,
@@ -101,9 +108,17 @@
           "type": "string",
           "maxLength": 30
         },
+        "telephonesSupplementaires": {
+          "type": "array",
+          "description": "Numéros de téléphone additionnels du client (max 10)."
+        },
         "email": {
           "type": "string",
           "maxLength": 160
+        },
+        "emailsSupplementaires": {
+          "type": "array",
+          "description": "Adresses email additionnelles du client (max 10)."
         },
         "contact": {
           "type": "string",

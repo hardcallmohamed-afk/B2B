@@ -1,8 +1,10 @@
 import React, { useMemo, useState } from 'react';
-import { TrendingUp, ChevronDown, ChevronUp } from 'lucide-react';
+import { TrendingUp, ChevronDown, ChevronUp, MapPin, Phone, Mail, Users } from 'lucide-react';
 import type { FicheEntreprise, SegmentCouleur } from '../App';
 import {
+  buildCityAndOfferBreakdown,
   buildKpiTrendSeries,
+  buildPipelineFunnelStats,
   type TrendMetricMode,
   type TrendPeriod,
 } from '../utils/analytics';
@@ -49,6 +51,8 @@ export const KpiTrendChart: React.FC<KpiTrendChartProps> = ({ fiches, totalUnfil
   const [activeIndex, setActiveIndex] = useState<number | null>(null);
 
   const summary = useMemo(() => buildKpiTrendSeries(fiches, period), [fiches, period]);
+  const funnelStats = useMemo(() => buildPipelineFunnelStats(fiches), [fiches]);
+  const cityOffer = useMemo(() => buildCityAndOfferBreakdown(fiches), [fiches]);
   const points = summary.points;
 
   const width = 1240;
@@ -74,6 +78,11 @@ export const KpiTrendChart: React.FC<KpiTrendChartProps> = ({ fiches, totalUnfil
     return Math.ceil(maxSeg * 1.2);
   }, [metricMode, points]);
 
+  const maxNewInBucket = useMemo(
+    () => Math.max(...points.map((p) => p.newFiches), 1),
+    [points]
+  );
+
   const xFor = (idx: number) =>
     points.length <= 1 ? padLeft : padLeft + (idx / (points.length - 1)) * plotW;
 
@@ -96,6 +105,11 @@ export const KpiTrendChart: React.FC<KpiTrendChartProps> = ({ fiches, totalUnfil
       : points[points.length - 1];
 
   const isFiltered = fiches.length !== totalUnfilteredCount;
+  const isTimeSeriesMode =
+    metricMode === 'pipeline' || metricMode === 'maturity' || metricMode === 'segments';
+
+  const maxFunnelCount = Math.max(...funnelStats.map((s) => s.count), 1);
+  const maxCityCount = Math.max(...cityOffer.topCities.map((c) => c.total), 1);
 
   return (
     <section
@@ -112,7 +126,7 @@ export const KpiTrendChart: React.FC<KpiTrendChartProps> = ({ fiches, totalUnfil
           <div className="min-w-0">
             <div className="flex items-center gap-2 flex-wrap">
               <h2 className="text-sm font-bold text-stone-900">
-                Évolution KPI &amp; Dynamique Pipeline
+                Analytique KPI &amp; Dynamique Pipeline
               </h2>
               <span className="text-xs text-stone-500 tabular-nums">
                 {isFiltered
@@ -124,15 +138,17 @@ export const KpiTrendChart: React.FC<KpiTrendChartProps> = ({ fiches, totalUnfil
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
-          {/* Sélecteur de métrique */}
+          {/* Sélecteur de métrique étendu (5 vues analytiques) */}
           <div
             role="tablist"
             aria-label="Métrique de tendance"
-            className="inline-flex items-center p-0.5 bg-stone-100 rounded-lg"
+            className="inline-flex flex-wrap items-center p-0.5 bg-stone-100 rounded-lg"
           >
             {(
               [
                 { id: 'pipeline', label: 'Pipeline' },
+                { id: 'funnel', label: 'Entonnoir' },
+                { id: 'cities', label: 'Villes & Offres' },
                 { id: 'maturity', label: 'Maturité %' },
                 { id: 'segments', label: 'Segments' },
               ] as const
@@ -141,6 +157,7 @@ export const KpiTrendChart: React.FC<KpiTrendChartProps> = ({ fiches, totalUnfil
                 key={tab.id}
                 type="button"
                 role="tab"
+                data-testid={`kpi-tab-${tab.id}`}
                 aria-selected={metricMode === tab.id}
                 onClick={() => setMetricMode(tab.id)}
                 className={`px-2.5 py-1 text-xs font-semibold rounded-md transition-colors whitespace-nowrap ${
@@ -154,37 +171,39 @@ export const KpiTrendChart: React.FC<KpiTrendChartProps> = ({ fiches, totalUnfil
             ))}
           </div>
 
-          {/* Sélecteur de période */}
-          <div
-            role="group"
-            aria-label="Période du graphique"
-            className="inline-flex items-center p-0.5 bg-stone-100 rounded-lg"
-          >
-            {(
-              [
-                { id: '7d', label: '7j' },
-                { id: '30d', label: '30j' },
-                { id: '90d', label: '90j' },
-              ] as const
-            ).map((p) => (
-              <button
-                key={p.id}
-                type="button"
-                aria-pressed={period === p.id}
-                onClick={() => {
-                  setPeriod(p.id);
-                  setActiveIndex(null);
-                }}
-                className={`px-2 py-1 text-xs font-semibold rounded-md transition-colors tabular-nums ${
-                  period === p.id
-                    ? 'bg-stone-900 text-white'
-                    : 'text-stone-600 hover:text-stone-900'
-                }`}
-              >
-                {p.label}
-              </button>
-            ))}
-          </div>
+          {/* Sélecteur de période (actif sur les séries temporelles) */}
+          {isTimeSeriesMode && (
+            <div
+              role="group"
+              aria-label="Période du graphique"
+              className="inline-flex items-center p-0.5 bg-stone-100 rounded-lg"
+            >
+              {(
+                [
+                  { id: '7d', label: '7j' },
+                  { id: '30d', label: '30j' },
+                  { id: '90d', label: '90j' },
+                ] as const
+              ).map((p) => (
+                <button
+                  key={p.id}
+                  type="button"
+                  aria-pressed={period === p.id}
+                  onClick={() => {
+                    setPeriod(p.id);
+                    setActiveIndex(null);
+                  }}
+                  className={`px-2 py-1 text-xs font-semibold rounded-md transition-colors tabular-nums ${
+                    period === p.id
+                      ? 'bg-stone-900 text-white'
+                      : 'text-stone-600 hover:text-stone-900'
+                  }`}
+                >
+                  {p.label}
+                </button>
+              ))}
+            </div>
+          )}
 
           <button
             type="button"
@@ -239,7 +258,7 @@ export const KpiTrendChart: React.FC<KpiTrendChartProps> = ({ fiches, totalUnfil
               </div>
             </div>
 
-            {activePoint && (
+            {isTimeSeriesMode && activePoint && (
               <div
                 data-testid="kpi-trend-callout"
                 className="text-xs text-stone-700 font-medium tabular-nums flex flex-wrap items-center gap-2"
@@ -249,6 +268,9 @@ export const KpiTrendChart: React.FC<KpiTrendChartProps> = ({ fiches, totalUnfil
                 {metricMode === 'pipeline' && (
                   <>
                     <span className="text-stone-900">Total {activePoint.totalFiches}</span>
+                    {activePoint.newFiches > 0 && (
+                      <span className="text-sky-700 font-semibold">+{activePoint.newFiches} nouv.</span>
+                    )}
                     <span className="text-orange-700">Qualifiés {activePoint.qualified}</span>
                     <span className="text-emerald-700">Signés {activePoint.signed}</span>
                   </>
@@ -271,12 +293,12 @@ export const KpiTrendChart: React.FC<KpiTrendChartProps> = ({ fiches, totalUnfil
             )}
           </div>
 
-          {/* Graphique SVG interactif responsive */}
           {fiches.length === 0 ? (
             <div className="h-44 flex items-center justify-center text-xs text-stone-500 border border-dashed border-stone-200 rounded-lg">
-              Aucune fiche dans la sélection actuelle pour tracer la tendance KPI.
+              Aucune fiche dans la sélection actuelle pour tracer les indicateurs KPI.
             </div>
-          ) : (
+          ) : isTimeSeriesMode ? (
+            /* GRAPHIQUE SVG TEMPOREL (Pipeline + Vélocité / Maturité % / Segments) */
             <div className="w-full overflow-x-auto">
               <svg
                 viewBox={`0 0 ${width} ${height}`}
@@ -325,13 +347,32 @@ export const KpiTrendChart: React.FC<KpiTrendChartProps> = ({ fiches, totalUnfil
                   </g>
                 ))}
 
-                {/* Mode 1 : Pipeline & Conversion */}
+                {/* Mode 1 : Pipeline & Conversion + Barres de vélocité d'acquisition */}
                 {metricMode === 'pipeline' && (() => {
                   const totalCoords = points.map((p, i) => ({ x: xFor(i), y: yFor(p.totalFiches) }));
                   const qualCoords = points.map((p, i) => ({ x: xFor(i), y: yFor(p.qualified) }));
                   const signedCoords = points.map((p, i) => ({ x: xFor(i), y: yFor(p.signed) }));
                   return (
                     <>
+                      {/* Barres subtiles d'acquisitions par période (vélocité) */}
+                      {points.map((p, i) => {
+                        if (p.newFiches <= 0) return null;
+                        const barH = Math.max(4, (p.newFiches / maxNewInBucket) * (plotH * 0.34));
+                        const barW = 14;
+                        return (
+                          <rect
+                            key={`vel-${p.dateKey}`}
+                            x={xFor(i) - barW / 2}
+                            y={baselineY - barH}
+                            width={barW}
+                            height={barH}
+                            rx="3"
+                            fill="#0284c7"
+                            opacity="0.18"
+                          />
+                        );
+                      })}
+
                       <path d={buildAreaPath(totalCoords, baselineY)} fill="url(#stoneAreaGrad)" />
                       <path d={buildAreaPath(qualCoords, baselineY)} fill="url(#orangeAreaGrad)" />
                       <path d={buildAreaPath(signedCoords, baselineY)} fill="url(#emeraldAreaGrad)" />
@@ -515,7 +556,7 @@ export const KpiTrendChart: React.FC<KpiTrendChartProps> = ({ fiches, totalUnfil
                         className="cursor-pointer"
                         tabIndex={0}
                         role="button"
-                        aria-label={`Point ${p.label} : ${p.totalFiches} fiches, ${p.qualified} qualifiées, ${p.signed} signées, maturité ${p.avgMaturity}%`}
+                        aria-label={`Point ${p.label} : ${p.totalFiches} fiches, +${p.newFiches} nouvelles, ${p.qualified} qualifiées, ${p.signed} signées, maturité ${p.avgMaturity}%`}
                         onMouseEnter={() => setActiveIndex(idx)}
                         onFocus={() => setActiveIndex(idx)}
                         onClick={() => setActiveIndex(idx)}
@@ -524,6 +565,230 @@ export const KpiTrendChart: React.FC<KpiTrendChartProps> = ({ fiches, totalUnfil
                   );
                 })}
               </svg>
+            </div>
+          ) : metricMode === 'funnel' ? (
+            /* MODE 4 : ENTONNOIR DE CONVERSION PIPELINE (6 ÉTAPES) */
+            <div data-testid="kpi-funnel-view" className="grid grid-cols-1 lg:grid-cols-12 gap-4 py-1">
+              <div className="lg:col-span-8 space-y-2.5">
+                {funnelStats.map((stage) => {
+                  const widthPct = Math.max(stage.count > 0 ? 6 : 0, Math.round((stage.count / maxFunnelCount) * 100));
+                  return (
+                    <div key={stage.statut} className="space-y-1">
+                      <div className="flex items-center justify-between gap-2 text-xs">
+                        <div className="flex items-center gap-2 min-w-0">
+                          <span
+                            className="w-2.5 h-2.5 rounded-xs shrink-0"
+                            style={{ backgroundColor: stage.hexColor }}
+                            aria-hidden="true"
+                          />
+                          <span className="font-semibold text-stone-900 truncate">
+                            {stage.shortLabel}
+                          </span>
+                          {!stage.isExitStage && (
+                            <span className="text-[11px] text-stone-500 tabular-nums">
+                              Passage : {stage.conversionPct}%
+                            </span>
+                          )}
+                        </div>
+                        <div className="flex items-center gap-3 text-[11px] tabular-nums shrink-0">
+                          <span className="text-stone-500">
+                            {stage.totalEffectif > 0 ? `${stage.totalEffectif} sal.` : '—'}
+                          </span>
+                          <span className="text-stone-500">Mat. {stage.avgMaturity}%</span>
+                          <span className="font-bold text-stone-900 min-w-[46px] text-right">
+                            {stage.count} ({stage.sharePct}%)
+                          </span>
+                        </div>
+                      </div>
+                      <div className="h-2.5 w-full bg-stone-100 rounded-md overflow-hidden">
+                        <div
+                          className="h-full rounded-md transition-all duration-300"
+                          style={{
+                            width: `${widthPct}%`,
+                            backgroundColor: stage.hexColor,
+                            opacity: stage.isExitStage ? 0.65 : 0.9,
+                          }}
+                        />
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+
+              <div className="lg:col-span-4 rounded-xl border border-stone-200 bg-stone-50/70 p-3.5 flex flex-col justify-between gap-3">
+                <div>
+                  <h3 className="text-xs font-bold text-stone-900">
+                    Potentiel du Tunnel Commercial
+                  </h3>
+                  <p className="text-[11px] text-stone-500 mt-0.5">
+                    Volume de lignes et qualité des comptes par stade actif.
+                  </p>
+                </div>
+                <div className="grid grid-cols-2 gap-2.5 text-xs tabular-nums">
+                  <div className="bg-white rounded-lg border border-stone-200 p-2.5">
+                    <div className="text-[11px] text-stone-500">Effectif cumulé</div>
+                    <div className="text-base font-bold text-stone-900 mt-0.5">
+                      {funnelStats.reduce((acc, s) => acc + s.totalEffectif, 0)}
+                    </div>
+                  </div>
+                  <div className="bg-white rounded-lg border border-stone-200 p-2.5">
+                    <div className="text-[11px] text-stone-500">Taux signature</div>
+                    <div className="text-base font-bold text-emerald-700 mt-0.5">
+                      {summary.totalNow > 0
+                        ? `${Math.round((summary.signedNow / summary.totalNow) * 100)}%`
+                        : '0%'}
+                    </div>
+                  </div>
+                  <div className="bg-white rounded-lg border border-stone-200 p-2.5">
+                    <div className="text-[11px] text-stone-500">En négociation</div>
+                    <div className="text-base font-bold text-orange-700 mt-0.5">
+                      {(funnelStats.find((s) => s.statut === 'RDV pris')?.count ?? 0) +
+                        (funnelStats.find((s) => s.statut === 'Devis envoyé')?.count ?? 0)}
+                    </div>
+                  </div>
+                  <div className="bg-white rounded-lg border border-stone-200 p-2.5">
+                    <div className="text-[11px] text-stone-500">À qualifier</div>
+                    <div className="text-base font-bold text-stone-900 mt-0.5">
+                      {funnelStats.find((s) => s.statut === 'À contacter')?.count ?? 0}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          ) : (
+            /* MODE 5 : VILLES, OFFRES ORANGE PRO & COUVERTURE MULTI-CONTACTS */
+            <div data-testid="kpi-cities-view" className="grid grid-cols-1 lg:grid-cols-12 gap-4 py-1">
+              {/* Top Villes */}
+              <div className="lg:col-span-5 space-y-2">
+                <h3 className="text-xs font-bold text-stone-900 flex items-center gap-1.5">
+                  <MapPin className="w-3.5 h-3.5 text-orange-600" />
+                  Répartition par Ville (Top 6)
+                </h3>
+                <div className="space-y-2">
+                  {cityOffer.topCities.map((c) => {
+                    const totalW = Math.max(8, Math.round((c.total / maxCityCount) * 100));
+                    const qualW = c.total > 0 ? Math.round((c.qualified / c.total) * 100) : 0;
+                    return (
+                      <div key={c.ville} className="space-y-1">
+                        <div className="flex items-center justify-between text-xs tabular-nums">
+                          <span className="font-medium text-stone-800 truncate">{c.ville}</span>
+                          <span className="text-[11px] text-stone-600">
+                            <strong className="text-stone-900">{c.total}</strong> ({c.sharePct}%) ·{' '}
+                            <span className="text-orange-700">{c.qualified} qual.</span>
+                          </span>
+                        </div>
+                        <div className="h-2 bg-stone-100 rounded-md overflow-hidden">
+                          <div
+                            className="h-full bg-stone-800 rounded-md relative overflow-hidden"
+                            style={{ width: `${totalW}%` }}
+                          >
+                            {qualW > 0 && (
+                              <div
+                                className="h-full bg-orange-600"
+                                style={{ width: `${qualW}%` }}
+                              />
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Mix Offres Orange Pro */}
+              <div className="lg:col-span-3 space-y-2">
+                <h3 className="text-xs font-bold text-stone-900 flex items-center gap-1.5">
+                  <Users className="w-3.5 h-3.5 text-stone-700" />
+                  Mix Offres Orange Pro
+                </h3>
+                <div className="space-y-2.5">
+                  {cityOffer.offerTiers.map((t) => (
+                    <div
+                      key={t.tier}
+                      className="rounded-lg border border-stone-200 bg-stone-50/70 p-2.5 space-y-1.5"
+                    >
+                      <div className="flex items-center justify-between text-xs tabular-nums">
+                        <span className="font-semibold text-stone-900">{t.tier}</span>
+                        <span className="font-bold text-stone-900">
+                          {t.count} <span className="font-normal text-stone-500">({t.sharePct}%)</span>
+                        </span>
+                      </div>
+                      <div className="h-1.5 bg-stone-200 rounded-full overflow-hidden">
+                        <div
+                          className="h-full rounded-full"
+                          style={{ width: `${t.sharePct}%`, backgroundColor: t.hexColor }}
+                        />
+                      </div>
+                      <div className="text-[11px] text-stone-500 tabular-nums">
+                        {t.totalEffectif} salariés cumulés
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* Couverture & Joignabilité Multi-Contacts */}
+              <div className="lg:col-span-4 space-y-2">
+                <h3 className="text-xs font-bold text-stone-900 flex items-center gap-1.5">
+                  <Phone className="w-3.5 h-3.5 text-emerald-700" />
+                  Joignabilité &amp; Multi-Contacts
+                </h3>
+                <div className="rounded-xl border border-stone-200 bg-stone-50/70 p-3 space-y-2.5 text-xs tabular-nums">
+                  {[
+                    {
+                      label: 'Téléphone vérifiable',
+                      value: cityOffer.contactability.withPhone,
+                      total: cityOffer.contactability.total,
+                      color: '#059669',
+                      extra: `${cityOffer.contactability.totalPhonesCount} n° au total`,
+                    },
+                    {
+                      label: 'Email professionnel',
+                      value: cityOffer.contactability.withEmail,
+                      total: cityOffer.contactability.total,
+                      color: '#0284c7',
+                      extra: `${cityOffer.contactability.totalEmailsCount} emails au total`,
+                    },
+                    {
+                      label: 'Décideur identifié',
+                      value: cityOffer.contactability.withDecideur,
+                      total: cityOffer.contactability.total,
+                      color: '#ea580c',
+                      extra: `${cityOffer.contactability.readyToCall} prêtes à appeler`,
+                    },
+                  ].map((row) => {
+                    const pct = row.total > 0 ? Math.round((row.value / row.total) * 100) : 0;
+                    return (
+                      <div key={row.label} className="space-y-1">
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="font-medium text-stone-800">{row.label}</span>
+                          <span className="text-stone-600">
+                            <strong className="text-stone-900">{pct}%</strong> ({row.extra})
+                          </span>
+                        </div>
+                        <div className="h-1.5 bg-stone-200 rounded-full overflow-hidden">
+                          <div
+                            className="h-full rounded-full"
+                            style={{ width: `${pct}%`, backgroundColor: row.color }}
+                          />
+                        </div>
+                      </div>
+                    );
+                  })}
+
+                  <div className="pt-2 border-t border-stone-200 flex items-center justify-between text-[11px] text-stone-600">
+                    <span className="flex items-center gap-1">
+                      <Phone className="w-3 h-3 text-stone-500" />
+                      Multi-numéros : <strong>{cityOffer.contactability.withMultiPhone}</strong>
+                    </span>
+                    <span className="flex items-center gap-1">
+                      <Mail className="w-3 h-3 text-stone-500" />
+                      Multi-emails : <strong>{cityOffer.contactability.withMultiEmail}</strong>
+                    </span>
+                  </div>
+                </div>
+              </div>
             </div>
           )}
 
@@ -537,12 +802,31 @@ export const KpiTrendChart: React.FC<KpiTrendChartProps> = ({ fiches, totalUnfil
                     Total fiches cumulées
                   </span>
                   <span className="flex items-center gap-1.5">
+                    <span className="w-2.5 h-2.5 rounded-xs bg-sky-600/25 inline-block" aria-hidden="true" />
+                    Nouvelles / période
+                  </span>
+                  <span className="flex items-center gap-1.5">
                     <span className="w-3 h-0.5 bg-orange-600 inline-block" aria-hidden="true" />
                     Qualifiés (RDV + Devis + Signés)
                   </span>
                   <span className="flex items-center gap-1.5">
                     <span className="w-3 h-0.5 bg-emerald-600 inline-block" aria-hidden="true" />
                     Signés Orange Pro
+                  </span>
+                </>
+              )}
+              {metricMode === 'funnel' && (
+                <span>Taux de passage calculés sur l&apos;entonnoir actif (À contacter → Signé Orange Pro)</span>
+              )}
+              {metricMode === 'cities' && (
+                <>
+                  <span className="flex items-center gap-1.5">
+                    <span className="w-2.5 h-2.5 rounded-xs bg-stone-800 inline-block" aria-hidden="true" />
+                    Total fiches ville
+                  </span>
+                  <span className="flex items-center gap-1.5">
+                    <span className="w-2.5 h-2.5 rounded-xs bg-orange-600 inline-block" aria-hidden="true" />
+                    Part qualifiée (RDV / Devis / Signés)
                   </span>
                 </>
               )}

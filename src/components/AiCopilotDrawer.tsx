@@ -9,6 +9,7 @@ import {
   AlertTriangle,
   ArrowRight,
   Target,
+  Activity,
 } from 'lucide-react';
 import {
   SECTEURS_META,
@@ -35,6 +36,19 @@ interface CommercialBrief {
   prochaineAction: string;
 }
 
+interface PortfolioInsights {
+  scoreSante: number;
+  constatCle: string;
+  alertePipeline: string;
+  actionsPrioritaires: string[];
+  opportunitesCibles: Array<{
+    numeroFiche: string;
+    societe: string;
+    raison: string;
+    action: string;
+  }>;
+}
+
 interface AiCopilotDrawerProps {
   open: boolean;
   onClose: () => void;
@@ -45,13 +59,14 @@ interface AiCopilotDrawerProps {
   aiModel: string;
   onOpenEmailStudio: (fiche: FicheEntreprise) => void;
   onMoveFiche: (ficheId: string, statut: StatutCRM) => void;
+  onSelectFicheForBrief?: (fiche: FicheEntreprise) => void;
 }
 
 const QUICK_PROMPTS = [
   {
     label: 'Priorités du jour',
     prompt:
-      'Analyse mon portefeuille actuel et donne-moi le top 3 des comptes à appeler en priorité aujourd’hui avec le motif précis pour chacun.',
+      'Analyse mon portefeuille actuel et donne-moi le top 3 des comptes à appeler en priorité aujourd’hui avec le motif précis et leur code OP-XXXX.',
   },
   {
     label: 'Plan Fibre & Flotte',
@@ -80,14 +95,15 @@ export const AiCopilotDrawer: React.FC<AiCopilotDrawerProps> = ({
   aiModel,
   onOpenEmailStudio,
   onMoveFiche,
+  onSelectFicheForBrief,
 }) => {
-  const [mode, setMode] = useState<'chat' | 'brief'>('chat');
+  const [mode, setMode] = useState<'chat' | 'brief' | 'diagnostic'>('chat');
   const [messages, setMessages] = useState<ChatMessage[]>([
     {
       id: 'welcome',
       role: 'assistant',
       content:
-        'Bonjour ! Je suis votre Copilote Commercial Orange Pro connecté à votre portefeuille en temps réel. Demandez-moi vos priorités d’appels, un script terrain ou ouvrez un Brief IA sur n’importe quelle fiche.',
+        'Bonjour ! Je suis votre Copilote Commercial Orange Pro connecté à votre portefeuille en temps réel. Demandez-moi vos priorités d’appels, lancez un Diagnostic IA global ou ouvrez un Brief IA sur n’importe quelle fiche.',
     },
   ]);
   const [input, setInput] = useState('');
@@ -98,6 +114,11 @@ export const AiCopilotDrawer: React.FC<AiCopilotDrawerProps> = ({
   const [briefLoading, setBriefLoading] = useState(false);
   const [briefError, setBriefError] = useState('');
   const lastBriefFicheId = useRef<string | null>(null);
+
+  const [insights, setInsights] = useState<PortfolioInsights | null>(null);
+  const [insightsLoading, setInsightsLoading] = useState(false);
+  const [insightsError, setInsightsError] = useState('');
+
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
@@ -149,6 +170,29 @@ export const AiCopilotDrawer: React.FC<AiCopilotDrawerProps> = ({
     }
   };
 
+  const loadPortfolioInsights = async () => {
+    setInsightsError('');
+    setInsightsLoading(true);
+    try {
+      const portfolioSummary = buildPortfolioAiSummary(fiches);
+      const res = await fetch('/api/ai/portfolio-insights', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ portfolioSummary }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setInsightsError(data?.error || 'Impossible de générer le Diagnostic IA.');
+        return;
+      }
+      setInsights(data.insights || null);
+    } catch {
+      setInsightsError('Erreur réseau lors du diagnostic du portefeuille.');
+    } finally {
+      setInsightsLoading(false);
+    }
+  };
+
   const handleSendChat = async (customText?: string) => {
     const text = (customText ?? input).trim();
     if (!text || isSending) return;
@@ -167,7 +211,7 @@ export const AiCopilotDrawer: React.FC<AiCopilotDrawerProps> = ({
     try {
       const portfolioSummary = buildPortfolioAiSummary(fiches);
       const focusedSummary = focusedFiche
-        ? `${focusedFiche.societe} (${SECTEURS_META[focusedFiche.secteur].label}, ${focusedFiche.ville}, statut: ${focusedFiche.statut}, contact: ${focusedFiche.contact || 'absent'}, effectif: ${focusedFiche.effectif || 'N/A'})`
+        ? `[${focusedFiche.numeroFiche || 'N/A'}] ${focusedFiche.societe} (${SECTEURS_META[focusedFiche.secteur].label}, ${focusedFiche.ville}, statut: ${focusedFiche.statut}, contact: ${focusedFiche.contact || 'absent'}, effectif: ${focusedFiche.effectif || 'N/A'})`
         : '';
 
       const res = await fetch('/api/ai/chat', {
@@ -239,34 +283,46 @@ export const AiCopilotDrawer: React.FC<AiCopilotDrawerProps> = ({
           </button>
         </div>
 
-        {/* Sélecteur de mode : Assistant Pipeline vs Brief Fiche */}
+        {/* Sélecteur de mode : Assistant Pipeline / Diagnostic IA / Brief Fiche */}
         <div className="px-4 py-2 border-b border-stone-100 bg-stone-50/70 flex items-center justify-between gap-2">
           <div className="inline-flex p-0.5 bg-stone-200/70 rounded-lg">
             <button
               type="button"
               onClick={() => setMode('chat')}
-              className={`px-3 py-1 rounded-md text-xs font-semibold transition-colors ${
+              className={`px-2.5 py-1 rounded-md text-xs font-semibold transition-colors ${
                 mode === 'chat'
                   ? 'bg-white text-stone-900 shadow-xs'
                   : 'text-stone-600 hover:text-stone-900'
               }`}
             >
-              Assistant Pipeline
+              Assistant
+            </button>
+            <button
+              type="button"
+              data-testid="copilot-tab-diagnostic"
+              onClick={() => setMode('diagnostic')}
+              className={`px-2.5 py-1 rounded-md text-xs font-semibold transition-colors ${
+                mode === 'diagnostic'
+                  ? 'bg-white text-stone-900 shadow-xs'
+                  : 'text-stone-600 hover:text-stone-900'
+              }`}
+            >
+              Diagnostic IA
             </button>
             <button
               type="button"
               onClick={() => setMode('brief')}
-              className={`px-3 py-1 rounded-md text-xs font-semibold transition-colors ${
+              className={`px-2.5 py-1 rounded-md text-xs font-semibold transition-colors ${
                 mode === 'brief'
                   ? 'bg-white text-stone-900 shadow-xs'
                   : 'text-stone-600 hover:text-stone-900'
               }`}
             >
-              Brief Fiche IA
+              Brief Fiche
             </button>
           </div>
-          <span className="text-[11px] text-stone-500 tabular-nums">
-            {fiches.length} comptes synchronisés
+          <span className="text-[11px] text-stone-500 tabular-nums shrink-0">
+            {fiches.length} comptes
           </span>
         </div>
 
@@ -274,7 +330,6 @@ export const AiCopilotDrawer: React.FC<AiCopilotDrawerProps> = ({
         {mode === 'chat' && (
           <>
             <div className="flex-1 overflow-y-auto p-4 space-y-3">
-              {/* Raccourcis de prompts métier */}
               <div className="grid grid-cols-2 gap-1.5 pb-2 border-b border-stone-100">
                 {QUICK_PROMPTS.map((qp) => (
                   <button
@@ -341,7 +396,7 @@ export const AiCopilotDrawer: React.FC<AiCopilotDrawerProps> = ({
                 type="text"
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
-                placeholder="Ex. Quel argumentaire pour Clinique Privée Atlas ?"
+                placeholder="Ex. Quel argumentaire pour OP-0002 ?"
                 aria-label="Message au Copilote Commercial IA"
                 className="flex-1 px-3 py-2 rounded-lg border border-stone-300 text-xs focus:outline-none focus:border-orange-500"
               />
@@ -357,7 +412,196 @@ export const AiCopilotDrawer: React.FC<AiCopilotDrawerProps> = ({
           </>
         )}
 
-        {/* MODE 2 : BRIEF COMMERCIAL IA (BATTLECARD) */}
+        {/* MODE 2 : DIAGNOSTIC IA EXÉCUTIF DU PORTEFEUILLE */}
+        {mode === 'diagnostic' && (
+          <div data-testid="copilot-diagnostic-panel" className="flex-1 overflow-y-auto p-4 space-y-4">
+            <div className="flex items-center justify-between gap-2">
+              <div>
+                <h3 className="text-sm font-bold text-stone-900 flex items-center gap-1.5">
+                  <Activity className="w-4 h-4 text-orange-600" />
+                  Audit Exécutif Portefeuille
+                </h3>
+                <p className="text-[11px] text-stone-500">
+                  Score de santé, goulots pipeline et top comptes à attaquer maintenant.
+                </p>
+              </div>
+              <button
+                type="button"
+                disabled={insightsLoading || fiches.length === 0}
+                onClick={() => void loadPortfolioInsights()}
+                className="px-2.5 py-1.5 rounded-lg bg-stone-900 hover:bg-stone-800 disabled:opacity-50 text-white text-xs font-semibold flex items-center gap-1.5 shrink-0"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${insightsLoading ? 'animate-spin' : ''}`} />
+                {insights ? 'Actualiser' : 'Lancer Audit IA'}
+              </button>
+            </div>
+
+            {insightsLoading && (
+              <div className="py-10 text-center space-y-2">
+                <Sparkles className="w-5 h-5 text-orange-600 animate-spin mx-auto" />
+                <p className="text-xs text-stone-600 font-medium">
+                  Diagnostic commercial Gemini sur vos {fiches.length} comptes...
+                </p>
+              </div>
+            )}
+
+            {insightsError && (
+              <div
+                role="alert"
+                className="rounded-lg bg-red-50 border border-red-200 p-3 text-xs text-red-800 flex items-start gap-2"
+              >
+                <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5 text-red-600" />
+                <span>{insightsError}</span>
+              </div>
+            )}
+
+            {/* Synthèse instantanée locale du portefeuille (toujours disponible sans latence) */}
+            {fiches.length > 0 && (() => {
+              const qualifiedCount = fiches.filter((f) => Boolean(f.telephone && f.email)).length;
+              const multiContactCount = fiches.filter(
+                (f) =>
+                  (f.telephonesSupplementaires?.length ?? 0) > 0 ||
+                  (f.emailsSupplementaires?.length ?? 0) > 0
+              ).length;
+              const advancedCount = fiches.filter(
+                (f) => f.statut === 'RDV pris' || f.statut === 'Devis envoyé' || f.statut === 'Signé Orange Pro'
+              ).length;
+              const incompleteCount = fiches.filter((f) => !f.telephone || !f.email).length;
+              return (
+                <div className="grid grid-cols-2 gap-2 text-xs">
+                  <div className="rounded-lg border border-stone-200 bg-stone-50 p-2.5">
+                    <div className="text-[11px] text-stone-500">Fiches joignables</div>
+                    <div className="text-base font-bold font-mono text-stone-900 tabular-nums">
+                      {qualifiedCount}
+                      <span className="text-[11px] font-normal text-stone-400">/{fiches.length}</span>
+                    </div>
+                  </div>
+                  <div className="rounded-lg border border-stone-200 bg-stone-50 p-2.5">
+                    <div className="text-[11px] text-stone-500">Pipeline avancé</div>
+                    <div className="text-base font-bold font-mono text-orange-600 tabular-nums">
+                      {advancedCount}
+                      <span className="text-[11px] font-normal text-stone-400"> RDV/Devis/Signés</span>
+                    </div>
+                  </div>
+                  <div className="rounded-lg border border-stone-200 bg-stone-50 p-2.5">
+                    <div className="text-[11px] text-stone-500">Multi-contacts</div>
+                    <div className="text-base font-bold font-mono text-emerald-700 tabular-nums">
+                      {multiContactCount}
+                      <span className="text-[11px] font-normal text-stone-400"> comptes</span>
+                    </div>
+                  </div>
+                  <div className="rounded-lg border border-stone-200 bg-stone-50 p-2.5">
+                    <div className="text-[11px] text-stone-500">À enrichir</div>
+                    <div className="text-base font-bold font-mono text-amber-700 tabular-nums">
+                      {incompleteCount}
+                      <span className="text-[11px] font-normal text-stone-400"> incomplètes</span>
+                    </div>
+                  </div>
+                </div>
+              );
+            })()}
+
+            {!insights && !insightsLoading && !insightsError && (
+              <div className="rounded-xl border border-dashed border-stone-300 p-5 text-center space-y-2">
+                <Activity className="w-6 h-6 text-stone-400 mx-auto" />
+                <p className="text-xs text-stone-600">
+                  Cliquez sur « Lancer Audit IA » pour obtenir une analyse stratégique Gemini et le plan d&apos;attaque chiffré sur vos {fiches.length} comptes.
+                </p>
+              </div>
+            )}
+
+            {insights && !insightsLoading && (
+              <div className="space-y-3.5 text-xs">
+                <div className="rounded-xl border border-stone-200 bg-stone-50 p-3.5 flex items-center justify-between gap-4">
+                  <div className="space-y-1">
+                    <div className="text-[11px] font-semibold text-stone-500">Score de Santé Pipeline</div>
+                    <p className="text-stone-800 leading-relaxed">{insights.constatCle}</p>
+                  </div>
+                  <div className="text-right shrink-0">
+                    <div
+                      className={`text-2xl font-bold font-mono tabular-nums ${
+                        insights.scoreSante >= 75
+                          ? 'text-emerald-700'
+                          : insights.scoreSante >= 50
+                          ? 'text-orange-600'
+                          : 'text-red-600'
+                      }`}
+                    >
+                      {Math.max(0, Math.min(100, Number(insights.scoreSante) || 0))}
+                      <span className="text-xs text-stone-400">/100</span>
+                    </div>
+                  </div>
+                </div>
+
+                {insights.alertePipeline && (
+                  <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-amber-950 space-y-0.5">
+                    <div className="text-[11px] font-bold text-amber-900">Point de vigilance pipeline</div>
+                    <p className="leading-relaxed">{insights.alertePipeline}</p>
+                  </div>
+                )}
+
+                {insights.actionsPrioritaires?.length > 0 && (
+                  <div className="space-y-1.5">
+                    <h4 className="font-bold text-stone-900">Actions prioritaires cette semaine</h4>
+                    <ul className="space-y-1.5 text-stone-700">
+                      {insights.actionsPrioritaires.map((act, idx) => (
+                        <li key={idx} className="flex items-start gap-2">
+                          <span className="font-mono font-bold text-orange-600 shrink-0">
+                            0{idx + 1}.
+                          </span>
+                          <span>{act}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+
+                {insights.opportunitesCibles?.length > 0 && (
+                  <div className="space-y-2">
+                    <h4 className="font-bold text-stone-900">Comptes cibles prioritaires</h4>
+                    {insights.opportunitesCibles.map((opp, idx) => {
+                      const matched = fiches.find(
+                        (f) =>
+                          (opp.numeroFiche && f.numeroFiche?.toUpperCase() === opp.numeroFiche.toUpperCase()) ||
+                          f.societe.toLowerCase() === opp.societe.toLowerCase()
+                      );
+                      return (
+                        <div
+                          key={idx}
+                          className="rounded-lg border border-stone-200 bg-white p-3 space-y-1"
+                        >
+                          <div className="flex items-center justify-between gap-2">
+                            <div className="font-bold text-stone-900 truncate">
+                              {opp.numeroFiche && (
+                                <span className="font-mono text-[11px] text-orange-700 mr-1.5">
+                                  {opp.numeroFiche}
+                                </span>
+                              )}
+                              {opp.societe}
+                            </div>
+                            {matched && onSelectFicheForBrief && (
+                              <button
+                                type="button"
+                                onClick={() => onSelectFicheForBrief(matched)}
+                                className="text-[11px] font-semibold text-orange-700 hover:underline shrink-0"
+                              >
+                                Brief IA →
+                              </button>
+                            )}
+                          </div>
+                          <p className="text-stone-600">{opp.raison}</p>
+                          <p className="text-emerald-800 font-medium">Action : {opp.action}</p>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* MODE 3 : BRIEF COMMERCIAL IA (BATTLECARD) */}
         {mode === 'brief' && (
           <div className="flex-1 overflow-y-auto p-4 space-y-4">
             {!focusedFiche ? (
@@ -375,7 +619,14 @@ export const AiCopilotDrawer: React.FC<AiCopilotDrawerProps> = ({
                 <div className="rounded-xl border border-stone-200 bg-stone-50 p-3.5 space-y-1.5">
                   <div className="flex items-start justify-between gap-2">
                     <div>
-                      <h3 className="text-sm font-bold text-stone-900">{focusedFiche.societe}</h3>
+                      <div className="flex items-center gap-2">
+                        {focusedFiche.numeroFiche && (
+                          <span className="font-mono text-[11px] font-bold text-orange-700">
+                            {focusedFiche.numeroFiche}
+                          </span>
+                        )}
+                        <h3 className="text-sm font-bold text-stone-900">{focusedFiche.societe}</h3>
+                      </div>
                       <p className="text-xs text-stone-500">
                         {SECTEURS_META[focusedFiche.secteur].label} · {focusedFiche.ville || 'Maroc'} · Statut : {focusedFiche.statut}
                       </p>

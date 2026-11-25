@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import type { FicheEntreprise } from '../App';
 import {
   buildKpiTrendSeries,
+  buildPipelineFunnelStats,
+  buildCityAndOfferBreakdown,
   groupFichesByStatut,
   moveFicheToStatut,
   buildPortfolioAiSummary,
@@ -130,3 +132,35 @@ test('buildPortfolioAiSummary outputs structured real portfolio snapshot for AI 
   assert.match(summary, /Signé Orange Pro: 1/);
   assert.match(summary, /Meknès \(2\)/);
 });
+
+test('buildPipelineFunnelStats computes stage shares, headcount, and conversion rates', () => {
+  const funnel = buildPipelineFunnelStats(sampleFiches);
+  assert.equal(funnel.length, 6);
+  const signed = funnel.find((s) => s.statut === 'Signé Orange Pro')!;
+  assert.equal(signed.count, 1);
+  assert.equal(signed.sharePct, 25);
+  assert.equal(signed.totalEffectif, 48);
+  assert.equal(signed.conversionPct, 50); // 1 signed out of 2 reaching Devis envoyé+
+});
+
+test('buildCityAndOfferBreakdown aggregates cities, offer tiers, and multi-contact totals', () => {
+  const enrichedSample: FicheEntreprise[] = [
+    {
+      ...sampleFiches[0],
+      numeroFiche: 'OP-0001',
+      telephonesSupplementaires: ['0661223344'],
+      emailsSupplementaires: ['k.bennani@fiduciaire-atlas.ma'],
+    },
+    ...sampleFiches.slice(1),
+  ];
+  const res = buildCityAndOfferBreakdown(enrichedSample);
+  assert.equal(res.topCities[0].ville, 'Meknès');
+  assert.equal(res.topCities[0].total, 2);
+  assert.equal(res.topCities[0].qualified, 2);
+  assert.equal(res.contactability.withMultiPhone, 1);
+  assert.equal(res.contactability.withMultiEmail, 1);
+  assert.equal(res.contactability.totalPhonesCount, 5);
+  assert.equal(res.contactability.totalEmailsCount, 4);
+  assert.equal(res.offerTiers.find((t) => t.tier === 'Grand Compte')?.count, 2); // f2 (48) + f4 (32)
+});
+

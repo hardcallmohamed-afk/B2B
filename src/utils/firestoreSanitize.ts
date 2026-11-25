@@ -27,11 +27,14 @@ export const VALID_STATUT_VALUES = new Set([
 
 export interface FicheLike {
   id: string;
+  numeroFiche?: string;
   societe: string;
   secteur: string;
   ville: string;
   telephone: string;
+  telephonesSupplementaires?: string[];
   email: string;
+  emailsSupplementaires?: string[];
   contact: string;
   role: string;
   source: string;
@@ -75,11 +78,14 @@ export interface SanitizedWorkspaceDoc {
 export interface SanitizedFicheDoc {
   ownerId: string;
   id: string;
+  numeroFiche?: string;
   societe: string;
   secteur: string;
   ville: string;
   telephone: string;
+  telephonesSupplementaires?: string[];
   email: string;
+  emailsSupplementaires?: string[];
   contact: string;
   role: string;
   source: string;
@@ -112,6 +118,12 @@ export function sanitizeDocId(rawId: unknown, fallbackPrefix = 'doc'): string {
   const cleaned = base.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 128);
   if (cleaned.length >= 1) return cleaned;
   return `${fallbackPrefix}_${Date.now().toString(36)}`;
+}
+
+export function sanitizeNumeroFiche(raw: unknown): string | undefined {
+  if (typeof raw !== 'string') return undefined;
+  const cleaned = raw.trim().toUpperCase().replace(/[^A-Z0-9_-]/g, '').slice(0, 32);
+  return cleaned.length >= 1 ? cleaned : undefined;
 }
 
 function sanitizeStringArray(arr: unknown, maxItems: number, maxItemLen: number): string[] {
@@ -151,6 +163,7 @@ export function sanitizeWorkspacePayload(ownerId: string, input: WorkspaceLike):
 export function sanitizeFichePayload(ownerId: string, fiche: FicheLike): SanitizedFicheDoc {
   const cleanOwnerId = sanitizeDocId(ownerId, 'user');
   const cleanId = sanitizeDocId(fiche.id, 'op');
+  const cleanNumero = sanitizeNumeroFiche(fiche.numeroFiche);
   const rawSociete = clampString(fiche.societe?.trim?.() ?? '', 200);
   const societe = rawSociete.length >= 1 ? rawSociete : 'Entreprise sans nom';
   const secteur = VALID_SECTEUR_CODES.has(fiche.secteur as never) ? fiche.secteur : 'pme';
@@ -173,6 +186,15 @@ export function sanitizeFichePayload(ownerId: string, fiche: FicheLike): Sanitiz
     dateAjout,
   };
 
+  if (cleanNumero) {
+    doc.numeroFiche = cleanNumero;
+  }
+  if (Array.isArray(fiche.telephonesSupplementaires)) {
+    doc.telephonesSupplementaires = sanitizeStringArray(fiche.telephonesSupplementaires, 10, 30);
+  }
+  if (Array.isArray(fiche.emailsSupplementaires)) {
+    doc.emailsSupplementaires = sanitizeStringArray(fiche.emailsSupplementaires, 10, 160);
+  }
   if (typeof fiche.siteWeb === 'string') {
     doc.siteWeb = clampString(fiche.siteWeb, 500);
   }

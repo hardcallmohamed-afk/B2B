@@ -7,6 +7,10 @@ import {
   Sparkles,
   Bot,
   Users,
+  Globe,
+  Plus,
+  ChevronLeft,
+  ChevronRight,
 } from 'lucide-react';
 import {
   SECTEURS_META,
@@ -25,6 +29,8 @@ interface KanbanBoardProps {
   onOpenEmail: (fiche: FicheEntreprise) => void;
   onVerifyOne: (fiche: FicheEntreprise) => void;
   onOpenAiBrief: (fiche: FicheEntreprise) => void;
+  onOpenAssist?: (fiche: FicheEntreprise) => void;
+  onQuickAddInStage?: (statut: StatutCRM) => void;
 }
 
 export const KanbanBoard: React.FC<KanbanBoardProps> = ({
@@ -34,6 +40,8 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
   onOpenEmail,
   onVerifyOne,
   onOpenAiBrief,
+  onOpenAssist,
+  onQuickAddInStage,
 }) => {
   const [draggingId, setDraggingId] = useState<string | null>(null);
   const [dragOverStage, setDragOverStage] = useState<StatutCRM | null>(null);
@@ -81,7 +89,7 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
             Pipeline Commercial Kanban — Glisser-Déposer
           </h2>
           <p className="text-xs text-stone-500">
-            Glissez une carte d&apos;une colonne à l&apos;autre (ou utilisez le sélecteur d&apos;étape) pour mettre à jour le statut CRM et la tendance KPI.
+            Glissez une carte d&apos;une colonne à l&apos;autre (ou utilisez les flèches rapides / le sélecteur) pour mettre à jour le statut CRM, Firestore et les graphiques KPI.
           </p>
         </div>
         <div className="text-xs text-stone-500 tabular-nums">
@@ -91,8 +99,11 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
 
       <div className="overflow-x-auto pb-2">
         <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-6 gap-3 min-w-0 xl:min-w-[1260px] items-start">
-          {columns.map((col) => {
+          {columns.map((col, colIndex) => {
             const isOver = dragOverStage === col.meta.statut;
+            const prevStage = colIndex > 0 ? KANBAN_STAGES[colIndex - 1].statut : null;
+            const nextStage = colIndex < KANBAN_STAGES.length - 1 ? KANBAN_STAGES[colIndex + 1].statut : null;
+
             return (
               <div
                 key={col.meta.statut}
@@ -123,12 +134,25 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
                     <h3 className={`text-xs font-bold truncate ${col.meta.badgeTextCls}`}>
                       {col.meta.shortLabel}
                     </h3>
-                    <span
-                      data-testid={`kanban-count-${col.meta.statut}`}
-                      className="text-xs font-bold text-stone-900 tabular-nums shrink-0"
-                    >
-                      {col.items.length}
-                    </span>
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      <span
+                        data-testid={`kanban-count-${col.meta.statut}`}
+                        className="text-xs font-bold text-stone-900 tabular-nums"
+                      >
+                        {col.items.length}
+                      </span>
+                      {onQuickAddInStage && (
+                        <button
+                          type="button"
+                          onClick={() => onQuickAddInStage(col.meta.statut)}
+                          aria-label={`Ajouter une fiche dans ${col.meta.shortLabel}`}
+                          title={`Nouvelle fiche dans ${col.meta.shortLabel}`}
+                          className="p-0.5 rounded hover:bg-stone-200/80 text-stone-600 hover:text-stone-900"
+                        >
+                          <Plus className="w-3.5 h-3.5" />
+                        </button>
+                      )}
+                    </div>
                   </div>
                   <div className="flex items-center justify-between gap-2 mt-1 text-[11px] text-stone-500 tabular-nums">
                     <span className="flex items-center gap-1">
@@ -159,6 +183,8 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
                       const mat = computeMaturityScore(f);
                       const isDragging = draggingId === f.id;
                       const waPhone = f.telephone ? `212${f.telephone.replace(/^0/, '')}` : '';
+                      const extraPhonesCount = f.telephonesSupplementaires?.length || 0;
+                      const extraEmailsCount = f.emailsSupplementaires?.length || 0;
 
                       return (
                         <article
@@ -176,23 +202,32 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
                             aria-hidden="true"
                           />
 
-                          {/* Titre + poignée drag */}
-                          <div className="flex items-start justify-between gap-1.5 pt-0.5">
-                            <h4 className="text-xs font-bold text-stone-900 leading-snug line-clamp-2">
-                              {f.societe}
-                            </h4>
+                          {/* Numéro fiche unique + poignée drag */}
+                          <div className="flex items-center justify-between gap-1.5 pt-0.5">
+                            {f.numeroFiche ? (
+                              <span className="font-mono text-[10px] font-bold text-stone-500 tracking-tight">
+                                {f.numeroFiche}
+                              </span>
+                            ) : (
+                              <span />
+                            )}
                             <GripVertical
-                              className="w-3.5 h-3.5 text-stone-400 shrink-0 mt-0.5"
+                              className="w-3.5 h-3.5 text-stone-400 shrink-0"
                               aria-hidden="true"
                             />
                           </div>
+
+                          {/* Titre société */}
+                          <h4 className="text-xs font-bold text-stone-900 leading-snug line-clamp-2 mt-0.5">
+                            {f.societe}
+                          </h4>
 
                           {/* Métadonnées propres sans pilules */}
                           <p className="text-[11px] text-stone-500 mt-1 truncate">
                             {f.ville || 'Maroc'} · {secMeta.label}
                           </p>
 
-                          {/* Décideur & Téléphone */}
+                          {/* Décideur, Téléphone & Multi-contacts */}
                           <div className="mt-2 pt-2 border-t border-stone-100 space-y-0.5 text-[11px]">
                             <div className="flex items-center justify-between gap-2">
                               <span className="text-stone-700 font-medium truncate">
@@ -204,12 +239,24 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
                                 </span>
                               )}
                             </div>
-                            <div className="flex items-center justify-between gap-2 text-stone-600 font-mono tabular-nums">
-                              <span className="truncate">{f.telephone || 'Tél. manquant'}</span>
+                            <div className="flex items-center justify-between gap-1.5 text-stone-600 font-mono tabular-nums">
+                              <span className="truncate">
+                                {f.telephone || 'Tél. manquant'}
+                                {extraPhonesCount > 0 && (
+                                  <span className="font-sans text-[10px] font-semibold text-stone-500 ml-1">
+                                    (+{extraPhonesCount})
+                                  </span>
+                                )}
+                              </span>
                               <span className="font-sans text-[10px] font-semibold text-orange-700 shrink-0">
                                 {reco.tier}
                               </span>
                             </div>
+                            {extraEmailsCount > 0 && (
+                              <div className="text-[10px] text-stone-500 truncate">
+                                {f.email} (+{extraEmailsCount} email{extraEmailsCount > 1 ? 's' : ''})
+                              </div>
+                            )}
                           </div>
 
                           {/* Barre de maturité */}
@@ -231,7 +278,7 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
                             </span>
                           </div>
 
-                          {/* Actions rapides + Déplacement accessible */}
+                          {/* Actions rapides + Déplacement 1-clic & sélecteur accessible */}
                           <div className="mt-2.5 pt-2 border-t border-stone-100 space-y-1.5">
                             <div className="flex items-center justify-between gap-1">
                               <div className="flex items-center gap-0.5">
@@ -276,6 +323,17 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
                                 >
                                   <Sparkles className={`w-3.5 h-3.5 ${verifyingId === f.id ? 'animate-spin' : ''}`} />
                                 </button>
+                                {onOpenAssist && (
+                                  <button
+                                    type="button"
+                                    onClick={() => onOpenAssist(f)}
+                                    aria-label={`Enrichissement Assisté ${f.societe}`}
+                                    title="Enrichissement Assisté (Coller Google / IA)"
+                                    className="p-1 rounded hover:bg-stone-100 text-stone-600 hover:text-stone-900"
+                                  >
+                                    <Globe className="w-3.5 h-3.5" />
+                                  </button>
+                                )}
                               </div>
                               <button
                                 type="button"
@@ -289,18 +347,42 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
                               </button>
                             </div>
 
-                            <select
-                              aria-label={`Déplacer ${f.societe} vers une étape`}
-                              value={f.statut}
-                              onChange={(e) => onMoveFiche(f.id, e.target.value as StatutCRM)}
-                              className="w-full text-[11px] font-medium bg-stone-50 border border-stone-200 rounded-md px-2 py-1 text-stone-700 focus:outline-none focus:border-orange-500"
-                            >
-                              {KANBAN_STAGES.map((s) => (
-                                <option key={s.statut} value={s.statut}>
-                                  {s.shortLabel}
-                                </option>
-                              ))}
-                            </select>
+                            <div className="flex items-center gap-1">
+                              {prevStage && (
+                                <button
+                                  type="button"
+                                  onClick={() => onMoveFiche(f.id, prevStage)}
+                                  aria-label={`Reculer ${f.societe} vers ${prevStage}`}
+                                  title={`Déplacer vers « ${prevStage} »`}
+                                  className="p-1 rounded border border-stone-200 bg-stone-50 hover:bg-stone-200 text-stone-600 shrink-0"
+                                >
+                                  <ChevronLeft className="w-3 h-3" />
+                                </button>
+                              )}
+                              <select
+                                aria-label={`Déplacer ${f.societe} vers une étape`}
+                                value={f.statut}
+                                onChange={(e) => onMoveFiche(f.id, e.target.value as StatutCRM)}
+                                className="flex-1 min-w-0 text-[11px] font-medium bg-stone-50 border border-stone-200 rounded-md px-1.5 py-1 text-stone-700 focus:outline-none focus:border-orange-500"
+                              >
+                                {KANBAN_STAGES.map((s) => (
+                                  <option key={s.statut} value={s.statut}>
+                                    {s.shortLabel}
+                                  </option>
+                                ))}
+                              </select>
+                              {nextStage && (
+                                <button
+                                  type="button"
+                                  onClick={() => onMoveFiche(f.id, nextStage)}
+                                  aria-label={`Avancer ${f.societe} vers ${nextStage}`}
+                                  title={`Déplacer vers « ${nextStage} »`}
+                                  className="p-1 rounded border border-stone-200 bg-stone-50 hover:bg-orange-100 hover:border-orange-300 text-stone-700 hover:text-orange-800 shrink-0"
+                                >
+                                  <ChevronRight className="w-3 h-3" />
+                                </button>
+                              )}
+                            </div>
                           </div>
                         </article>
                       );

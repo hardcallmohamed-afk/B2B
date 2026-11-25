@@ -37,6 +37,7 @@ import {
   Table2,
   Cloud,
   LogOut,
+  ClipboardPaste,
 } from 'lucide-react';
 import { onAuthStateChanged, type User } from 'firebase/auth';
 import { doc, onSnapshot, query, where } from 'firebase/firestore';
@@ -44,6 +45,15 @@ import { KpiTrendChart } from './components/KpiTrendChart';
 import { KanbanBoard } from './components/KanbanBoard';
 import { AiCopilotDrawer } from './components/AiCopilotDrawer';
 import { moveFicheToStatut } from './utils/analytics';
+import {
+  extractAllFromAssistedPaste,
+  extractAllMoroccanPhones,
+  extractAllEmails,
+  mergeMultiPhones,
+  mergeMultiEmails,
+  generateNextNumeroFiche,
+  ensureUniqueNumeroFiches,
+} from './utils/pasteExtractor';
 import {
   auth,
   db,
@@ -99,11 +109,14 @@ export type StatutCRM =
 
 export interface FicheEntreprise {
   id: string;
+  numeroFiche?: string;
   societe: string;
   secteur: SecteurCode;
   ville: string;
   telephone: string;
+  telephonesSupplementaires?: string[];
   email: string;
+  emailsSupplementaires?: string[];
   contact: string;
   role: string;
   source: string;
@@ -1154,11 +1167,16 @@ export function mergeFicheGroup(group: FicheEntreprise[]): FicheEntreprise {
   if (base.source) sources.add(base.source);
 
   let maxEff = parseInt(base.effectif, 10) || 0;
+  const allIncomingPhones: string[] = [];
+  const allIncomingEmails: string[] = [];
 
   for (let i = 1; i < sorted.length; i++) {
     const d = sorted[i];
-    if (!base.telephone && d.telephone) base.telephone = d.telephone;
-    if (!base.email && d.email) base.email = d.email;
+    if (!base.numeroFiche && d.numeroFiche) base.numeroFiche = d.numeroFiche;
+    if (d.telephone) allIncomingPhones.push(d.telephone);
+    if (d.telephonesSupplementaires?.length) allIncomingPhones.push(...d.telephonesSupplementaires);
+    if (d.email) allIncomingEmails.push(d.email);
+    if (d.emailsSupplementaires?.length) allIncomingEmails.push(...d.emailsSupplementaires);
     if (!base.contact && d.contact) base.contact = d.contact;
     if (!base.role && d.role) base.role = d.role;
     if (!base.ville && d.ville) base.ville = d.ville;
@@ -1167,6 +1185,16 @@ export function mergeFicheGroup(group: FicheEntreprise[]): FicheEntreprise {
     if (eff > maxEff) maxEff = eff;
     if (d.source) sources.add(d.source);
   }
+
+  const mergedPhones = mergeMultiPhones(base.telephone, base.telephonesSupplementaires, allIncomingPhones);
+  base.telephone = mergedPhones.primary;
+  if (mergedPhones.extras.length > 0) base.telephonesSupplementaires = mergedPhones.extras;
+  else delete base.telephonesSupplementaires;
+
+  const mergedEmails = mergeMultiEmails(base.email, base.emailsSupplementaires, allIncomingEmails);
+  base.email = mergedEmails.primary;
+  if (mergedEmails.extras.length > 0) base.emailsSupplementaires = mergedEmails.extras;
+  else delete base.emailsSupplementaires;
 
   base.effectif = maxEff > 0 ? String(maxEff) : '';
   base.source = Array.from(sources).join(' + ');
@@ -1185,11 +1213,14 @@ export function createInitialPortfolio(): FicheEntreprise[] {
   return [
     {
       id: 'mk-1',
+      numeroFiche: 'OP-0001',
       societe: 'Fiduciaire Ismailia Expertise',
       secteur: 'fiduciaire',
       ville: 'Meknès',
       telephone: '0535521840',
+      telephonesSupplementaires: ['0661224580'],
       email: 'contact@fiduciaire-ismailia.ma',
+      emailsSupplementaires: ['k.bennani@fiduciaire-ismailia.ma'],
       contact: 'Khalid Bennani',
       role: 'Expert-Comptable',
       source: 'Pages Jaunes',
@@ -1200,10 +1231,12 @@ export function createInitialPortfolio(): FicheEntreprise[] {
     },
     {
       id: 'mk-2',
+      numeroFiche: 'OP-0002',
       societe: 'Clinique Privée Atlas Meknès',
       secteur: 'clinique',
       ville: 'Meknès',
       telephone: '0535519022',
+      telephonesSupplementaires: ['0535519023'],
       email: 'direction@clinique-atlas-meknes.ma',
       contact: 'Dr Mohamed Tazi',
       role: 'Directeur Médical',
@@ -1214,6 +1247,7 @@ export function createInitialPortfolio(): FicheEntreprise[] {
     },
     {
       id: 'mk-3',
+      numeroFiche: 'OP-0003',
       societe: 'Étude Notariale Me Salma Chraïbi',
       secteur: 'notaire',
       ville: 'Meknès',
@@ -1228,6 +1262,7 @@ export function createInitialPortfolio(): FicheEntreprise[] {
     },
     {
       id: 'mk-4',
+      numeroFiche: 'OP-0004',
       societe: 'Saïss Promotion Immobilière',
       secteur: 'immobilier',
       ville: 'Meknès',
@@ -1242,6 +1277,7 @@ export function createInitialPortfolio(): FicheEntreprise[] {
     },
     {
       id: 'mk-5',
+      numeroFiche: 'OP-0005',
       societe: 'Riad Zitouna Palais',
       secteur: 'riad_hotellerie',
       ville: 'Meknès',
@@ -1256,6 +1292,7 @@ export function createInitialPortfolio(): FicheEntreprise[] {
     },
     {
       id: 'mk-6',
+      numeroFiche: 'OP-0006',
       societe: 'Auto-École Al Mansour',
       secteur: 'auto_ecole',
       ville: 'Meknès',
@@ -1270,6 +1307,7 @@ export function createInitialPortfolio(): FicheEntreprise[] {
     },
     {
       id: 'mk-7',
+      numeroFiche: 'OP-0007',
       societe: 'Huileries du Moyen Atlas',
       secteur: 'industrie',
       ville: 'El Hajeb',
@@ -1284,6 +1322,7 @@ export function createInitialPortfolio(): FicheEntreprise[] {
     },
     {
       id: 'mk-8',
+      numeroFiche: 'OP-0008',
       societe: 'Sogetra Travaux & BTP',
       secteur: 'btp',
       ville: 'Ifrane',
@@ -1298,6 +1337,7 @@ export function createInitialPortfolio(): FicheEntreprise[] {
     },
     {
       id: 'mk-9',
+      numeroFiche: 'OP-0009',
       societe: 'Laboratoire d’Analyses Cèdres',
       secteur: 'liberal',
       ville: 'Azrou',
@@ -1312,6 +1352,7 @@ export function createInitialPortfolio(): FicheEntreprise[] {
     },
     {
       id: 'mk-10',
+      numeroFiche: 'OP-0010',
       societe: 'Pharmacie Zerhoun',
       secteur: 'commerce',
       ville: 'Moulay Idriss Zerhoun',
@@ -1326,6 +1367,7 @@ export function createInitialPortfolio(): FicheEntreprise[] {
     },
     {
       id: 'mk-11',
+      numeroFiche: 'OP-0011',
       societe: 'STE Fiduciaire Ismailia Expertise SARL',
       secteur: 'fiduciaire',
       ville: 'Meknès',
@@ -1340,6 +1382,7 @@ export function createInitialPortfolio(): FicheEntreprise[] {
     },
     {
       id: 'mk-12',
+      numeroFiche: 'OP-0012',
       societe: 'Distribution Agro Boufekrane',
       secteur: 'gros',
       ville: 'Boufekrane',
@@ -2379,12 +2422,12 @@ export default function App() {
       const raw = window.localStorage.getItem(STORAGE_KEY_PORTFOLIO);
       if (raw !== null) {
         const parsed = JSON.parse(raw);
-        if (Array.isArray(parsed)) return parsed;
+        if (Array.isArray(parsed)) return ensureUniqueNumeroFiches(parsed);
       }
     } catch {
       // Fallback
     }
-    return createInitialPortfolio();
+    return ensureUniqueNumeroFiches(createInitialPortfolio());
   });
 
   useEffect(() => {
@@ -2538,10 +2581,16 @@ export default function App() {
 
   const [assistModalFiche, setAssistModalFiche] = useState<FicheEntreprise | null>(null);
   const [assistPasteText, setAssistPasteText] = useState('');
+  const [assistAiLoading, setAssistAiLoading] = useState(false);
+  const [assistAiSummary, setAssistAiSummary] = useState('');
+  const [assistExtraPhoneDraft, setAssistExtraPhoneDraft] = useState('');
+  const [assistExtraEmailDraft, setAssistExtraEmailDraft] = useState('');
   const [lastVerifyDiag, setLastVerifyDiag] = useState('');
 
   const [editingCell, setEditingCell] = useState<{ id: string; field: keyof FicheEntreprise } | null>(null);
   const [editDraft, setEditDraft] = useState('');
+  const [inlineAddContact, setInlineAddContact] = useState<{ id: string; type: 'phone' | 'email' } | null>(null);
+  const [inlineContactDraft, setInlineContactDraft] = useState('');
 
   // 6. Crawler Profond N1/N2
   const [crawlUrlsInput, setCrawlUrlsInput] = useState('');
@@ -2576,12 +2625,15 @@ export default function App() {
   const [pastePreview, setPastePreview] = useState<FicheEntreprise[]>([]);
   const [pasteIgnoredPhones, setPasteIgnoredPhones] = useState<string[]>([]);
   const [showQuickAdd, setShowQuickAdd] = useState(false);
+  const [quickAddStatut, setQuickAddStatut] = useState<StatutCRM>('À contacter');
   const [quickForm, setQuickForm] = useState({
     societe: '',
     secteur: 'pme' as SecteurCode,
     ville: 'Meknès',
     telephone: '',
+    telephonesSupplementaires: '',
     email: '',
+    emailsSupplementaires: '',
     contact: '',
     role: '',
     source: 'Porte à porte',
@@ -2786,11 +2838,18 @@ export default function App() {
               const d = docSnap.data();
               const clean = sanitizeFichePayload(uid, {
                 id: docSnap.id,
+                numeroFiche: typeof d.numeroFiche === 'string' ? d.numeroFiche : undefined,
                 societe: typeof d.societe === 'string' ? d.societe : '',
                 secteur: typeof d.secteur === 'string' ? d.secteur : 'pme',
                 ville: typeof d.ville === 'string' ? d.ville : '',
                 telephone: typeof d.telephone === 'string' ? d.telephone : '',
+                telephonesSupplementaires: Array.isArray(d.telephonesSupplementaires)
+                  ? d.telephonesSupplementaires
+                  : undefined,
                 email: typeof d.email === 'string' ? d.email : '',
+                emailsSupplementaires: Array.isArray(d.emailsSupplementaires)
+                  ? d.emailsSupplementaires
+                  : undefined,
                 contact: typeof d.contact === 'string' ? d.contact : '',
                 role: typeof d.role === 'string' ? d.role : '',
                 source: typeof d.source === 'string' ? d.source : '',
@@ -2807,11 +2866,18 @@ export default function App() {
               });
               remoteFiches.push({
                 id: clean.id,
+                ...(clean.numeroFiche !== undefined ? { numeroFiche: clean.numeroFiche } : {}),
                 societe: clean.societe,
                 secteur: clean.secteur as SecteurCode,
                 ville: clean.ville,
                 telephone: clean.telephone,
+                ...(clean.telephonesSupplementaires !== undefined
+                  ? { telephonesSupplementaires: clean.telephonesSupplementaires }
+                  : {}),
                 email: clean.email,
+                ...(clean.emailsSupplementaires !== undefined
+                  ? { emailsSupplementaires: clean.emailsSupplementaires }
+                  : {}),
                 contact: clean.contact,
                 role: clean.role,
                 source: clean.source,
@@ -2840,7 +2906,7 @@ export default function App() {
             }
             knownCloudFichesRef.current = nextKnown;
             if (!same) {
-              setFiches(remoteFiches);
+              setFiches(ensureUniqueNumeroFiches(remoteFiches));
             }
           },
           (err) => {
@@ -3314,7 +3380,7 @@ export default function App() {
 
       if (q) {
         const hay = stripAccents(
-          `${f.societe} ${f.secteur} ${SECTEURS_META[f.secteur]?.label} ${f.ville} ${f.telephone} ${f.email} ${f.contact} ${f.role} ${f.source}`
+          `${f.numeroFiche || ''} ${f.societe} ${f.secteur} ${SECTEURS_META[f.secteur]?.label} ${f.ville} ${f.telephone} ${(f.telephonesSupplementaires || []).join(' ')} ${f.email} ${(f.emailsSupplementaires || []).join(' ')} ${f.contact} ${f.role} ${f.source}`
         );
         if (!hay.includes(q)) return false;
       }
@@ -3444,13 +3510,39 @@ export default function App() {
       try {
         const parsed = JSON.parse(jm[0]);
         let hit = false;
-        if (!f.telephone && !patch.telephone && parsed.telephone) {
-          const p = normalizeMoroccanPhone(String(parsed.telephone));
-          if (p) { patch.telephone = p; hit = true; }
+        const incomingPhones: string[] = [];
+        if (parsed.telephone) incomingPhones.push(String(parsed.telephone));
+        if (Array.isArray(parsed.telephones)) {
+          parsed.telephones.forEach((p: unknown) => incomingPhones.push(String(p || '')));
         }
-        if (!f.email && !patch.email && parsed.email) {
-          const e = normalizeProEmail(String(parsed.email));
-          if (e) { patch.email = e; hit = true; }
+        if (incomingPhones.length > 0) {
+          const mp = mergeMultiPhones(
+            patch.telephone || f.telephone,
+            patch.telephonesSupplementaires || f.telephonesSupplementaires,
+            incomingPhones
+          );
+          if (mp.addedCount > 0) {
+            patch.telephone = mp.primary;
+            if (mp.extras.length > 0) patch.telephonesSupplementaires = mp.extras;
+            hit = true;
+          }
+        }
+        const incomingEmails: string[] = [];
+        if (parsed.email) incomingEmails.push(String(parsed.email));
+        if (Array.isArray(parsed.emails)) {
+          parsed.emails.forEach((em: unknown) => incomingEmails.push(String(em || '')));
+        }
+        if (incomingEmails.length > 0) {
+          const me = mergeMultiEmails(
+            patch.email || f.email,
+            patch.emailsSupplementaires || f.emailsSupplementaires,
+            incomingEmails
+          );
+          if (me.addedCount > 0) {
+            patch.email = me.primary;
+            if (me.extras.length > 0) patch.emailsSupplementaires = me.extras;
+            hit = true;
+          }
         }
         if (!f.contact && !patch.contact && parsed.contact && isPlausiblePersonName(String(parsed.contact))) {
           patch.contact = String(parsed.contact).trim();
@@ -3856,7 +3948,7 @@ Réponds UNIQUEMENT en JSON strict : {"telephone":"","email":"","contact":"","ro
 
   const handleCommitCaptured = (items: FicheEntreprise[], sourceLabel: string) => {
     if (items.length === 0) return;
-    setFiches((prev) => [...items, ...prev]);
+    setFiches((prev) => ensureUniqueNumeroFiches([...items, ...prev]));
     notify(`${items.length} fiche(s) importées dans le portefeuille (${sourceLabel}).`);
     setActiveTab('portefeuille');
   };
@@ -4011,74 +4103,374 @@ Réponds UNIQUEMENT en JSON strict : {"telephone":"","email":"","contact":"","ro
     }
   };
 
-  const handleApplyAssistedPaste = () => {
-    if (!assistModalFiche || !assistPasteText.trim()) {
-      notify('Colle d’abord le texte copié depuis Google, LinkedIn, Telecontact ou Kerix.', 'warn');
-      return;
-    }
-    const readable = htmlToReadableText(assistPasteText);
+  const assistLivePreview = useMemo(() => {
+    if (!assistModalFiche || !assistPasteText.trim()) return null;
+    return extractAllFromAssistedPaste(assistPasteText, assistModalFiche.societe);
+  }, [assistModalFiche, assistPasteText]);
+
+  const applyExtractedDataToAssistFiche = (
+    extracted: {
+      phones: string[];
+      emails: string[];
+      contact?: string;
+      role?: string;
+      effectif?: string;
+      siteWeb?: string;
+      secteur?: string;
+      ville?: string;
+    },
+    sourceTag: string,
+    rawForSecteur = ''
+  ) => {
+    if (!assistModalFiche) return;
     const patch: Partial<FicheEntreprise> = {};
     const foundLabels: string[] = [];
 
-    const phones = extractPhonesFromReadableText(readable);
-    if (!assistModalFiche.telephone && phones[0]) {
-      patch.telephone = phones[0];
-      foundLabels.push('téléphone');
+    const mergedPhones = mergeMultiPhones(
+      assistModalFiche.telephone,
+      assistModalFiche.telephonesSupplementaires,
+      extracted.phones
+    );
+    if (mergedPhones.addedCount > 0) {
+      patch.telephone = mergedPhones.primary;
+      patch.telephonesSupplementaires = mergedPhones.extras;
+      foundLabels.push(
+        mergedPhones.addedCount === 1 ? '1 téléphone' : `${mergedPhones.addedCount} téléphones`
+      );
     }
-    const bestE = extractBestEmailFromText(readable, assistModalFiche.societe);
-    if (!assistModalFiche.email && bestE) {
-      patch.email = bestE;
-      foundLabels.push('email');
+
+    const mergedEmails = mergeMultiEmails(
+      assistModalFiche.email,
+      assistModalFiche.emailsSupplementaires,
+      extracted.emails
+    );
+    if (mergedEmails.addedCount > 0) {
+      patch.email = mergedEmails.primary;
+      patch.emailsSupplementaires = mergedEmails.extras;
+      foundLabels.push(
+        mergedEmails.addedCount === 1 ? '1 email' : `${mergedEmails.addedCount} emails`
+      );
     }
-    const dec = extractDecideurFromText(readable, assistModalFiche.email || patch.email || '');
-    if (!assistModalFiche.contact && dec.contact) {
-      patch.contact = dec.contact;
+
+    if (!assistModalFiche.contact && extracted.contact?.trim()) {
+      patch.contact = extracted.contact.trim();
       foundLabels.push('décideur');
-      if (!assistModalFiche.role && dec.role) {
-        patch.role = dec.role;
-        foundLabels.push('rôle');
+    }
+    if (!assistModalFiche.role && extracted.role?.trim()) {
+      patch.role = extracted.role.trim();
+      foundLabels.push('rôle');
+    }
+    if (!assistModalFiche.effectif && extracted.effectif?.trim()) {
+      const cleanEff = String(parseInt(extracted.effectif.replace(/\D/g, ''), 10) || '');
+      if (cleanEff) {
+        patch.effectif = cleanEff;
+        foundLabels.push('effectif');
       }
     }
-    const eff = extractEffectifFromText(readable);
-    if (!assistModalFiche.effectif && eff) {
-      patch.effectif = eff;
-      foundLabels.push('effectif');
-    }
-    const urlMatch = assistPasteText.match(/https?:\/\/(?:www\.)?[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}(?:\/[^\s"'<>)]*)?/i);
-    if (!assistModalFiche.siteWeb && urlMatch && !/(google\.|linkedin\.|facebook\.|telecontact\.|kerix\.)/i.test(urlMatch[0])) {
-      patch.siteWeb = urlMatch[0].replace(/[.,;)]+$/, '');
+    if (!assistModalFiche.siteWeb && extracted.siteWeb?.trim()) {
+      patch.siteWeb = extracted.siteWeb.trim();
       foundLabels.push('site web');
     }
-    const inferredSec = inferSecteur(
-      `${assistModalFiche.societe} ${readable.slice(0, 600)}`,
-      assistModalFiche.secteur,
-      patch.email || assistModalFiche.email
-    );
-    if (inferredSec !== assistModalFiche.secteur) {
-      patch.secteur = inferredSec;
-      foundLabels.push(`secteur → ${SECTEURS_META[inferredSec].label}`);
+    if (!assistModalFiche.ville && extracted.ville?.trim()) {
+      patch.ville = extracted.ville.trim();
+      foundLabels.push('ville');
+    }
+
+    if (extracted.secteur && (extracted.secteur as SecteurCode) in SECTEURS_META && extracted.secteur !== assistModalFiche.secteur) {
+      patch.secteur = extracted.secteur as SecteurCode;
+      foundLabels.push(`secteur → ${SECTEURS_META[patch.secteur].label}`);
+    } else if (rawForSecteur) {
+      const inferredSec = inferSecteur(
+        `${assistModalFiche.societe} ${rawForSecteur.slice(0, 600)}`,
+        assistModalFiche.secteur,
+        patch.email || assistModalFiche.email
+      );
+      if (inferredSec !== assistModalFiche.secteur) {
+        patch.secteur = inferredSec;
+        foundLabels.push(`secteur → ${SECTEURS_META[inferredSec].label}`);
+      }
     }
 
     if (foundLabels.length === 0) {
-      notify('Aucune nouvelle donnée détectée dans ce texte (téléphone marocain, email pro, décideur ou effectif).', 'warn');
+      notify(
+        'Aucune nouvelle coordonnée inédite détectée (tous les numéros/emails trouvés sont déjà enregistrés ou absents du texte).',
+        'warn'
+      );
       return;
     }
 
-    setFiches((prev) =>
-      prev.map((item) =>
-        item.id === assistModalFiche.id
-          ? {
-              ...item,
-              ...patch,
-              verifieWeb: true,
-              pistesEnrichissement: Array.from(new Set([...(item.pistesEnrichissement || []), 'Assisté'])),
-            }
-          : item
-      )
-    );
-    setAssistModalFiche((prev) => (prev ? { ...prev, ...patch } : prev));
+    const updatedFiche: FicheEntreprise = {
+      ...assistModalFiche,
+      ...patch,
+      verifieWeb: true,
+      pistesEnrichissement: Array.from(
+        new Set([...(assistModalFiche.pistesEnrichissement || []), sourceTag])
+      ),
+    };
+
+    setFiches((prev) => prev.map((item) => (item.id === assistModalFiche.id ? updatedFiche : item)));
+    setAssistModalFiche(updatedFiche);
     setAssistPasteText('');
-    notify(`${assistModalFiche.societe} complétée : ${foundLabels.join(', ')}.`);
+    notify(`${assistModalFiche.societe} enrichie (${sourceTag}) : ${foundLabels.join(', ')}.`);
+  };
+
+  const handleAssistPasteEvent = (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    const plain = e.clipboardData.getData('text/plain') || '';
+    const html = e.clipboardData.getData('text/html') || '';
+    const htmlLinks: string[] = [];
+    if (html) {
+      const linkMatches = html.match(/href=["'](?:tel|mailto):([^"']+)["']/gi) || [];
+      for (const m of linkMatches) {
+        const val = m.replace(/^href=["'](?:tel|mailto):/i, '').replace(/["']$/, '').trim();
+        if (val && !plain.includes(val)) htmlLinks.push(val);
+      }
+    }
+    const combined = [plain, htmlLinks.length > 0 ? htmlLinks.join(' ') : ''].filter(Boolean).join('\n').trim();
+    if (!combined && html) {
+      e.preventDefault();
+      const fallbackText = htmlToReadableText(html);
+      setAssistPasteText((prev) => (prev ? `${prev}\n${fallbackText}` : fallbackText));
+      return;
+    }
+    if (htmlLinks.length > 0) {
+      e.preventDefault();
+      const target = e.currentTarget;
+      const start = target.selectionStart ?? assistPasteText.length;
+      const end = target.selectionEnd ?? assistPasteText.length;
+      const next = `${assistPasteText.slice(0, start)}${combined}${assistPasteText.slice(end)}`;
+      setAssistPasteText(next);
+    }
+  };
+
+  const handleAssistClipboardRead = async () => {
+    try {
+      if (navigator.clipboard && typeof navigator.clipboard.readText === 'function') {
+        const clip = await navigator.clipboard.readText();
+        if (clip.trim()) {
+          setAssistPasteText((prev) => (prev.trim() ? `${prev.trim()}\n${clip.trim()}` : clip.trim()));
+          notify('Contenu du presse-papiers collé dans la zone d’extraction.');
+          return;
+        }
+        notify('Le presse-papiers est vide.', 'warn');
+        return;
+      }
+    } catch {
+      // Clipboard API may be blocked in sandboxed iframe — guide user cleanly
+    }
+    const el = document.getElementById('assist-paste');
+    if (el) el.focus();
+    notify('Zone sélectionnée : appuyez sur Ctrl+V (ou Cmd+V) pour coller.', 'warn');
+  };
+
+  const handleApplyAssistedPaste = () => {
+    if (!assistModalFiche || !assistPasteText.trim()) {
+      notify('Colle d’abord le texte copié depuis Google (Aperçu IA, Maps), LinkedIn ou un annuaire.', 'warn');
+      return;
+    }
+    const extracted = extractAllFromAssistedPaste(assistPasteText, assistModalFiche.societe);
+    applyExtractedDataToAssistFiche(extracted, 'Assisté / Google IA', assistPasteText);
+  };
+
+  const handleAssistAiParse = async () => {
+    if (!assistModalFiche || !assistPasteText.trim()) {
+      notify('Colle d’abord un texte (ex. Aperçu IA Google, LinkedIn) avant de lancer l’extraction Gemini.', 'warn');
+      return;
+    }
+    setAssistAiLoading(true);
+    setAssistAiSummary('');
+    try {
+      const res = await fetch('/api/ai/parse-paste', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          rawText: assistPasteText,
+          societe: assistModalFiche.societe,
+          ville: assistModalFiche.ville,
+          secteur: assistModalFiche.secteur,
+          allowedSecteurs: Object.keys(SECTEURS_META).join(','),
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        notify(data?.error || 'Extraction IA indisponible — bascule sur l’extracteur local.', 'warn');
+        handleApplyAssistedPaste();
+        return;
+      }
+      const ex = data.extracted || {};
+      const localEx = extractAllFromAssistedPaste(assistPasteText, assistModalFiche.societe);
+      const allPhones = Array.from(new Set([...(Array.isArray(ex.telephones) ? ex.telephones : []), ...localEx.phones]));
+      const allEmails = Array.from(new Set([...(Array.isArray(ex.emails) ? ex.emails : []), ...localEx.emails]));
+      if (ex.resume) setAssistAiSummary(String(ex.resume));
+      applyExtractedDataToAssistFiche(
+        {
+          phones: allPhones,
+          emails: allEmails,
+          contact: ex.contact || localEx.contact,
+          role: ex.role || localEx.role,
+          effectif: ex.effectif || localEx.effectif,
+          siteWeb: ex.siteWeb || localEx.siteWeb,
+          secteur: ex.secteur || '',
+          ville: ex.ville || '',
+        },
+        'Gemini Paste IA',
+        assistPasteText
+      );
+    } catch {
+      notify('Erreur réseau Gemini — extraction locale appliquée.', 'warn');
+      handleApplyAssistedPaste();
+    } finally {
+      setAssistAiLoading(false);
+    }
+  };
+
+  const handleAssistAiWebSearch = async () => {
+    if (!assistModalFiche) return;
+    setAssistAiLoading(true);
+    setAssistAiSummary('');
+    try {
+      const res = await fetch('/api/ai/enrich-web', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          societe: assistModalFiche.societe,
+          ville: assistModalFiche.ville || defaultVille,
+          secteur: SECTEURS_META[assistModalFiche.secteur].label,
+          allowedSecteurs: Object.keys(SECTEURS_META).join(','),
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        notify(data?.error || 'Recherche IA Google indisponible.', 'warn');
+        return;
+      }
+      const rawText = String(data.text || '');
+      const jm = rawText.match(/\{[\s\S]*\}/);
+      let parsed: Record<string, unknown> = {};
+      if (jm) {
+        try {
+          parsed = JSON.parse(jm[0]);
+        } catch {
+          parsed = {};
+        }
+      }
+      const localFromText = extractAllFromAssistedPaste(rawText, assistModalFiche.societe);
+      const phones = [
+        ...(typeof parsed.telephone === 'string' ? [parsed.telephone] : []),
+        ...(Array.isArray(parsed.telephones) ? parsed.telephones.map(String) : []),
+        ...localFromText.phones,
+      ];
+      const emails = [
+        ...(typeof parsed.email === 'string' ? [parsed.email] : []),
+        ...(Array.isArray(parsed.emails) ? parsed.emails.map(String) : []),
+        ...localFromText.emails,
+      ];
+      const srcCount = Array.isArray(data.sources) ? data.sources.length : 0;
+      setAssistAiSummary(
+        srcCount > 0
+          ? `Recherche Google Search Grounding terminée (${srcCount} source(s) web analysée(s)).`
+          : 'Recherche Google IA terminée.'
+      );
+      applyExtractedDataToAssistFiche(
+        {
+          phones,
+          emails,
+          contact: typeof parsed.contact === 'string' ? parsed.contact : localFromText.contact,
+          role: typeof parsed.role === 'string' ? parsed.role : localFromText.role,
+          effectif: typeof parsed.effectif === 'string' ? parsed.effectif : localFromText.effectif,
+          siteWeb: typeof parsed.siteWeb === 'string' ? parsed.siteWeb : localFromText.siteWeb,
+          secteur: typeof parsed.secteur === 'string' ? parsed.secteur : '',
+        },
+        'Google IA Grounding',
+        rawText
+      );
+    } catch {
+      notify('Impossible de contacter la recherche Google IA.', 'err');
+    } finally {
+      setAssistAiLoading(false);
+    }
+  };
+
+  // Gestion multi-téléphones & multi-emails (inline tableau + modale assistée)
+  const addAdditionalContactToFiche = (
+    ficheId: string,
+    type: 'phone' | 'email',
+    rawValue: string
+  ): boolean => {
+    const target = fiches.find((x) => x.id === ficheId);
+    if (!target) return false;
+    if (type === 'phone') {
+      const extracted = extractAllMoroccanPhones(rawValue);
+      const fallback = normalizeMoroccanPhone(rawValue);
+      const incoming = extracted.length > 0 ? extracted : fallback ? [fallback] : [];
+      if (incoming.length === 0) {
+        notify('Numéro marocain invalide (attendu 05/06/07XXXXXXXX ou +212...).', 'warn');
+        return false;
+      }
+      const merged = mergeMultiPhones(target.telephone, target.telephonesSupplementaires, incoming);
+      if (merged.addedCount === 0) {
+        notify('Ce numéro est déjà présent sur cette fiche.', 'warn');
+        return false;
+      }
+      const nextFiche: FicheEntreprise = {
+        ...target,
+        telephone: merged.primary,
+        telephonesSupplementaires: merged.extras,
+      };
+      setFiches((prev) => prev.map((x) => (x.id === ficheId ? nextFiche : x)));
+      if (assistModalFiche?.id === ficheId) setAssistModalFiche(nextFiche);
+      notify(`Numéro ajouté sur ${target.societe}.`);
+      return true;
+    } else {
+      const extracted = extractAllEmails(rawValue, target.societe);
+      const fallback = normalizeProEmail(rawValue);
+      const incoming = extracted.length > 0 ? extracted : fallback ? [fallback] : [];
+      if (incoming.length === 0) {
+        notify('Adresse email invalide.', 'warn');
+        return false;
+      }
+      const merged = mergeMultiEmails(target.email, target.emailsSupplementaires, incoming);
+      if (merged.addedCount === 0) {
+        notify('Cette adresse email est déjà enregistrée sur cette fiche.', 'warn');
+        return false;
+      }
+      const nextFiche: FicheEntreprise = {
+        ...target,
+        email: merged.primary,
+        emailsSupplementaires: merged.extras,
+      };
+      setFiches((prev) => prev.map((x) => (x.id === ficheId ? nextFiche : x)));
+      if (assistModalFiche?.id === ficheId) setAssistModalFiche(nextFiche);
+      notify(`Adresse email ajoutée sur ${target.societe}.`);
+      return true;
+    }
+  };
+
+  const removeAdditionalContactFromFiche = (
+    ficheId: string,
+    type: 'phone' | 'email',
+    valueToRemove: string
+  ) => {
+    setFiches((prev) =>
+      prev.map((x) => {
+        if (x.id !== ficheId) return x;
+        const next: FicheEntreprise =
+          type === 'phone'
+            ? {
+                ...x,
+                telephonesSupplementaires: (x.telephonesSupplementaires || []).filter(
+                  (p) => p !== valueToRemove
+                ),
+              }
+            : {
+                ...x,
+                emailsSupplementaires: (x.emailsSupplementaires || []).filter(
+                  (e) => e !== valueToRemove
+                ),
+              };
+        if (assistModalFiche?.id === ficheId) setAssistModalFiche(next);
+        return next;
+      })
+    );
   };
 
   // Mode Rafale : passer directement à la fiche incomplète suivante dans la vue filtrée
@@ -4214,7 +4606,7 @@ Réponds UNIQUEMENT en JSON strict : {"telephone":"","email":"","contact":"","ro
       try {
         const parsed = JSON.parse(String(reader.result || '{}'));
         if (Array.isArray(parsed.fiches)) {
-          setFiches(parsed.fiches);
+          setFiches(ensureUniqueNumeroFiches(parsed.fiches));
           if (Array.isArray(parsed.allVilles) && parsed.allVilles.length > 0) {
             setVillesState({
               all: parsed.allVilles,
@@ -4258,34 +4650,58 @@ Réponds UNIQUEMENT en JSON strict : {"telephone":"","email":"","contact":"","ro
       notify('Nom de société invalide ou trop court.', 'warn');
       return;
     }
+    const extraPhonesIn = extractAllMoroccanPhones(
+      `${quickForm.telephone} ${quickForm.telephonesSupplementaires}`
+    );
+    const mergedPhones = mergeMultiPhones(
+      normalizeMoroccanPhone(quickForm.telephone),
+      [],
+      extraPhonesIn
+    );
+    const extraEmailsIn = extractAllEmails(
+      `${quickForm.email} ${quickForm.emailsSupplementaires}`,
+      clean
+    );
+    const mergedEmails = mergeMultiEmails(
+      normalizeProEmail(quickForm.email),
+      [],
+      extraEmailsIn
+    );
+    const nextCode = generateNextNumeroFiche(fiches);
     const f: FicheEntreprise = {
       id: makeId(),
+      numeroFiche: nextCode,
       societe: clean,
       secteur: quickForm.secteur,
       ville: quickForm.ville.trim() || defaultVille,
-      telephone: normalizeMoroccanPhone(quickForm.telephone),
-      email: normalizeProEmail(quickForm.email),
+      telephone: mergedPhones.primary,
+      ...(mergedPhones.extras.length > 0 ? { telephonesSupplementaires: mergedPhones.extras } : {}),
+      email: mergedEmails.primary,
+      ...(mergedEmails.extras.length > 0 ? { emailsSupplementaires: mergedEmails.extras } : {}),
       contact: quickForm.contact.trim(),
       role: quickForm.role.trim(),
       source: quickForm.source.trim() || 'Saisie manuelle',
       effectif: quickForm.effectif ? String(parseInt(quickForm.effectif, 10) || '') : '',
-      statut: 'À contacter',
+      statut: quickAddStatut,
       dateAjout: new Date().toISOString(),
     };
-    setFiches((prev) => [f, ...prev]);
+    setFiches((prev) => ensureUniqueNumeroFiches([f, ...prev]));
     setQuickForm({
       societe: '',
       secteur: 'pme',
       ville: defaultVille,
       telephone: '',
+      telephonesSupplementaires: '',
       email: '',
+      emailsSupplementaires: '',
       contact: '',
       role: '',
       source: 'Porte à porte',
       effectif: '',
     });
+    setQuickAddStatut('À contacter');
     setShowQuickAdd(false);
-    notify(`Fiche « ${f.societe} » ajoutée au portefeuille.`);
+    notify(`Fiche ${nextCode} « ${f.societe} » ajoutée au portefeuille.`);
   };
 
   const startEdit = (f: FicheEntreprise, field: keyof FicheEntreprise) => {
@@ -5399,6 +5815,16 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
                 onOpenEmail={openEmailStudio}
                 onVerifyOne={handleVerifyWeb}
                 onOpenAiBrief={handleOpenAiBrief}
+                onOpenAssist={(f) => {
+                  setAssistModalFiche(f);
+                  setAssistPasteText('');
+                  setAssistAiSummary('');
+                  setLastVerifyDiag('');
+                }}
+                onQuickAddInStage={(statut) => {
+                  setQuickAddStatut(statut);
+                  setShowQuickAdd(true);
+                }}
               />
             ) : (
             /* Tableau Haute Densité Éditable Inline */
@@ -5502,8 +5928,22 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
                         return (
                           <tr key={f.id} className="hover:bg-stone-50/80 align-top">
                             <td className="p-3">
-                              <div className="font-semibold text-stone-900 text-[13px] flex items-center gap-1.5">
+                              <div className="font-semibold text-stone-900 text-[13px] flex items-center flex-wrap gap-1.5">
                                 <span className={`w-2 h-2 rounded-sm shrink-0 ${seg.dotCls}`} aria-hidden="true" />
+                                {f.numeroFiche && (
+                                  <button
+                                    type="button"
+                                    data-testid={`fiche-code-${f.id}`}
+                                    onClick={() => {
+                                      copyTextSafe(f.numeroFiche || '');
+                                      notify(`Code fiche ${f.numeroFiche} copié.`);
+                                    }}
+                                    title="Cliquer pour copier le numéro de fiche unique"
+                                    className="px-1.5 py-0.5 rounded bg-stone-100 hover:bg-orange-100 text-stone-700 hover:text-orange-800 font-mono text-[10px] font-bold tracking-tight shrink-0"
+                                  >
+                                    {f.numeroFiche}
+                                  </button>
+                                )}
                                 {renderEditable('societe', f.societe, 'Société')}
                                 {isDup && (
                                   <button
@@ -5544,12 +5984,152 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
                               {renderEditable('ville', f.ville, 'Ville')}
                             </td>
 
-                            <td className="p-3 space-y-1">
-                              <div className="font-mono text-stone-900 tabular-nums">
-                                {renderEditable('telephone', f.telephone, '05/06/07...')}
+                            <td className="p-3 space-y-1.5 min-w-[205px]">
+                              {/* Téléphone principal + numéros supplémentaires */}
+                              <div className="space-y-0.5">
+                                <div className="flex items-center justify-between gap-1.5">
+                                  <div className="font-mono text-stone-900 tabular-nums">
+                                    {renderEditable('telephone', f.telephone, '05/06/07...')}
+                                  </div>
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      setInlineAddContact({ id: f.id, type: 'phone' });
+                                      setInlineContactDraft('');
+                                    }}
+                                    aria-label={`Ajouter un numéro pour ${f.societe}`}
+                                    title="Ajouter un numéro de téléphone supplémentaire"
+                                    className="text-[10px] font-semibold text-orange-700 hover:text-orange-900 px-1 py-0.5 rounded hover:bg-orange-50 shrink-0"
+                                  >
+                                    + Tél
+                                  </button>
+                                </div>
+                                {(f.telephonesSupplementaires || []).map((extraTel) => (
+                                  <div
+                                    key={extraTel}
+                                    className="flex items-center justify-between gap-1 font-mono text-[11px] text-stone-600 tabular-nums pl-1.5 border-l-2 border-stone-200"
+                                  >
+                                    <a href={`tel:${extraTel}`} className="hover:text-orange-700 hover:underline">
+                                      {extraTel}
+                                    </a>
+                                    <button
+                                      type="button"
+                                      onClick={() => removeAdditionalContactFromFiche(f.id, 'phone', extraTel)}
+                                      aria-label={`Retirer le numéro ${extraTel}`}
+                                      className="text-stone-400 hover:text-red-600 p-0.5"
+                                    >
+                                      <X className="w-3 h-3" />
+                                    </button>
+                                  </div>
+                                ))}
+                                {inlineAddContact?.id === f.id && inlineAddContact.type === 'phone' && (
+                                  <form
+                                    onSubmit={(e) => {
+                                      e.preventDefault();
+                                      if (addAdditionalContactToFiche(f.id, 'phone', inlineContactDraft)) {
+                                        setInlineAddContact(null);
+                                        setInlineContactDraft('');
+                                      }
+                                    }}
+                                    className="flex items-center gap-1 pt-0.5"
+                                  >
+                                    <input
+                                      autoFocus
+                                      aria-label={`Nouveau numéro pour ${f.societe}`}
+                                      value={inlineContactDraft}
+                                      onChange={(e) => setInlineContactDraft(e.target.value)}
+                                      placeholder="05/06/07 ou +212..."
+                                      className="w-32 px-1.5 py-0.5 rounded border border-orange-400 text-[11px] font-mono bg-white"
+                                    />
+                                    <button
+                                      type="submit"
+                                      className="px-1.5 py-0.5 rounded bg-orange-600 text-white text-[10px] font-semibold"
+                                    >
+                                      OK
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => setInlineAddContact(null)}
+                                      className="p-0.5 text-stone-400 hover:text-stone-700"
+                                    >
+                                      <X className="w-3 h-3" />
+                                    </button>
+                                  </form>
+                                )}
                               </div>
-                              <div className="text-[11px] text-stone-500 break-all">
-                                {renderEditable('email', f.email, 'email@domaine.ma')}
+
+                              {/* Email principal + emails supplémentaires */}
+                              <div className="space-y-0.5 pt-0.5 border-t border-stone-100">
+                                <div className="flex items-center justify-between gap-1.5">
+                                  <div className="text-[11px] text-stone-600 break-all">
+                                    {renderEditable('email', f.email, 'email@domaine.ma')}
+                                  </div>
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      setInlineAddContact({ id: f.id, type: 'email' });
+                                      setInlineContactDraft('');
+                                    }}
+                                    aria-label={`Ajouter un email pour ${f.societe}`}
+                                    title="Ajouter une adresse email supplémentaire"
+                                    className="text-[10px] font-semibold text-sky-700 hover:text-sky-900 px-1 py-0.5 rounded hover:bg-sky-50 shrink-0"
+                                  >
+                                    + Mail
+                                  </button>
+                                </div>
+                                {(f.emailsSupplementaires || []).map((extraMail) => (
+                                  <div
+                                    key={extraMail}
+                                    className="flex items-center justify-between gap-1 text-[11px] text-stone-500 break-all pl-1.5 border-l-2 border-stone-200"
+                                  >
+                                    <a href={`mailto:${extraMail}`} className="hover:text-sky-700 hover:underline">
+                                      {extraMail}
+                                    </a>
+                                    <button
+                                      type="button"
+                                      onClick={() => removeAdditionalContactFromFiche(f.id, 'email', extraMail)}
+                                      aria-label={`Retirer l'email ${extraMail}`}
+                                      className="text-stone-400 hover:text-red-600 p-0.5 shrink-0"
+                                    >
+                                      <X className="w-3 h-3" />
+                                    </button>
+                                  </div>
+                                ))}
+                                {inlineAddContact?.id === f.id && inlineAddContact.type === 'email' && (
+                                  <form
+                                    onSubmit={(e) => {
+                                      e.preventDefault();
+                                      if (addAdditionalContactToFiche(f.id, 'email', inlineContactDraft)) {
+                                        setInlineAddContact(null);
+                                        setInlineContactDraft('');
+                                      }
+                                    }}
+                                    className="flex items-center gap-1 pt-0.5"
+                                  >
+                                    <input
+                                      autoFocus
+                                      type="email"
+                                      aria-label={`Nouvel email pour ${f.societe}`}
+                                      value={inlineContactDraft}
+                                      onChange={(e) => setInlineContactDraft(e.target.value)}
+                                      placeholder="autre@domaine.ma"
+                                      className="w-36 px-1.5 py-0.5 rounded border border-sky-400 text-[11px] bg-white"
+                                    />
+                                    <button
+                                      type="submit"
+                                      className="px-1.5 py-0.5 rounded bg-sky-600 text-white text-[10px] font-semibold"
+                                    >
+                                      OK
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => setInlineAddContact(null)}
+                                      className="p-0.5 text-stone-400 hover:text-stone-700"
+                                    >
+                                      <X className="w-3 h-3" />
+                                    </button>
+                                  </form>
+                                )}
                               </div>
                             </td>
 
@@ -5731,6 +6311,16 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
               onOpenEmail={openEmailStudio}
               onVerifyOne={handleVerifyWeb}
               onOpenAiBrief={handleOpenAiBrief}
+              onOpenAssist={(f) => {
+                setAssistModalFiche(f);
+                setAssistPasteText('');
+                setAssistAiSummary('');
+                setLastVerifyDiag('');
+              }}
+              onQuickAddInStage={(statut) => {
+                setQuickAddStatut(statut);
+                setShowQuickAdd(true);
+              }}
             />
           </div>
         )}
@@ -6183,17 +6773,20 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
           aria-label={`Enrichissement Assisté — ${assistModalFiche.societe}`}
           className="fixed inset-0 z-50 bg-stone-900/50 flex items-center justify-center p-3 sm:p-4"
         >
-          <div className="w-full max-w-2xl max-h-[90vh] overflow-y-auto bg-white rounded-2xl border border-stone-200 p-5 space-y-4">
+          <div className="w-full max-w-2xl max-h-[92vh] overflow-y-auto bg-white rounded-2xl border border-stone-200 p-5 space-y-4">
             <div className="flex items-start justify-between gap-2">
               <div>
-                <h2 className="text-base font-bold text-stone-900 flex items-center gap-2">
+                <h2 className="text-base font-bold text-stone-900 flex items-center flex-wrap gap-2">
                   <Globe className="w-4 h-4 text-orange-600" />
-                  Enrichissement Assisté — {assistModalFiche.societe}
+                  {assistModalFiche.numeroFiche && (
+                    <span className="font-mono text-xs px-1.5 py-0.5 rounded bg-orange-50 text-orange-800 border border-orange-200">
+                      {assistModalFiche.numeroFiche}
+                    </span>
+                  )}
+                  <span>Enrichissement Assisté — {assistModalFiche.societe}</span>
                 </h2>
                 <p className="text-xs text-stone-500 mt-1 tabular-nums">
-                  {SECTEURS_META[assistModalFiche.secteur].label} · {assistModalFiche.ville || 'Maroc'} · Tél :{' '}
-                  <strong className="text-stone-800">{assistModalFiche.telephone || 'manquant'}</strong> · Email :{' '}
-                  <strong className="text-stone-800">{assistModalFiche.email || 'manquant'}</strong> · Décideur :{' '}
+                  {SECTEURS_META[assistModalFiche.secteur].label} · {assistModalFiche.ville || 'Maroc'} · Décideur :{' '}
                   <strong className="text-stone-800">{assistModalFiche.contact || 'manquant'}</strong> · Eff. :{' '}
                   <strong className="text-stone-800">{assistModalFiche.effectif || 'manquant'}</strong>
                 </p>
@@ -6208,26 +6801,167 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
               </button>
             </div>
 
+            {/* Coordonnées actuelles (Multi-téléphones & Multi-emails éditables) */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 p-3 rounded-xl bg-stone-50 border border-stone-200 text-xs">
+              <div className="space-y-1.5">
+                <div className="font-bold text-stone-700 flex items-center justify-between">
+                  <span>Téléphones ({(assistModalFiche.telephone ? 1 : 0) + (assistModalFiche.telephonesSupplementaires?.length || 0)})</span>
+                </div>
+                <div className="flex flex-wrap gap-1.5">
+                  {assistModalFiche.telephone ? (
+                    <span className="px-2 py-0.5 rounded bg-white border border-stone-300 font-mono text-[11px] font-semibold text-stone-900">
+                      {assistModalFiche.telephone}
+                    </span>
+                  ) : (
+                    <span className="text-stone-400 italic text-[11px]">Aucun numéro</span>
+                  )}
+                  {(assistModalFiche.telephonesSupplementaires || []).map((t) => (
+                    <span
+                      key={t}
+                      className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-white border border-stone-200 font-mono text-[11px] text-stone-700"
+                    >
+                      {t}
+                      <button
+                        type="button"
+                        onClick={() => removeAdditionalContactFromFiche(assistModalFiche.id, 'phone', t)}
+                        aria-label={`Supprimer ${t}`}
+                        className="text-stone-400 hover:text-red-600"
+                      >
+                        <X className="w-3 h-3" />
+                      </button>
+                    </span>
+                  ))}
+                </div>
+                <div className="flex items-center gap-1 pt-0.5">
+                  <input
+                    type="text"
+                    value={assistExtraPhoneDraft}
+                    onChange={(e) => setAssistExtraPhoneDraft(e.target.value)}
+                    placeholder="Ajouter un n° (05/06/07...)"
+                    className="flex-1 min-w-0 px-2 py-1 rounded border border-stone-300 bg-white text-[11px] font-mono"
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        e.preventDefault();
+                        if (addAdditionalContactToFiche(assistModalFiche.id, 'phone', assistExtraPhoneDraft)) {
+                          setAssistExtraPhoneDraft('');
+                        }
+                      }
+                    }}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (addAdditionalContactToFiche(assistModalFiche.id, 'phone', assistExtraPhoneDraft)) {
+                        setAssistExtraPhoneDraft('');
+                      }
+                    }}
+                    className="px-2 py-1 rounded bg-stone-900 text-white text-[11px] font-semibold"
+                  >
+                    + Tél
+                  </button>
+                </div>
+              </div>
+
+              <div className="space-y-1.5">
+                <div className="font-bold text-stone-700 flex items-center justify-between">
+                  <span>Emails ({(assistModalFiche.email ? 1 : 0) + (assistModalFiche.emailsSupplementaires?.length || 0)})</span>
+                </div>
+                <div className="flex flex-wrap gap-1.5">
+                  {assistModalFiche.email ? (
+                    <span className="px-2 py-0.5 rounded bg-white border border-stone-300 text-[11px] font-semibold text-stone-900 break-all">
+                      {assistModalFiche.email}
+                    </span>
+                  ) : (
+                    <span className="text-stone-400 italic text-[11px]">Aucun email</span>
+                  )}
+                  {(assistModalFiche.emailsSupplementaires || []).map((em) => (
+                    <span
+                      key={em}
+                      className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-white border border-stone-200 text-[11px] text-stone-700 break-all"
+                    >
+                      {em}
+                      <button
+                        type="button"
+                        onClick={() => removeAdditionalContactFromFiche(assistModalFiche.id, 'email', em)}
+                        aria-label={`Supprimer ${em}`}
+                        className="text-stone-400 hover:text-red-600"
+                      >
+                        <X className="w-3 h-3" />
+                      </button>
+                    </span>
+                  ))}
+                </div>
+                <div className="flex items-center gap-1 pt-0.5">
+                  <input
+                    type="email"
+                    value={assistExtraEmailDraft}
+                    onChange={(e) => setAssistExtraEmailDraft(e.target.value)}
+                    placeholder="Ajouter un email pro..."
+                    className="flex-1 min-w-0 px-2 py-1 rounded border border-stone-300 bg-white text-[11px]"
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        e.preventDefault();
+                        if (addAdditionalContactToFiche(assistModalFiche.id, 'email', assistExtraEmailDraft)) {
+                          setAssistExtraEmailDraft('');
+                        }
+                      }
+                    }}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (addAdditionalContactToFiche(assistModalFiche.id, 'email', assistExtraEmailDraft)) {
+                        setAssistExtraEmailDraft('');
+                      }
+                    }}
+                    className="px-2 py-1 rounded bg-stone-900 text-white text-[11px] font-semibold"
+                  >
+                    + Mail
+                  </button>
+                </div>
+              </div>
+            </div>
+
             {lastVerifyDiag && (
               <div className="p-3 rounded-lg bg-amber-50 border border-amber-200 text-xs text-amber-900">
                 {lastVerifyDiag}
               </div>
             )}
 
+            {assistAiSummary && (
+              <div className="p-2.5 rounded-lg bg-emerald-50 border border-emerald-200 text-xs text-emerald-900 flex items-center gap-2">
+                <Sparkles className="w-3.5 h-3.5 text-emerald-700 shrink-0" />
+                <span>{assistAiSummary}</span>
+              </div>
+            )}
+
             <div className="space-y-2">
-              <p className="text-xs font-bold text-stone-700">
-                1. Lancer une recherche pré-remplie en 1 clic :
-              </p>
+              <div className="flex items-center justify-between gap-2 flex-wrap">
+                <p className="text-xs font-bold text-stone-700">
+                  1. Lancer une recherche (Google Aperçu IA, LinkedIn, Annuaires) ou recherche IA directe :
+                </p>
+                {serverAiStatus.available && (
+                  <button
+                    type="button"
+                    disabled={assistAiLoading}
+                    onClick={() => void handleAssistAiWebSearch()}
+                    className="px-2.5 py-1 rounded-lg bg-stone-900 hover:bg-stone-800 disabled:opacity-50 text-orange-300 text-[11px] font-semibold flex items-center gap-1"
+                  >
+                    <Sparkles className={`w-3 h-3 ${assistAiLoading ? 'animate-spin' : ''}`} />
+                    {assistAiLoading ? 'Recherche IA...' : 'Recherche Google IA directe'}
+                  </button>
+                )}
+              </div>
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs">
                 <a
                   href={`https://www.google.com/search?q=${encodeURIComponent(
-                    `"${assistModalFiche.societe}" "${assistModalFiche.ville || 'Maroc'}" téléphone email`
+                    `"${assistModalFiche.societe}" "${assistModalFiche.ville || 'Maroc'}" téléphone email directeur`
                   )}`}
                   target="_blank"
                   rel="noopener noreferrer"
                   className="px-3 py-2 rounded-lg bg-orange-600 hover:bg-orange-700 text-white font-semibold text-center"
                 >
-                  Google Tél/Email
+                  Google / Aperçu IA
                 </a>
                 <a
                   href={`https://www.google.com/search?q=${encodeURIComponent(
@@ -6263,17 +6997,81 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
             </div>
 
             <div className="space-y-1.5">
-              <label htmlFor="assist-paste" className="block text-xs font-bold text-stone-700">
-                2. Coller ici le contenu copié (Ctrl+V depuis Google, LinkedIn, site web ou annuaire) :
-              </label>
+              <div className="flex items-center justify-between gap-2 flex-wrap">
+                <label htmlFor="assist-paste" className="block text-xs font-bold text-stone-700">
+                  2. Coller ici le contenu copié (Google Aperçu IA, Maps, LinkedIn, site web ou annuaire) :
+                </label>
+                <div className="flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => void handleAssistClipboardRead()}
+                    className="px-2.5 py-1 rounded-md border border-stone-300 bg-stone-50 hover:bg-stone-100 text-stone-800 text-[11px] font-semibold flex items-center gap-1"
+                  >
+                    <ClipboardPaste className="w-3 h-3 text-orange-600" />
+                    Coller
+                  </button>
+                  {assistPasteText && (
+                    <button
+                      type="button"
+                      onClick={() => setAssistPasteText('')}
+                      className="px-2 py-1 rounded-md text-[11px] text-stone-500 hover:text-stone-800"
+                    >
+                      Effacer
+                    </button>
+                  )}
+                </div>
+              </div>
               <textarea
                 id="assist-paste"
                 rows={6}
                 value={assistPasteText}
+                onPaste={handleAssistPasteEvent}
                 onChange={(e) => setAssistPasteText(e.target.value)}
-                placeholder="Colle le texte brut de la fiche... Extraction automatique : téléphone 05/06/07, email pro, décideur, rôle, effectif, site web et correction secteur."
-                className="w-full p-3 rounded-lg border border-stone-300 text-xs text-stone-900"
+                placeholder="Collez ici l'Aperçu IA Google, la fiche Google Maps ou LinkedIn (Ctrl+V ou bouton Coller). Tous les numéros 05/06/07/+212, emails, décideur, rôle, effectif et site web sont détectés automatiquement, même si la fiche a déjà un numéro."
+                className="w-full p-3 rounded-lg border border-stone-300 focus:border-orange-500 focus:outline-none text-xs text-stone-900"
               />
+
+              {/* Prévisualisation en direct des champs détectés */}
+              {assistLivePreview && (
+                <div
+                  data-testid="assist-live-preview"
+                  className="p-2.5 rounded-lg bg-orange-50/70 border border-orange-200 text-[11px] text-stone-800 space-y-1"
+                >
+                  <div className="font-bold text-orange-900">
+                    Aperçu détecté en direct (prêt à enregistrer) :
+                  </div>
+                  <div className="flex flex-wrap gap-x-3 gap-y-1">
+                    <span>
+                      Tél :{' '}
+                      <strong className="font-mono">
+                        {assistLivePreview.phones.length > 0 ? assistLivePreview.phones.join(', ') : '—'}
+                      </strong>
+                    </span>
+                    <span>
+                      Emails :{' '}
+                      <strong>
+                        {assistLivePreview.emails.length > 0 ? assistLivePreview.emails.join(', ') : '—'}
+                      </strong>
+                    </span>
+                    {assistLivePreview.contact && (
+                      <span>
+                        Décideur : <strong>{assistLivePreview.contact}</strong>
+                        {assistLivePreview.role ? ` (${assistLivePreview.role})` : ''}
+                      </span>
+                    )}
+                    {assistLivePreview.effectif && (
+                      <span>
+                        Effectif : <strong>{assistLivePreview.effectif}</strong>
+                      </span>
+                    )}
+                    {assistLivePreview.siteWeb && (
+                      <span>
+                        Site : <strong>{assistLivePreview.siteWeb}</strong>
+                      </span>
+                    )}
+                  </div>
+                </div>
+              )}
             </div>
 
             <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-stone-200">
@@ -6286,7 +7084,7 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
                 className="text-xs font-semibold text-orange-700 hover:underline flex items-center gap-1"
               >
                 <KeyRound className="w-3.5 h-3.5" />
-                Configurer le Hub API ({activeApiCount} actives)
+                Hub API ({activeApiCount})
               </button>
 
               <div className="flex flex-wrap items-center gap-2">
@@ -6295,10 +7093,21 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
                   onClick={handleNextIncompleteRafale}
                   className="px-3 py-2 rounded-lg border border-orange-300 bg-orange-50 hover:bg-orange-100 text-orange-900 text-xs font-semibold flex items-center gap-1 tabular-nums"
                 >
-                  <span>Fiche incomplète suivante</span>
+                  <span>Suivante</span>
                   <ArrowRight className="w-3.5 h-3.5" />
                   <span className="text-[11px] opacity-75">({incompleteFilteredFiches.length})</span>
                 </button>
+                {serverAiStatus.available && (
+                  <button
+                    type="button"
+                    disabled={assistAiLoading || !assistPasteText.trim()}
+                    onClick={() => void handleAssistAiParse()}
+                    className="px-3 py-2 rounded-lg border border-stone-300 bg-white hover:bg-stone-100 disabled:opacity-50 text-stone-900 text-xs font-semibold flex items-center gap-1.5"
+                  >
+                    <Sparkles className={`w-3.5 h-3.5 text-orange-600 ${assistAiLoading ? 'animate-spin' : ''}`} />
+                    Extraction IA (Gemini)
+                  </button>
+                )}
                 <button
                   type="button"
                   onClick={handleApplyAssistedPaste}
@@ -6731,9 +7540,14 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
           aria-label="Saisie rapide d'une entreprise"
           className="fixed inset-0 z-50 bg-stone-900/50 flex items-center justify-center p-4"
         >
-          <div className="w-full max-w-lg bg-white rounded-2xl border border-stone-200 p-5 space-y-4">
-            <div className="flex items-center justify-between">
-              <h2 className="text-base font-bold text-stone-900">Nouvelle fiche entreprise</h2>
+          <div className="w-full max-w-lg max-h-[92vh] overflow-y-auto bg-white rounded-2xl border border-stone-200 p-5 space-y-4">
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <h2 className="text-base font-bold text-stone-900">Nouvelle fiche entreprise</h2>
+                <span className="px-2 py-0.5 rounded bg-orange-50 border border-orange-200 font-mono text-[11px] font-bold text-orange-800">
+                  {generateNextNumeroFiche(fiches)}
+                </span>
+              </div>
               <button
                 type="button"
                 aria-label="Fermer saisie rapide"
@@ -6774,6 +7588,23 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
                 </select>
               </div>
               <div>
+                <label htmlFor="qf-statut" className="block font-semibold text-stone-600 mb-1">
+                  Étape Pipeline
+                </label>
+                <select
+                  id="qf-statut"
+                  value={quickAddStatut}
+                  onChange={(e) => setQuickAddStatut(e.target.value as StatutCRM)}
+                  className="w-full px-3 py-2 rounded-lg border border-stone-300 bg-white"
+                >
+                  {STATUTS_CRM.map((s) => (
+                    <option key={s} value={s}>
+                      {s}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div>
                 <label htmlFor="qf-ville" className="block font-semibold text-stone-600 mb-1">
                   Ville
                 </label>
@@ -6791,8 +7622,21 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
                 </datalist>
               </div>
               <div>
+                <label htmlFor="qf-eff" className="block font-semibold text-stone-600 mb-1">
+                  Effectif (vide si inconnu)
+                </label>
+                <input
+                  id="qf-eff"
+                  type="number"
+                  min={1}
+                  value={quickForm.effectif}
+                  onChange={(e) => setQuickForm({ ...quickForm, effectif: e.target.value })}
+                  className="w-full px-3 py-2 rounded-lg border border-stone-300 tabular-nums"
+                />
+              </div>
+              <div>
                 <label htmlFor="qf-tel" className="block font-semibold text-stone-600 mb-1">
-                  Téléphone
+                  Téléphone principal
                 </label>
                 <input
                   id="qf-tel"
@@ -6803,14 +7647,42 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
                 />
               </div>
               <div>
+                <label htmlFor="qf-tel-extra" className="block font-semibold text-stone-600 mb-1">
+                  Autres numéros (optionnel)
+                </label>
+                <input
+                  id="qf-tel-extra"
+                  value={quickForm.telephonesSupplementaires}
+                  onChange={(e) =>
+                    setQuickForm({ ...quickForm, telephonesSupplementaires: e.target.value })
+                  }
+                  placeholder="Ex: 0661..., 0535..."
+                  className="w-full px-3 py-2 rounded-lg border border-stone-300 font-mono"
+                />
+              </div>
+              <div>
                 <label htmlFor="qf-mail" className="block font-semibold text-stone-600 mb-1">
-                  Email pro
+                  Email pro principal
                 </label>
                 <input
                   id="qf-mail"
                   type="email"
                   value={quickForm.email}
                   onChange={(e) => setQuickForm({ ...quickForm, email: e.target.value })}
+                  className="w-full px-3 py-2 rounded-lg border border-stone-300"
+                />
+              </div>
+              <div>
+                <label htmlFor="qf-mail-extra" className="block font-semibold text-stone-600 mb-1">
+                  Autres emails (optionnel)
+                </label>
+                <input
+                  id="qf-mail-extra"
+                  value={quickForm.emailsSupplementaires}
+                  onChange={(e) =>
+                    setQuickForm({ ...quickForm, emailsSupplementaires: e.target.value })
+                  }
+                  placeholder="Ex: commercial@..., dg@..."
                   className="w-full px-3 py-2 rounded-lg border border-stone-300"
                 />
               </div>
@@ -6837,7 +7709,7 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
                   className="w-full px-3 py-2 rounded-lg border border-stone-300"
                 />
               </div>
-              <div>
+              <div className="col-span-2">
                 <label htmlFor="qf-source" className="block font-semibold text-stone-600 mb-1">
                   Source
                 </label>
@@ -6846,19 +7718,6 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
                   value={quickForm.source}
                   onChange={(e) => setQuickForm({ ...quickForm, source: e.target.value })}
                   className="w-full px-3 py-2 rounded-lg border border-stone-300"
-                />
-              </div>
-              <div>
-                <label htmlFor="qf-eff" className="block font-semibold text-stone-600 mb-1">
-                  Effectif (vide si inconnu)
-                </label>
-                <input
-                  id="qf-eff"
-                  type="number"
-                  min={1}
-                  value={quickForm.effectif}
-                  onChange={(e) => setQuickForm({ ...quickForm, effectif: e.target.value })}
-                  className="w-full px-3 py-2 rounded-lg border border-stone-300 tabular-nums"
                 />
               </div>
               <div className="col-span-2 flex justify-end gap-2 pt-2">
@@ -6892,6 +7751,7 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
         aiModel={serverAiStatus.model}
         onOpenEmailStudio={openEmailStudio}
         onMoveFiche={handleMoveFicheKanban}
+        onSelectFicheForBrief={(f) => setCopilotFiche(f)}
       />
     </div>
   );
