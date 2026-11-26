@@ -1,5 +1,6 @@
 import 'dotenv/config';
 import fs from 'fs';
+import http from 'http';
 import express from 'express';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -1470,11 +1471,17 @@ Produis un audit structuré, actionnable immédiatement sur le terrain (Meknès 
     next(err);
   });
 
+  const httpServer = http.createServer(app);
+
   // Montage Vite en développement / fichiers statiques en production
   if (process.env.NODE_ENV !== 'production') {
     const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
-      server: { middlewareMode: true },
+      server: {
+        middlewareMode: true,
+        ws: { server: httpServer },
+        hmr: process.env.DISABLE_HMR !== 'true',
+      },
       appType: 'spa',
     });
     app.use(vite.middlewares);
@@ -1486,7 +1493,7 @@ Produis un audit structuré, actionnable immédiatement sur le terrain (Meknès 
     });
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
+  httpServer.listen(PORT, '0.0.0.0', () => {
     console.log(`Orange Pro B2B server listening on http://localhost:${PORT}`);
   });
 }
