@@ -46,6 +46,7 @@ import {
   Settings,
   Menu,
   Clock,
+  Navigation,
 } from 'lucide-react';
 import { onAuthStateChanged, type User } from 'firebase/auth';
 import { doc, onSnapshot, query, where } from 'firebase/firestore';
@@ -62,6 +63,15 @@ import { AccountSettingsPanel, type UserProfileSettings } from './components/Acc
 import { NotificationBell } from './components/NotificationBell';
 import { AchievementToast } from './components/AchievementToast';
 import { CrmSidebar, CRM_TAB_META, type CrmTabId } from './components/CrmSidebar';
+import {
+  buildHashFromRoute,
+  getRouteBreadcrumb,
+  parseRouteFromHash,
+  resolveInitialCrmRoute,
+  saveRouteToStorage,
+  syncRouteToUrl,
+  type AdminSubSectionId,
+} from './utils/crmRouter';
 import { getUserInitials } from './utils/avatarResize';
 import {
   detectNewUnlockNotifications,
@@ -2867,7 +2877,10 @@ export default function App() {
   );
 
   // 4. Navigation CRM verticale, Vue Kanban, Équipe/Payouts, Succès/Badges, Mon Compte, Copilote IA & Filtres Portefeuille
-  const [activeTab, setActiveTab] = useState<CrmTabId>('portefeuille');
+  const [activeTab, setActiveTab] = useState<CrmTabId>(() => {
+    const init = resolveInitialCrmRoute();
+    return init.tab;
+  });
   const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(() => {
     try {
       return window.localStorage.getItem('op_sidebar_collapsed') === '1';
@@ -2896,7 +2909,10 @@ export default function App() {
   const [dedupPrimaryChoices, setDedupPrimaryChoices] = useState<Record<string, string>>({});
   const [dedupSaving, setDedupSaving] = useState(false);
   const [userPresences, setUserPresences] = useState<UserPresenceRecord[]>([]);
-  const [adminSubSection, setAdminSubSection] = useState<AdminPanelSection>('all');
+  const [adminSubSection, setAdminSubSection] = useState<AdminPanelSection>(() => {
+    const init = resolveInitialCrmRoute();
+    return (init.adminSubSection as AdminPanelSection) || 'all';
+  });
   const [crmViewMode, setCrmViewMode] = useState<'table' | 'kanban'>('table');
   const [showAiCopilot, setShowAiCopilot] = useState(false);
   const [copilotFiche, setCopilotFiche] = useState<FicheEntreprise | null>(null);
@@ -3357,15 +3373,84 @@ export default function App() {
     return parseFriendlyCloudError(err).shortTag;
   };
 
+  // Navigation centralisée avec deep linking URL hash & persistance de session
+  const navigateCrm = useCallback(
+    (tab: CrmTabId, subSection?: AdminPanelSection, replace = false) => {
+      let targetTab = tab;
+      if (
+        (targetTab === 'admin' && !roleCapabilities.canManageUsers && !roleCapabilities.canAccessLiveGpsMap) ||
+        (targetTab === 'vault' && !roleCapabilities.canAccessApiKeysVault)
+      ) {
+        targetTab = 'portefeuille';
+      }
+
+      const nextSub =
+        targetTab === 'vault'
+          ? 'vault'
+          : subSection || (targetTab === 'admin' ? adminSubSection : undefined);
+
+      setActiveTab(targetTab);
+      if (nextSub) {
+        setAdminSubSection(nextSub);
+      }
+      syncRouteToUrl(
+        { tab: targetTab, adminSubSection: nextSub as AdminSubSectionId | undefined },
+        replace
+      );
+    },
+    [roleCapabilities, adminSubSection]
+  );
+
+  // Synchronisation bidirectionnelle Route URL (#/portefeuille, #/kanban, #/equipe, etc.) & persistance F5 / reload
+  useEffect(() => {
+    const handleHashChange = () => {
+      const parsed = parseRouteFromHash(window.location.hash);
+      let targetTab = parsed.tab;
+      if (
+        (targetTab === 'admin' && !roleCapabilities.canManageUsers && !roleCapabilities.canAccessLiveGpsMap) ||
+        (targetTab === 'vault' && !roleCapabilities.canAccessApiKeysVault)
+      ) {
+        targetTab = 'portefeuille';
+      }
+      setActiveTab(targetTab);
+      if (parsed.adminSubSection) {
+        setAdminSubSection(parsed.adminSubSection as AdminPanelSection);
+      }
+      saveRouteToStorage({ tab: targetTab, adminSubSection: parsed.adminSubSection });
+    };
+
+    window.addEventListener('hashchange', handleHashChange);
+    window.addEventListener('popstate', handleHashChange);
+
+    // Initial check: if there is no hash, push initial canonical hash without reloading
+    syncRouteToUrl(
+      { tab: activeTab, adminSubSection: adminSubSection as AdminSubSectionId },
+      true
+    );
+
+    return () => {
+      window.removeEventListener('hashchange', handleHashChange);
+      window.removeEventListener('popstate', handleHashChange);
+    };
+  }, [roleCapabilities]);
+
+  // Synchronise le hash dès que l'onglet ou la sous-section admin change
+  useEffect(() => {
+    syncRouteToUrl(
+      { tab: activeTab, adminSubSection: adminSubSection as AdminSubSectionId },
+      false
+    );
+  }, [activeTab, adminSubSection]);
+
   // Empêche strictement tout autre rôle d'accéder à la Gestion des Utilisateurs, au Coffre Clés API ou à la Carte GPS Temps Réel
   useEffect(() => {
     if (
       (!roleCapabilities.canManageUsers && !roleCapabilities.canAccessLiveGpsMap && activeTab === 'admin') ||
       (!roleCapabilities.canAccessApiKeysVault && activeTab === 'vault')
     ) {
-      setActiveTab('portefeuille');
+      navigateCrm('portefeuille', undefined, true);
     }
-  }, [roleCapabilities, activeTab]);
+  }, [roleCapabilities, activeTab, navigateCrm]);
 
   // Liste temps réel /app_users réservée exclusivement au Super-Admin (filtrée par createdBy == adminUid)
   useEffect(() => {
@@ -7266,7 +7351,7 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
         notification={activeAchievementToast}
         queueCount={achievementToastQueue.length}
         onDismiss={() => setAchievementToastQueue((prev) => prev.slice(1))}
-        onOpenBadges={() => setActiveTab('badges')}
+        onOpenBadges={() => navigateCrm('badges')}
       />
 
       {/* Shell CRM B2B avec barre verticale persistante + colonne principale */}
@@ -7274,9 +7359,9 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
         <CrmSidebar
           activeTab={activeTab}
           onSelectTab={(tab) => {
-            if (tab === 'admin') setAdminSubSection('all');
-            if (tab === 'vault') setAdminSubSection('vault');
-            setActiveTab(tab);
+            if (tab === 'admin') navigateCrm('admin', 'all');
+            else if (tab === 'vault') navigateCrm('vault', 'vault');
+            else navigateCrm(tab);
           }}
           onNewFiche={() => setShowQuickAdd(true)}
           collapsed={sidebarCollapsed}
@@ -7307,7 +7392,7 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
 
         <div className="flex-1 min-w-0 flex flex-col">
           {/* En-tête compact workspace (fil d'Ariane + actions rapides + notifications + profil) */}
-          <header className="bg-white border-b border-stone-200 sticky top-0 z-20">
+          <header className="bg-white border-b border-stone-200 sticky top-0 z-20 shadow-2xs">
             <div className="max-w-[1440px] mx-auto px-3 sm:px-5 h-14 flex items-center justify-between gap-2.5">
               <div className="flex items-center gap-2.5 min-w-0">
                 <button
@@ -7320,14 +7405,22 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
                   <Menu className="w-4 h-4" />
                 </button>
                 <div className="min-w-0">
-                  <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-1.5 flex-wrap">
                     <span className="hidden sm:inline text-[11px] font-bold uppercase tracking-wider text-stone-400">
-                      {CRM_TAB_META[activeTab].section}
+                      {getRouteBreadcrumb(activeTab, adminSubSection as AdminSubSectionId).sectionLabel}
                     </span>
                     <span className="hidden sm:inline text-stone-300">/</span>
                     <h1 className="text-sm sm:text-base font-bold tracking-tight text-stone-900 truncate">
-                      {CRM_TAB_META[activeTab].title}
+                      {getRouteBreadcrumb(activeTab, adminSubSection as AdminSubSectionId).tabLabel}
                     </h1>
+                    {getRouteBreadcrumb(activeTab, adminSubSection as AdminSubSectionId).subLabel && (
+                      <>
+                        <span className="hidden md:inline text-stone-300">/</span>
+                        <span className="hidden md:inline text-xs font-semibold text-orange-600 truncate bg-orange-50 px-2 py-0.5 rounded-md border border-orange-200">
+                          {getRouteBreadcrumb(activeTab, adminSubSection as AdminSubSectionId).subLabel}
+                        </span>
+                      </>
+                    )}
                   </div>
                   <p className="hidden md:block text-[11px] text-stone-500 truncate">
                     {CRM_TAB_META[activeTab].subtitle}
@@ -7379,7 +7472,7 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
                 <NotificationBell
                   notifications={notifications}
                   onMarkAllRead={handleMarkAllNotificationsRead}
-                  onOpenBadges={() => setActiveTab('badges')}
+                  onOpenBadges={() => navigateCrm('badges')}
                 />
 
                 {/* Menu Profil Utilisateur (Photo, Rôle, Paramètres & Déconnexion) */}
@@ -7453,7 +7546,7 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
                           type="button"
                           onClick={() => {
                             setProfileMenuOpen(false);
-                            setActiveTab('compte');
+                            navigateCrm('compte');
                           }}
                           className="w-full px-3 py-2 rounded-lg text-left font-semibold text-stone-800 hover:bg-stone-100 flex items-center gap-2"
                         >
@@ -7464,7 +7557,7 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
                           type="button"
                           onClick={() => {
                             setProfileMenuOpen(false);
-                            setActiveTab('badges');
+                            navigateCrm('badges');
                           }}
                           className="w-full px-3 py-2 rounded-lg text-left font-semibold text-stone-800 hover:bg-stone-100 flex items-center justify-between gap-2"
                         >
@@ -7480,7 +7573,7 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
                           type="button"
                           onClick={() => {
                             setProfileMenuOpen(false);
-                            setActiveTab('team');
+                            navigateCrm('team');
                           }}
                           className="w-full px-3 py-2 rounded-lg text-left font-semibold text-stone-800 hover:bg-stone-100 flex items-center gap-2"
                         >
@@ -7569,8 +7662,7 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
                       type="button"
                       onClick={() => {
                         setShowApiHub(false);
-                        setAdminSubSection('vault');
-                        setActiveTab('vault');
+                        navigateCrm('vault', 'vault');
                       }}
                       className="px-2.5 py-1.5 rounded-lg border border-orange-300 bg-orange-50 hover:bg-orange-100 text-xs font-semibold text-orange-800 inline-flex items-center gap-1.5"
                     >
@@ -7918,225 +8010,184 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
           </section>
         )}
 
-        {/* Panneau Villes Cibles Persistant — Intègre l'ensemble des villes du Maroc, le filtrage par Région à part et la synchronisation GPS automatique */}
+        {/* Barre Maîtresse d'Organisation des Vues & Sous-Sections */}
         <section
-          data-testid="villes-cibles-panel"
-          className="bg-white rounded-xl border border-stone-200 p-4 space-y-3"
+          data-testid="crm-master-view-navigator"
+          className="bg-white rounded-xl border border-stone-200 p-2 sm:p-2.5 flex flex-wrap items-center justify-between gap-2 shadow-2xs"
         >
-          <div className="flex flex-wrap items-center justify-between gap-2.5">
-            <div className="flex flex-wrap items-center gap-2">
-              <MapPin className="w-4 h-4 text-orange-600 shrink-0" />
-              <h2 className="text-xs font-bold text-stone-800 tabular-nums">
-                Villes Cibles ({activeVilles.length}/{allVilles.length})
-              </h2>
-              {detectedGeoState ? (
-                <span
-                  data-testid="detected-geo-availability-badge"
-                  className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-200 bg-emerald-50 px-2.5 py-0.5 text-[11px] font-semibold text-emerald-900"
-                >
-                  <span>
-                    Localisation détectée : <strong>{detectedGeoState.nearestCity}</strong> · Région{' '}
-                    <strong>{detectedGeoState.regionLabel}</strong> (Grande ville :{' '}
-                    <strong>{detectedGeoState.nearestMajorCity}</strong>)
-                  </span>
-                </span>
-              ) : (
-                <span
-                  data-testid="detected-geo-availability-badge"
-                  className="inline-flex items-center gap-1.5 rounded-lg border border-orange-200 bg-orange-50/70 px-2.5 py-0.5 text-[11px] font-semibold text-orange-900"
-                >
-                  <span>
-                    Disponibilité Services Orange Pro :{' '}
-                    <strong>
-                      {resolveCityAndRegionFromZoneString(userProfile.zone || defaultVille).formattedZone}
-                    </strong>
-                  </span>
-                </span>
-              )}
-            </div>
-
-            <div className="flex flex-wrap items-center gap-2 text-xs">
-              {/* Filtrage de la Région à part */}
-              <div className="flex items-center gap-1.5 bg-stone-50 px-2.5 py-1 rounded-lg border border-stone-200">
-                <span className="font-semibold text-stone-600 whitespace-nowrap">Région :</span>
-                <select
-                  aria-label="Filtrer les villes cibles par région"
-                  data-testid="villes-cibles-region-select"
-                  value={villesRegionFilter}
-                  onChange={(e) => {
-                    const nextReg = e.target.value;
-                    setVillesRegionFilter(nextReg);
-                    if (nextReg !== 'all') {
-                      const regMeta = MOROCCO_REGIONS.find((r) => r.id === nextReg);
-                      const regCities = filterCitiesByRegion(nextReg, allVilles);
-                      setVillesState((prev) => ({
-                        ...prev,
-                        active: regCities.length > 0 ? regCities : prev.active,
-                        defaultVille: regMeta?.majorCity || regCities[0] || prev.defaultVille,
-                      }));
-                    }
-                  }}
-                  className="bg-transparent font-semibold text-stone-900 focus:outline-none"
-                >
-                  <option value="all">Toutes les régions du Maroc (12 régions · {allVilles.length} villes)</option>
-                  {MOROCCO_REGIONS.map((reg) => {
-                    const count = MOROCCO_CITIES_CATALOG.filter((c) => c.regionId === reg.id).length;
-                    return (
-                      <option key={reg.id} value={reg.id}>
-                        {reg.label} ({count} villes · Chef-lieu : {reg.majorCity})
-                      </option>
-                    );
-                  })}
-                </select>
-              </div>
-
-              <label className="flex items-center gap-1.5 cursor-pointer bg-stone-50 px-2.5 py-1 rounded-lg border border-stone-200">
-                <input
-                  type="radio"
-                  name="modeVille"
-                  checked={modeVille === 'filter'}
-                  onChange={() => setVillesState((p) => ({ ...p, mode: 'filter' }))}
-                  className="accent-orange-600"
-                />
-                <span>Filtrer uniquement les villes cochées</span>
-              </label>
-
-              <label className="flex items-center gap-1.5 cursor-pointer bg-stone-50 px-2.5 py-1 rounded-lg border border-stone-200">
-                <input
-                  type="radio"
-                  name="modeVille"
-                  checked={modeVille === 'default'}
-                  onChange={() => setVillesState((p) => ({ ...p, mode: 'default' }))}
-                  className="accent-orange-600"
-                />
-                <span>
-                  Ville par défaut{detectedGeoState ? ' (Grande ville proche)' : ''} :
-                </span>
-                <select
-                  aria-label="Ville par défaut"
-                  data-testid="default-ville-select"
-                  value={defaultVille}
-                  onChange={(e) => {
-                    const nextCity = e.target.value;
-                    const resolved = resolveCityAndRegionFromZoneString(nextCity);
-                    setVillesState((p) => ({ ...p, defaultVille: nextCity }));
-                    setUserProfile((p) => ({ ...p, zone: resolved.formattedZone }));
-                  }}
-                  className="bg-transparent font-semibold text-orange-700 focus:outline-none"
-                >
-                  {filterCitiesByRegion(villesRegionFilter, allVilles).map((v) => (
-                    <option key={v} value={v}>
-                      {v}
-                    </option>
-                  ))}
-                  {!filterCitiesByRegion(villesRegionFilter, allVilles).includes(defaultVille) && (
-                    <option value={defaultVille}>{defaultVille}</option>
-                  )}
-                </select>
-              </label>
-            </div>
-          </div>
-
-          {/* Actions rapides sur la région ou l'ensemble des villes */}
-          <div className="flex flex-wrap items-center justify-between gap-2 pt-1 border-t border-stone-100 text-[11px]">
-            <div className="flex flex-wrap items-center gap-1.5">
-              <button
-                type="button"
-                onClick={() => {
-                  const visibleCities = filterCitiesByRegion(villesRegionFilter, allVilles);
-                  setVillesState((prev) => ({
-                    ...prev,
-                    active: Array.from(new Set([...prev.active, ...visibleCities])),
-                  }));
-                }}
-                className="px-2 py-1 rounded-md border border-stone-300 bg-stone-50 hover:bg-stone-100 text-stone-800 font-semibold"
-              >
-                Cocher toute la sélection ({filterCitiesByRegion(villesRegionFilter, allVilles).length})
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  const visibleSet = new Set(filterCitiesByRegion(villesRegionFilter, allVilles));
-                  setVillesState((prev) => ({
-                    ...prev,
-                    active: prev.active.filter((c) => !visibleSet.has(c)),
-                  }));
-                }}
-                className="px-2 py-1 rounded-md border border-stone-200 bg-white hover:bg-stone-50 text-stone-600 font-medium"
-              >
-                Décocher la sélection
-              </button>
-              {detectedGeoState && (
+          <div className="flex flex-wrap items-center gap-1.5 sm:gap-2">
+            {/* Domaine Commercial : Switcher rapide Portefeuille / Pipeline Kanban / Équipe */}
+            {(activeTab === 'portefeuille' || activeTab === 'kanban' || activeTab === 'team') && (
+              <div className="flex items-center gap-1 p-0.5 bg-stone-100 rounded-lg border border-stone-200 text-xs font-semibold">
                 <button
                   type="button"
-                  data-testid="sync-gps-region-villes-btn"
-                  onClick={() => {
-                    setVillesRegionFilter(detectedGeoState.regionId);
-                    setVillesState((prev) => ({
-                      ...prev,
-                      active: detectedGeoState.regionalCities,
-                      defaultVille: detectedGeoState.nearestMajorCity,
-                    }));
-                    setUserProfile((prev) => ({
-                      ...prev,
-                      zone: detectedGeoState.collaboratorPublicZoneLabel,
-                    }));
-                    notify(
-                      `Région ${detectedGeoState.regionLabel} appliquée (${detectedGeoState.regionalCities.length} villes cibles · Ville par défaut : ${detectedGeoState.nearestMajorCity}).`
-                    );
-                  }}
-                  className="px-2.5 py-1 rounded-md border border-orange-300 bg-orange-50 hover:bg-orange-100 text-orange-900 font-semibold"
-                >
-                  Appliquer ma région détectée ({detectedGeoState.regionShortLabel} · {detectedGeoState.nearestMajorCity})
-                </button>
-              )}
-            </div>
-            <span className="text-stone-500">
-              {villesRegionFilter === 'all'
-                ? `Ensemble des villes du Maroc (${allVilles.length} villes)`
-                : `Région active : ${MOROCCO_REGIONS.find((r) => r.id === villesRegionFilter)?.label || 'Maroc'}`}
-            </span>
-          </div>
-
-          <div className="flex flex-wrap items-center gap-1.5 max-h-36 overflow-y-auto pr-1">
-            {filterCitiesByRegion(villesRegionFilter, allVilles).map((v) => {
-              const on = activeVilles.includes(v);
-              const isMajor = MOROCCO_CITIES_CATALOG.some((c) => c.name === v && c.isMajorCity);
-              return (
-                <button
-                  key={v}
-                  type="button"
-                  onClick={() => toggleVille(v)}
-                  aria-pressed={on}
-                  className={`px-2.5 py-1 rounded-lg text-xs font-medium border transition-colors whitespace-nowrap ${
-                    on
-                      ? 'bg-stone-900 text-white border-stone-900'
-                      : 'bg-stone-50 text-stone-500 border-stone-200 hover:border-stone-400'
+                  onClick={() => navigateCrm('portefeuille')}
+                  className={`px-3 py-1.5 rounded-md transition-all flex items-center gap-1.5 ${
+                    activeTab === 'portefeuille'
+                      ? 'bg-white text-stone-900 shadow-2xs border border-stone-200 font-bold'
+                      : 'text-stone-600 hover:text-stone-900'
                   }`}
                 >
-                  {v}
-                  {isMajor && v === defaultVille ? ' ★' : ''}
+                  <Building2 className="w-3.5 h-3.5 text-orange-600" />
+                  <span>Portefeuille ({accessibleFiches.length})</span>
                 </button>
-              );
-            })}
-            <div className="flex items-center gap-1 ml-1">
-              <input
-                type="text"
-                value={newVilleInput}
-                onChange={(e) => setNewVilleInput(e.target.value)}
-                onKeyDown={(e) => e.key === 'Enter' && handleAddVille()}
-                placeholder="+ Ville ou ZI..."
-                aria-label="Ajouter une ville ou zone industrielle"
-                className="w-36 px-2.5 py-1 rounded-lg border border-stone-300 text-xs bg-stone-50 focus:bg-white focus:outline-none focus:border-orange-500"
-              />
-              <button
-                type="button"
-                onClick={handleAddVille}
-                className="px-2.5 py-1 rounded-lg bg-orange-600 hover:bg-orange-700 text-white text-xs font-semibold"
-              >
-                Ajouter
-              </button>
-            </div>
+                <button
+                  type="button"
+                  onClick={() => navigateCrm('kanban')}
+                  className={`px-3 py-1.5 rounded-md transition-all flex items-center gap-1.5 ${
+                    activeTab === 'kanban'
+                      ? 'bg-white text-stone-900 shadow-2xs border border-stone-200 font-bold'
+                      : 'text-stone-600 hover:text-stone-900'
+                  }`}
+                >
+                  <KanbanSquare className="w-3.5 h-3.5 text-sky-600" />
+                  <span>Pipeline Kanban</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => navigateCrm('team')}
+                  className={`px-3 py-1.5 rounded-md transition-all flex items-center gap-1.5 ${
+                    activeTab === 'team'
+                      ? 'bg-white text-stone-900 shadow-2xs border border-stone-200 font-bold'
+                      : 'text-stone-600 hover:text-stone-900'
+                  }`}
+                >
+                  <Trophy className="w-3.5 h-3.5 text-emerald-600" />
+                  <span>Équipe &amp; Payouts ({signedContracts.length})</span>
+                </button>
+              </div>
+            )}
+
+            {/* Domaine Prospection & MDM : Switcher rapide Extraction / Crawler / Dédup */}
+            {(activeTab === 'paste' || activeTab === 'crawler' || activeTab === 'dedup') && (
+              <div className="flex items-center gap-1 p-0.5 bg-stone-100 rounded-lg border border-stone-200 text-xs font-semibold">
+                <button
+                  type="button"
+                  onClick={() => navigateCrm('paste')}
+                  className={`px-3 py-1.5 rounded-md transition-all flex items-center gap-1.5 ${
+                    activeTab === 'paste'
+                      ? 'bg-white text-stone-900 shadow-2xs border border-stone-200 font-bold'
+                      : 'text-stone-600 hover:text-stone-900'
+                  }`}
+                >
+                  <FileText className="w-3.5 h-3.5 text-orange-600" />
+                  <span>Extraction / Import HTML &amp; CSV</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => navigateCrm('crawler')}
+                  className={`px-3 py-1.5 rounded-md transition-all flex items-center gap-1.5 ${
+                    activeTab === 'crawler'
+                      ? 'bg-white text-stone-900 shadow-2xs border border-stone-200 font-bold'
+                      : 'text-stone-600 hover:text-stone-900'
+                  }`}
+                >
+                  <Globe className="w-3.5 h-3.5 text-sky-600" />
+                  <span>Crawler Profond N1/N2</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => navigateCrm('dedup')}
+                  className={`px-3 py-1.5 rounded-md transition-all flex items-center gap-1.5 ${
+                    activeTab === 'dedup'
+                      ? 'bg-white text-stone-900 shadow-2xs border border-stone-200 font-bold'
+                      : 'text-stone-600 hover:text-stone-900'
+                  }`}
+                >
+                  <GitMerge className="w-3.5 h-3.5 text-amber-600" />
+                  <span>Déduplication MDM ({duplicateGroups.length})</span>
+                </button>
+              </div>
+            )}
+
+            {/* Domaine Progression : Switcher rapide Succès & Badges / Mon Compte */}
+            {(activeTab === 'badges' || activeTab === 'compte') && (
+              <div className="flex items-center gap-1 p-0.5 bg-stone-100 rounded-lg border border-stone-200 text-xs font-semibold">
+                <button
+                  type="button"
+                  onClick={() => navigateCrm('badges')}
+                  className={`px-3 py-1.5 rounded-md transition-all flex items-center gap-1.5 ${
+                    activeTab === 'badges'
+                      ? 'bg-white text-stone-900 shadow-2xs border border-stone-200 font-bold'
+                      : 'text-stone-600 hover:text-stone-900'
+                  }`}
+                >
+                  <Award className="w-3.5 h-3.5 text-amber-500" />
+                  <span>Mes Succès &amp; Badges ({myAchievementSummary.unlockedCount}/{myAchievementSummary.totalCount})</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => navigateCrm('compte')}
+                  className={`px-3 py-1.5 rounded-md transition-all flex items-center gap-1.5 ${
+                    activeTab === 'compte'
+                      ? 'bg-white text-stone-900 shadow-2xs border border-stone-200 font-bold'
+                      : 'text-stone-600 hover:text-stone-900'
+                  }`}
+                >
+                  <UserIcon className="w-3.5 h-3.5 text-orange-600" />
+                  <span>Mon Compte &amp; Sécurité</span>
+                </button>
+              </div>
+            )}
+
+            {/* Domaine Administration : Switcher rapide Sous-Sections Super-Admin */}
+            {(activeTab === 'admin' || activeTab === 'vault') && isSuperAdmin && (
+              <div className="flex items-center gap-1 p-0.5 bg-stone-100 rounded-lg border border-stone-200 text-xs font-semibold">
+                <button
+                  type="button"
+                  onClick={() => navigateCrm('admin', 'all')}
+                  className={`px-3 py-1.5 rounded-md transition-all ${
+                    adminSubSection === 'all' && activeTab === 'admin'
+                      ? 'bg-white text-stone-900 shadow-2xs border border-stone-200 font-bold'
+                      : 'text-stone-600 hover:text-stone-900'
+                  }`}
+                >
+                  Vue d&apos;ensemble
+                </button>
+                <button
+                  type="button"
+                  onClick={() => navigateCrm('admin', 'users')}
+                  className={`px-3 py-1.5 rounded-md transition-all flex items-center gap-1.5 ${
+                    adminSubSection === 'users' && activeTab === 'admin'
+                      ? 'bg-white text-stone-900 shadow-2xs border border-stone-200 font-bold'
+                      : 'text-stone-600 hover:text-stone-900'
+                  }`}
+                >
+                  <Users className="w-3.5 h-3.5 text-orange-600" />
+                  <span>Utilisateurs ({managedUsers.length})</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => navigateCrm('admin', 'attendance')}
+                  className={`px-3 py-1.5 rounded-md transition-all flex items-center gap-1.5 ${
+                    adminSubSection === 'attendance' && activeTab === 'admin'
+                      ? 'bg-white text-stone-900 shadow-2xs border border-stone-200 font-bold'
+                      : 'text-stone-600 hover:text-stone-900'
+                  }`}
+                >
+                  <Navigation className="w-3.5 h-3.5 text-sky-600" />
+                  <span>Radar GPS Terrain ({userPresences.length})</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => navigateCrm('vault', 'vault')}
+                  className={`px-3 py-1.5 rounded-md transition-all flex items-center gap-1.5 ${
+                    activeTab === 'vault' || adminSubSection === 'vault'
+                      ? 'bg-white text-orange-900 shadow-2xs border border-orange-200 font-bold'
+                      : 'text-stone-600 hover:text-stone-900'
+                  }`}
+                >
+                  <KeyRound className="w-3.5 h-3.5 text-amber-600" />
+                  <span>Coffre Clés API ({cloudApiKeys.length})</span>
+                </button>
+              </div>
+            )}
+          </div>
+
+          <div className="flex items-center gap-2 text-xs text-stone-500">
+            <span className="hidden sm:inline-flex items-center gap-1 text-[11px] font-mono text-stone-600 bg-stone-50 border border-stone-200 px-2 py-0.5 rounded">
+              {buildHashFromRoute(activeTab, adminSubSection as AdminSubSectionId)}
+            </span>
           </div>
         </section>
 
@@ -8145,6 +8196,227 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
         {/* ================================================================== */}
         {activeTab === 'portefeuille' && (
           <>
+            {/* Panneau Villes Cibles — Intègre l'ensemble des villes du Maroc, le filtrage par Région à part et la synchronisation GPS automatique */}
+            <section
+              data-testid="villes-cibles-panel"
+              className="bg-white rounded-xl border border-stone-200 p-4 space-y-3"
+            >
+              <div className="flex flex-wrap items-center justify-between gap-2.5">
+                <div className="flex flex-wrap items-center gap-2">
+                  <MapPin className="w-4 h-4 text-orange-600 shrink-0" />
+                  <h2 className="text-xs font-bold text-stone-800 tabular-nums">
+                    Villes Cibles ({activeVilles.length}/{allVilles.length})
+                  </h2>
+                  {detectedGeoState ? (
+                    <span
+                      data-testid="detected-geo-availability-badge"
+                      className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-200 bg-emerald-50 px-2.5 py-0.5 text-[11px] font-semibold text-emerald-900"
+                    >
+                      <span>
+                        Localisation détectée : <strong>{detectedGeoState.nearestCity}</strong> · Région{' '}
+                        <strong>{detectedGeoState.regionLabel}</strong> (Grande ville :{' '}
+                        <strong>{detectedGeoState.nearestMajorCity}</strong>)
+                      </span>
+                    </span>
+                  ) : (
+                    <span
+                      data-testid="detected-geo-availability-badge"
+                      className="inline-flex items-center gap-1.5 rounded-lg border border-orange-200 bg-orange-50/70 px-2.5 py-0.5 text-[11px] font-semibold text-orange-900"
+                    >
+                      <span>
+                        Disponibilité Services Orange Pro :{' '}
+                        <strong>
+                          {resolveCityAndRegionFromZoneString(userProfile.zone || defaultVille).formattedZone}
+                        </strong>
+                      </span>
+                    </span>
+                  )}
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2 text-xs">
+                  {/* Filtrage de la Région à part */}
+                  <div className="flex items-center gap-1.5 bg-stone-50 px-2.5 py-1 rounded-lg border border-stone-200">
+                    <span className="font-semibold text-stone-600 whitespace-nowrap">Région :</span>
+                    <select
+                      aria-label="Filtrer les villes cibles par région"
+                      data-testid="villes-cibles-region-select"
+                      value={villesRegionFilter}
+                      onChange={(e) => {
+                        const nextReg = e.target.value;
+                        setVillesRegionFilter(nextReg);
+                        if (nextReg !== 'all') {
+                          const regMeta = MOROCCO_REGIONS.find((r) => r.id === nextReg);
+                          const regCities = filterCitiesByRegion(nextReg, allVilles);
+                          setVillesState((prev) => ({
+                            ...prev,
+                            active: regCities.length > 0 ? regCities : prev.active,
+                            defaultVille: regMeta?.majorCity || regCities[0] || prev.defaultVille,
+                          }));
+                        }
+                      }}
+                      className="bg-transparent font-semibold text-stone-900 focus:outline-none"
+                    >
+                      <option value="all">Toutes les régions du Maroc (12 régions · {allVilles.length} villes)</option>
+                      {MOROCCO_REGIONS.map((reg) => {
+                        const count = MOROCCO_CITIES_CATALOG.filter((c) => c.regionId === reg.id).length;
+                        return (
+                          <option key={reg.id} value={reg.id}>
+                            {reg.label} ({count} villes · Chef-lieu : {reg.majorCity})
+                          </option>
+                        );
+                      })}
+                    </select>
+                  </div>
+
+                  <label className="flex items-center gap-1.5 cursor-pointer bg-stone-50 px-2.5 py-1 rounded-lg border border-stone-200">
+                    <input
+                      type="radio"
+                      name="modeVille"
+                      checked={modeVille === 'filter'}
+                      onChange={() => setVillesState((p) => ({ ...p, mode: 'filter' }))}
+                      className="accent-orange-600"
+                    />
+                    <span>Filtrer uniquement les villes cochées</span>
+                  </label>
+
+                  <label className="flex items-center gap-1.5 cursor-pointer bg-stone-50 px-2.5 py-1 rounded-lg border border-stone-200">
+                    <input
+                      type="radio"
+                      name="modeVille"
+                      checked={modeVille === 'default'}
+                      onChange={() => setVillesState((p) => ({ ...p, mode: 'default' }))}
+                      className="accent-orange-600"
+                    />
+                    <span>
+                      Ville par défaut{detectedGeoState ? ' (Grande ville proche)' : ''} :
+                    </span>
+                    <select
+                      aria-label="Ville par défaut"
+                      data-testid="default-ville-select"
+                      value={defaultVille}
+                      onChange={(e) => {
+                        const nextCity = e.target.value;
+                        const resolved = resolveCityAndRegionFromZoneString(nextCity);
+                        setVillesState((p) => ({ ...p, defaultVille: nextCity }));
+                        setUserProfile((p) => ({ ...p, zone: resolved.formattedZone }));
+                      }}
+                      className="bg-transparent font-semibold text-orange-700 focus:outline-none"
+                    >
+                      {filterCitiesByRegion(villesRegionFilter, allVilles).map((v) => (
+                        <option key={v} value={v}>
+                          {v}
+                        </option>
+                      ))}
+                      {!filterCitiesByRegion(villesRegionFilter, allVilles).includes(defaultVille) && (
+                        <option value={defaultVille}>{defaultVille}</option>
+                      )}
+                    </select>
+                  </label>
+                </div>
+              </div>
+
+              {/* Actions rapides sur la région ou l'ensemble des villes */}
+              <div className="flex flex-wrap items-center justify-between gap-2 pt-1 border-t border-stone-100 text-[11px]">
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const visibleCities = filterCitiesByRegion(villesRegionFilter, allVilles);
+                      setVillesState((prev) => ({
+                        ...prev,
+                        active: Array.from(new Set([...prev.active, ...visibleCities])),
+                      }));
+                    }}
+                    className="px-2 py-1 rounded-md border border-stone-300 bg-stone-50 hover:bg-stone-100 text-stone-800 font-semibold"
+                  >
+                    Cocher toute la sélection ({filterCitiesByRegion(villesRegionFilter, allVilles).length})
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const visibleSet = new Set(filterCitiesByRegion(villesRegionFilter, allVilles));
+                      setVillesState((prev) => ({
+                        ...prev,
+                        active: prev.active.filter((c) => !visibleSet.has(c)),
+                      }));
+                    }}
+                    className="px-2 py-1 rounded-md border border-stone-200 bg-white hover:bg-stone-50 text-stone-600 font-medium"
+                  >
+                    Décocher la sélection
+                  </button>
+                  {detectedGeoState && (
+                    <button
+                      type="button"
+                      data-testid="sync-gps-region-villes-btn"
+                      onClick={() => {
+                        setVillesRegionFilter(detectedGeoState.regionId);
+                        setVillesState((prev) => ({
+                          ...prev,
+                          active: detectedGeoState.regionalCities,
+                          defaultVille: detectedGeoState.nearestMajorCity,
+                        }));
+                        setUserProfile((prev) => ({
+                          ...prev,
+                          zone: detectedGeoState.collaboratorPublicZoneLabel,
+                        }));
+                        notify(
+                          `Région ${detectedGeoState.regionLabel} appliquée (${detectedGeoState.regionalCities.length} villes cibles · Ville par défaut : ${detectedGeoState.nearestMajorCity}).`
+                        );
+                      }}
+                      className="px-2.5 py-1 rounded-md border border-orange-300 bg-orange-50 hover:bg-orange-100 text-orange-900 font-semibold"
+                    >
+                      Appliquer ma région détectée ({detectedGeoState.regionShortLabel} · {detectedGeoState.nearestMajorCity})
+                    </button>
+                  )}
+                </div>
+                <span className="text-stone-500">
+                  {villesRegionFilter === 'all'
+                    ? `Ensemble des villes du Maroc (${allVilles.length} villes)`
+                    : `Région active : ${MOROCCO_REGIONS.find((r) => r.id === villesRegionFilter)?.label || 'Maroc'}`}
+                </span>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-1.5 max-h-36 overflow-y-auto pr-1">
+                {filterCitiesByRegion(villesRegionFilter, allVilles).map((v) => {
+                  const on = activeVilles.includes(v);
+                  const isMajor = MOROCCO_CITIES_CATALOG.some((c) => c.name === v && c.isMajorCity);
+                  return (
+                    <button
+                      key={v}
+                      type="button"
+                      onClick={() => toggleVille(v)}
+                      aria-pressed={on}
+                      className={`px-2.5 py-1 rounded-lg text-xs font-medium border transition-colors whitespace-nowrap ${
+                        on
+                          ? 'bg-stone-900 text-white border-stone-900'
+                          : 'bg-stone-50 text-stone-500 border-stone-200 hover:border-stone-400'
+                      }`}
+                    >
+                      {v}
+                      {isMajor && v === defaultVille ? ' ★' : ''}
+                    </button>
+                  );
+                })}
+                <div className="flex items-center gap-1 ml-1">
+                  <input
+                    type="text"
+                    value={newVilleInput}
+                    onChange={(e) => setNewVilleInput(e.target.value)}
+                    onKeyDown={(e) => e.key === 'Enter' && handleAddVille()}
+                    placeholder="+ Ville ou ZI..."
+                    aria-label="Ajouter une ville ou zone industrielle"
+                    className="w-36 px-2.5 py-1 rounded-lg border border-stone-300 text-xs bg-stone-50 focus:bg-white focus:outline-none focus:border-orange-500"
+                  />
+                  <button
+                    type="button"
+                    onClick={handleAddVille}
+                    className="px-2.5 py-1 rounded-lg bg-orange-600 hover:bg-orange-700 text-white text-xs font-semibold"
+                  >
+                    Ajouter
+                  </button>
+                </div>
+              </div>
+            </section>
             {/* 6 Cartes KPI Couleur Orange Pro Cliquables */}
             <section className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2.5" aria-label="Segments couleur Orange Pro">
               {(Object.keys(SEGMENTS_COULEUR) as SegmentCouleur[]).map((col) => {

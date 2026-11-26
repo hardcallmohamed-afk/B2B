@@ -21,6 +21,7 @@ import { ROLE_BADGE_META, type TeamRole } from '../utils/gamification';
 import { getUserInitials } from '../utils/avatarResize';
 import { DiversifiaMark } from './DiversifiaLogo';
 import { RoleBadge } from './RoleBadge';
+import { buildHashFromRoute } from '../utils/crmRouter';
 
 export type CrmTabId =
   | 'portefeuille'
@@ -337,14 +338,17 @@ export const CrmSidebar: React.FC<CrmSidebarProps> = ({
                 const Icon = item.icon;
                 const active = activeTab === item.id;
                 return (
-                  <button
+                  <a
                     key={item.id}
-                    type="button"
+                    href={buildHashFromRoute(item.id)}
                     role="tab"
                     aria-selected={active}
                     data-testid={`crm-nav-${item.id}`}
                     title={compact ? `${item.label}${item.badge ? ` (${item.badge})` : ''}` : undefined}
-                    onClick={() => handleNavClick(item.id)}
+                    onClick={(e) => {
+                      e.preventDefault();
+                      handleNavClick(item.id);
+                    }}
                     className={`w-full flex items-center rounded-xl transition-colors text-xs whitespace-nowrap ${
                       compact
                         ? 'justify-center px-0 py-2'
@@ -378,7 +382,7 @@ export const CrmSidebar: React.FC<CrmSidebarProps> = ({
                         {item.badge}
                       </span>
                     )}
-                  </button>
+                  </a>
                 );
               })}
             </div>
