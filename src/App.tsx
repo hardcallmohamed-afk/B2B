@@ -3699,6 +3699,11 @@ export default function App() {
         const list: UserPresenceRecord[] = [];
         snap.forEach((docSnap) => {
           const d = docSnap.data();
+          const serverUpdatedAtIso =
+            d.updatedAt && typeof d.updatedAt.toDate === 'function'
+              ? d.updatedAt.toDate().toISOString()
+              : '';
+          const rawLastSeenAt = typeof d.lastSeenAt === 'string' ? d.lastSeenAt : '';
           list.push({
             uid: docSnap.id,
             orgScope: 'orange_pro_team',
@@ -3715,7 +3720,8 @@ export default function App() {
             devicesUsed: Array.isArray(d.devicesUsed) ? (d.devicesUsed as string[]) : [],
             lastLoginAt: typeof d.lastLoginAt === 'string' ? d.lastLoginAt : '',
             lastLogoutAt: typeof d.lastLogoutAt === 'string' ? d.lastLogoutAt : '',
-            lastSeenAt: typeof d.lastSeenAt === 'string' ? d.lastSeenAt : '',
+            lastSeenAt: rawLastSeenAt || serverUpdatedAtIso,
+            updatedAtIso: serverUpdatedAtIso || undefined,
             lastWorkDisconnectAt:
               typeof d.lastWorkDisconnectAt === 'string' ? d.lastWorkDisconnectAt : '',
             workHoursDisconnectCount: Number(d.workHoursDisconnectCount) || 0,
@@ -3890,6 +3896,12 @@ export default function App() {
           if (liveFieldContextRef.current.lat !== null && liveFieldContextRef.current.lng !== null) {
             accumulateElapsed(true, true);
           }
+          // Confirmation heartbeat 5s après connexion (annule toute race d'un ancien onglet fermé lors d'un rechargement)
+          window.setTimeout(() => {
+            if (!cancelled) {
+              accumulateElapsed(true, true);
+            }
+          }, 5000);
         }
       })
       .catch(() => {
@@ -4183,6 +4195,7 @@ export default function App() {
       }
       const cur = activeAttendanceRef.current;
       if (!cur || cur.closed || cur.uid !== uid) return;
+      cur.closed = true;
       const closeMs = Date.now();
       const currentKey = getLocalDateKey(new Date(closeMs));
       if (currentKey !== cur.dateKey) {
@@ -4241,7 +4254,6 @@ export default function App() {
     window.addEventListener('offline', handleOffline);
     window.addEventListener('online', handleOnline);
     window.addEventListener('pagehide', handlePageHide);
-    window.addEventListener('beforeunload', handlePageHide);
 
     return () => {
       cancelled = true;
@@ -4254,7 +4266,6 @@ export default function App() {
       window.removeEventListener('offline', handleOffline);
       window.removeEventListener('online', handleOnline);
       window.removeEventListener('pagehide', handlePageHide);
-      window.removeEventListener('beforeunload', handlePageHide);
     };
   }, [authReady, cloudUser, canAccessWorkspace, currentUserRole]);
 

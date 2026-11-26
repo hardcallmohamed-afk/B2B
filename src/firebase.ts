@@ -285,7 +285,9 @@ export function getSignedContractsQuery(uid: string, canSuperviseTeam: boolean) 
   return query(collection(db, 'signed_contracts'), where('ownerId', '==', uid));
 }
 
-export type UserPresenceRecord = SanitizedUserPresenceDoc;
+export type UserPresenceRecord = SanitizedUserPresenceDoc & {
+  updatedAtIso?: string;
+};
 export type AttendanceSessionRecord = SanitizedAttendanceSessionDoc;
 
 export function getUserPresenceListQuery() {
@@ -726,8 +728,14 @@ export async function createSignedContract(
   input: SignedContractLike,
   isSuperAdmin = false
 ): Promise<SanitizedSignedContractDoc> {
+  const currentUid = auth.currentUser?.uid;
+  if (!currentUid) {
+    throw new Error('Session Firebase non authentifiée : impossible de créer le contrat.');
+  }
   const clean = sanitizeSignedContractPayload({
     ...input,
+    // Ensure client authInfo.userId maps strictly to ownerId for non-supervisors
+    ownerId: isSuperAdmin ? input.ownerId || currentUid : currentUid,
     // Phase 3 Rules: client creation forces payoutMad = 0 and payoutStatus = 'En attente'
     payoutMad: isSuperAdmin ? input.payoutMad : 0,
     payoutStatus: isSuperAdmin ? input.payoutStatus : 'En attente',
@@ -1330,6 +1338,8 @@ export async function syncMyUserPresenceProfile(params: {
         phonePro: cleanProfile.phonePro,
         avatarDataUrl: cleanProfile.avatarDataUrl,
         zone: cleanProfile.zone,
+        isOnline: true,
+        lastSeenAt: new Date().toISOString(),
         updatedAt: serverTimestamp(),
       });
     } else {
@@ -1642,6 +1652,10 @@ export async function heartbeatAttendanceSession(params: {
   let safeTotal = Math.min(100000000, Math.max(0, Math.round(params.totalWorkedSeconds)));
   const safeSession = Math.min(86400, Math.max(0, Math.round(params.sessionWorkedSeconds)));
 
+  if (!auth.currentUser || auth.currentUser.uid !== params.uid) {
+    return { todayWorkedSeconds: safeToday, totalWorkedSeconds: safeTotal };
+  }
+
   try {
     await updateDoc(presRef, {
       isOnline: true,
@@ -1682,19 +1696,27 @@ export async function heartbeatAttendanceSession(params: {
           typeof prev.role === 'string' &&
           isFirestoreTimestampValue(prev.createdAt);
 
+        let recoveredViaUpdate = false;
         if (hasValidHeader) {
-          await updateDoc(presRef, {
-            isOnline: true,
-            currentDevice: params.deviceLabel.slice(0, 160),
-            devicesUsed: nextDevices,
-            lastSeenAt: params.nowIso.slice(0, 64),
-            activeDateKey: params.dateKey.slice(0, 16),
-            todayWorkedSeconds: safeToday,
-            totalWorkedSeconds: safeTotal,
-            currentSessionId: params.sessionId.slice(0, 128),
-            updatedAt: serverTimestamp(),
-          });
-        } else {
+          try {
+            await updateDoc(presRef, {
+              isOnline: true,
+              currentDevice: params.deviceLabel.slice(0, 160),
+              devicesUsed: nextDevices,
+              lastSeenAt: params.nowIso.slice(0, 64),
+              activeDateKey: params.dateKey.slice(0, 16),
+              todayWorkedSeconds: safeToday,
+              totalWorkedSeconds: safeTotal,
+              currentSessionId: params.sessionId.slice(0, 128),
+              updatedAt: serverTimestamp(),
+            });
+            recoveredViaUpdate = true;
+          } catch {
+            recoveredViaUpdate = false;
+          }
+        }
+
+        if (!recoveredViaUpdate) {
           const fallbackName =
             params.fallbackProfile?.displayName ||
             (typeof prev.displayName === 'string' ? prev.displayName : 'Collaborateur');
@@ -2528,48 +2550,38 @@ async function updateOrUpsertSignedContract(
     throw new Error('Un motif de refus est obligatoire pour rejeter le contrat.');
   }
 
+  const currentUser = auth.currentUser;
+  if (!currentUser?.uid) {
+    throw new Error('Session Firebase expirée : reconnectez-vous pour mettre à jour ce contrat.');
+  }
+
   try {
     const docRef = doc(db, 'signed_contracts', contractId);
-    const snap = await getDoc(docRef);
-    if (snap.exists()) {
-      const payload: DocumentData = {
-        produitOrangePro: cleanProduit,
-        tier: updates.tier,
-        payoutMad: cleanPayout,
-        payoutStatus: updates.payoutStatus,
-        updatedAt: serverTimestamp(),
-      };
-      if (cleanRef) payload.referenceVirement = cleanRef;
-      else payload.referenceVirement = deleteField();
-      if (cleanMotif) payload.refusMotif = cleanMotif;
-      else payload.refusMotif = deleteField();
-
-      await updateDoc(docRef, payload);
-    } else {
-      const fullPayload: DocumentData = {
-        id: contractId,
-        orgScope: 'orange_pro_team',
-        ownerId: auth.currentUser?.uid || 'unknown',
-        ownerName: auth.currentUser?.displayName || 'Collaborateur',
-        ficheId: 'op_unknown',
-        numeroFiche: 'OP-0000',
-        societe: 'Client Orange Pro',
-        ville: 'Casablanca',
-        secteur: 'pme',
-        produitOrangePro: cleanProduit,
-        tier: updates.tier,
-        effectif: '1-10',
-        payoutMad: cleanPayout,
-        payoutStatus: updates.payoutStatus,
-        signedAt: new Date().toISOString(),
-        createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
-      };
-      if (cleanRef) fullPayload.referenceVirement = cleanRef;
-      if (cleanMotif) fullPayload.refusMotif = cleanMotif;
-
-      await setDoc(docRef, fullPayload);
+    const snap = await getDocFromServer(docRef).catch(() => getDoc(docRef));
+    if (!snap.exists()) {
+      throw new Error(`Le contrat « ${contractId} » est introuvable sur le serveur.`);
     }
+
+    const prev = snap.data() as Record<string, unknown>;
+    const payload: DocumentData = {
+      produitOrangePro: cleanProduit,
+      tier: updates.tier,
+      payoutMad: cleanPayout,
+      payoutStatus: updates.payoutStatus,
+      updatedAt: serverTimestamp(),
+    };
+    if (cleanRef) {
+      payload.referenceVirement = cleanRef;
+    } else if ('referenceVirement' in prev) {
+      payload.referenceVirement = deleteField();
+    }
+    if (cleanMotif) {
+      payload.refusMotif = cleanMotif;
+    } else if ('refusMotif' in prev) {
+      payload.refusMotif = deleteField();
+    }
+
+    await updateDoc(docRef, payload);
   } catch (error) {
     handleFirestoreError(error, OperationType.UPDATE, operationPath);
   }

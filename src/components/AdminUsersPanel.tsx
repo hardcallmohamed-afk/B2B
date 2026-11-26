@@ -342,6 +342,13 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
     return map;
   }, [teamStats]);
 
+  // Horloge légère 30s pour recalculer les statuts En ligne / Hors ligne en direct
+  const [presenceClockMs, setPresenceClockMs] = useState<number>(() => Date.now());
+  useEffect(() => {
+    const timer = window.setInterval(() => setPresenceClockMs(Date.now()), 30_000);
+    return () => window.clearInterval(timer);
+  }, []);
+
   // Liste consolidée (Super-Admin + tous les utilisateurs gérés + présences connues) pour le suivi complet + radar dispatch
   const consolidatedTeamTracking = useMemo(() => {
     const seen = new Set<string>();
@@ -395,12 +402,20 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
       const lastName = pres?.lastName || split.lastName;
       const reconciled = reconcilePresenceOnlineState(
         Boolean(pres?.isOnline),
-        pres?.lastSeenAt
+        pres?.lastSeenAt,
+        presenceClockMs,
+        undefined,
+        pres?.updatedAtIso
       );
       // The currently authenticated Super-Admin actively viewing this console is guaranteed online
       const isOnline = params.uid === adminUid ? true : reconciled.effectiveOnline;
       const effectiveZone = pres?.zone || stat?.zone || params.fallbackZone || 'Meknès';
-      const telemetry = parseLiveFieldTelemetry(pres?.currentDevice || '', isOnline, pres?.lastSeenAt);
+      const telemetry = parseLiveFieldTelemetry(
+        pres?.currentDevice || '',
+        isOnline,
+        pres?.lastSeenAt,
+        pres?.updatedAtIso
+      );
       const coords = resolveCollaboratorCoordinates({
         uid: params.uid,
         zone: effectiveZone,
@@ -484,7 +499,7 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
     });
 
     return rows;
-  }, [adminUid, adminEmail, users, presenceByUid, statByUid, userPresences]);
+  }, [adminUid, adminEmail, users, presenceByUid, statByUid, userPresences, presenceClockMs]);
 
   const attendanceSummary = useMemo(() => {
     const onlineCount = consolidatedTeamTracking.filter((r) => r.isOnline).length;
@@ -1831,7 +1846,10 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
                           {(() => {
                             const dirOnline = reconcilePresenceOnlineState(
                               Boolean(pres?.isOnline),
-                              pres?.lastSeenAt
+                              pres?.lastSeenAt,
+                              presenceClockMs,
+                              undefined,
+                              pres?.updatedAtIso
                             ).effectiveOnline;
                             return (
                               <span

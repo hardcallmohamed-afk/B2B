@@ -271,6 +271,17 @@ test('reconcilePresenceOnlineState and computeTeamBoundsZoom keep online status 
   assert.equal(stale.effectiveOnline, false);
   assert.equal(stale.isStaleSignal, true);
 
+  // Device clock skew (client lastSeenAt 25 min behind, but Firestore server updatedAt is 20s ago) -> stays online
+  const clockSkewed = reconcilePresenceOnlineState(
+    true,
+    '2026-11-26T10:35:00.000Z',
+    now,
+    15 * 60 * 1000,
+    '2026-11-26T10:59:40.000Z'
+  );
+  assert.equal(clockSkewed.effectiveOnline, true);
+  assert.equal(clockSkewed.isStaleSignal, false);
+
   // Default heartbeat cap is 120s (safe under Firestore +300s rule)
   assert.equal(computeHeartbeatDeltaSeconds(0, 600_000), 120);
 

@@ -541,13 +541,17 @@ export const CollaboratorProfileChatModal: React.FC<CollaboratorProfileChatModal
 
   const presenceState = reconcilePresenceOnlineState(
     Boolean(presence?.isOnline),
-    presence?.lastSeenAt
+    presence?.lastSeenAt,
+    Date.now(),
+    undefined,
+    presence?.updatedAtIso
   );
   const effectiveOnline = presenceState.effectiveOnline;
   const telemetry = parseLiveFieldTelemetry(
     presence?.currentDevice || '',
     effectiveOnline,
-    presence?.lastSeenAt
+    presence?.lastSeenAt,
+    presence?.updatedAtIso
   );
   const coords = resolveCollaboratorCoordinates({
     uid: target.uid,

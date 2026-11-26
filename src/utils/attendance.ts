@@ -217,23 +217,35 @@ export function computeHeartbeatDeltaSeconds(
 }
 
 /**
- * Reconciles effective online state from Firestore `isOnline` flag + `lastSeenAt` freshness
- * so active collaborators show En ligne reliably and stale sessions (> 10 min without heartbeat) fall back gracefully.
+ * Reconciles effective online state from Firestore `isOnline` flag + `lastSeenAt` / server `updatedAt` freshness
+ * so active collaborators show En ligne reliably even across device clock skew or mobile background throttling,
+ * while genuinely stale sessions (> 15 min without heartbeat) fall back gracefully.
  */
 export function reconcilePresenceOnlineState(
   isOnline: boolean,
   lastSeenAt?: string,
   nowMs: number = Date.now(),
-  staleWindowMs = 15 * 60 * 1000
+  staleWindowMs = 15 * 60 * 1000,
+  serverUpdatedAt?: string
 ): { effectiveOnline: boolean; isStaleSignal: boolean; secondsSinceLastSeen: number | null } {
-  if (!lastSeenAt) {
+  const clientTs = lastSeenAt ? Date.parse(lastSeenAt) : Number.NaN;
+  const serverTs = serverUpdatedAt ? Date.parse(serverUpdatedAt) : Number.NaN;
+
+  // Prefer the freshest valid timestamp between client lastSeenAt and Firestore server updatedAt
+  // so a collaborator device whose local clock lags behind cannot be falsely flagged stale/offline.
+  let bestTs = Number.NaN;
+  if (Number.isFinite(clientTs) && Number.isFinite(serverTs)) {
+    bestTs = Math.max(clientTs, serverTs);
+  } else if (Number.isFinite(serverTs)) {
+    bestTs = serverTs;
+  } else if (Number.isFinite(clientTs)) {
+    bestTs = clientTs;
+  }
+
+  if (!Number.isFinite(bestTs)) {
     return { effectiveOnline: Boolean(isOnline), isStaleSignal: false, secondsSinceLastSeen: null };
   }
-  const ts = Date.parse(lastSeenAt);
-  if (!Number.isFinite(ts)) {
-    return { effectiveOnline: Boolean(isOnline), isStaleSignal: false, secondsSinceLastSeen: null };
-  }
-  const diffMs = Math.max(0, nowMs - ts);
+  const diffMs = Math.max(0, nowMs - bestTs);
   const secondsSinceLastSeen = Math.round(diffMs / 1000);
   if (isOnline && diffMs <= staleWindowMs) {
     return { effectiveOnline: true, isStaleSignal: false, secondsSinceLastSeen };
@@ -394,16 +406,23 @@ export function encodeLiveFieldTelemetry(input: LiveFieldTelemetryInput): string
 export function parseLiveFieldTelemetry(
   rawCurrentDevice: string,
   isOnline: boolean,
-  lastSeenAt?: string
+  lastSeenAt?: string,
+  serverUpdatedAt?: string
 ): ParsedLiveFieldTelemetry {
   const raw = (rawCurrentDevice || '').trim();
   const idx = raw.indexOf('||@FT|');
 
   const isRecentlySeen = (() => {
-    if (!lastSeenAt) return true;
-    const ts = Date.parse(lastSeenAt);
-    if (!Number.isFinite(ts)) return true;
-    return Date.now() - ts <= 12 * 60 * 1000;
+    const clientTs = lastSeenAt ? Date.parse(lastSeenAt) : Number.NaN;
+    const serverTs = serverUpdatedAt ? Date.parse(serverUpdatedAt) : Number.NaN;
+    const bestTs =
+      Number.isFinite(clientTs) && Number.isFinite(serverTs)
+        ? Math.max(clientTs, serverTs)
+        : Number.isFinite(serverTs)
+          ? serverTs
+          : clientTs;
+    if (!Number.isFinite(bestTs)) return true;
+    return Math.max(0, Date.now() - bestTs) <= 15 * 60 * 1000;
   })();
 
   if (idx < 0) {

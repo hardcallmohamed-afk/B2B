@@ -801,49 +801,72 @@ service cloud.firestore {
           )
         );
 
-      // Payout amounts, products, and statuses are controlled by Super-Admin, Managers and Team Leads.
-      // Immutable identity/client/timestamp fields cannot be modified (enforced via affectedKeys).
+      // Tier 1: Super-Admin, Managers and Team Leads manage payouts, products, and statuses.
+      // Tier 2: Approved contract owner may refine produitOrangePro/tier ONLY while payoutStatus == 'En attente'.
+      // Immutable identity/client/timestamp fields cannot be modified.
       // Transition to 'Versé' strictly requires a non-empty referenceVirement (max 80).
       // Transition to 'Refusé' strictly requires a non-empty refusMotif (max 200).
       allow update: if isValidId(contractId)
-        && (isSuperAdmin() || isTeamLeadOrManager())
         && incoming().updatedAt == request.time
-        && incoming().diff(existing()).affectedKeys().hasOnly([
-          'produitOrangePro', 'tier', 'payoutMad', 'payoutStatus',
-          'referenceVirement', 'refusMotif', 'updatedAt'
-        ])
+        && (!('id' in existing()) || incoming().id == existing().id)
+        && (!('orgScope' in existing()) || incoming().orgScope == existing().orgScope)
+        && (!('ownerId' in existing()) || incoming().ownerId == existing().ownerId)
+        && (!('ficheId' in existing()) || incoming().ficheId == existing().ficheId)
+        && (!('createdAt' in existing()) || incoming().createdAt == existing().createdAt)
         && incoming().produitOrangePro is string
         && incoming().produitOrangePro.size() >= 1
         && incoming().produitOrangePro.size() <= 200
         && isValidOrangeTier(incoming().tier)
-        && incoming().payoutMad is number
-        && incoming().payoutMad >= 0
-        && incoming().payoutMad <= 10000000
-        && isValidPayoutStatus(incoming().payoutStatus)
         && (
-          !('referenceVirement' in incoming())
-          || (incoming().referenceVirement is string && incoming().referenceVirement.size() <= 80)
-        )
-        && (
-          !('refusMotif' in incoming())
-          || (incoming().refusMotif is string && incoming().refusMotif.size() <= 200)
-        )
-        && (
-          incoming().payoutStatus != 'Versé'
-          || (
-            'referenceVirement' in incoming()
-            && incoming().referenceVirement is string
-            && incoming().referenceVirement.size() >= 1
-            && incoming().referenceVirement.size() <= 80
+          // Tier 1: Supervisors (Super-Admin / Manager / Team-Lead)
+          (
+            (isSuperAdmin() || isTeamLeadOrManager())
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+              'produitOrangePro', 'tier', 'payoutMad', 'payoutStatus',
+              'referenceVirement', 'refusMotif', 'updatedAt'
+            ])
+            && incoming().payoutMad is number
+            && incoming().payoutMad >= 0
+            && incoming().payoutMad <= 10000000
+            && isValidPayoutStatus(incoming().payoutStatus)
+            && (
+              !('referenceVirement' in incoming())
+              || (incoming().referenceVirement is string && incoming().referenceVirement.size() <= 80)
+            )
+            && (
+              !('refusMotif' in incoming())
+              || (incoming().refusMotif is string && incoming().refusMotif.size() <= 200)
+            )
+            && (
+              incoming().payoutStatus != 'Versé'
+              || (
+                'referenceVirement' in incoming()
+                && incoming().referenceVirement is string
+                && incoming().referenceVirement.size() >= 1
+                && incoming().referenceVirement.size() <= 80
+              )
+            )
+            && (
+              incoming().payoutStatus != 'Refusé'
+              || (
+                'refusMotif' in incoming()
+                && incoming().refusMotif is string
+                && incoming().refusMotif.size() >= 1
+                && incoming().refusMotif.size() <= 200
+              )
+            )
           )
-        )
-        && (
-          incoming().payoutStatus != 'Refusé'
-          || (
-            'refusMotif' in incoming()
-            && incoming().refusMotif is string
-            && incoming().refusMotif.size() >= 1
-            && incoming().refusMotif.size() <= 200
+          ||
+          // Tier 2: Approved contract owner updating ONLY product/tier on their own pending contract
+          (
+            isApprovedMember(request.auth.uid)
+            && existing().ownerId == request.auth.uid
+            && existing().payoutStatus == 'En attente'
+            && incoming().payoutMad == existing().payoutMad
+            && incoming().payoutStatus == existing().payoutStatus
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+              'produitOrangePro', 'tier', 'updatedAt'
+            ])
           )
         );
 
