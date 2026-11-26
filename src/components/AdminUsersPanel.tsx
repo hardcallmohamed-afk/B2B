@@ -446,7 +446,7 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
 
   const handleCopyCredentials = async () => {
     if (!lastCreatedCreds) return;
-    const text = `Accès CRM Orange Pro B2B\nNom : ${lastCreatedCreds.displayName}\nEmail : ${lastCreatedCreds.email}\nMot de passe temporaire : ${lastCreatedCreds.password}\n(Cliquez sur le lien de vérification reçu par email lors de la 1re connexion.)`;
+    const text = `Accès CRM DIVERSIFIA\nNom : ${lastCreatedCreds.displayName}\nEmail : ${lastCreatedCreds.email}\nMot de passe temporaire : ${lastCreatedCreds.password}\n(Cliquez sur le lien de vérification reçu par email lors de la 1re connexion.)`;
     try {
       await navigator.clipboard.writeText(text);
       setCopiedCreds(true);

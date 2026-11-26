@@ -5,11 +5,15 @@ import {
   DIVERSIFIA_MOBILE_FORFAITS,
   buildDefaultForecastParams,
   calculateForecastCommission,
+  computeCurrentMonthPayoutSummary,
   computeDefaultPayoutMad,
   evaluateAchievements,
   buildTeamLeaderboard,
   buildTeamMonthlyEvolution,
   buildMonthlyHistoryStrings,
+  formatDateAjoutShort,
+  parseDateAjoutTimestamp,
+  sortByDateAjout,
   type SignedContractRecord,
   type TeamStatRecord,
 } from './gamification';
@@ -33,22 +37,29 @@ test('evaluateAchievements unlocks milestones across rarity tiers, awards XP, an
       highMaturityFiches: 8,
       distinctCities: 4,
     },
-    ['admin_mvp_mois', 'role_chef_equipe']
+    ['admin_mvp_mois', 'role_chef_equipe', 'admin_box5g_expert', 'role_superviseur_diversifia']
   );
 
-  assert.ok(res.unlockedCount >= 10);
-  assert.equal(res.totalCount, 34); // 24 auto + 6 admin distinctions + 4 role badges
-  assert.ok(res.totalXp > 1500);
+  assert.ok(res.unlockedCount >= 14);
+  assert.equal(res.totalCount, 50); // 36 auto + 9 admin distinctions + 5 role badges
+  assert.ok(res.totalXp > 2000);
   assert.equal(res.nextToUnlock.length, 3);
   // Admin manual badge unlocked
   const mvp = res.items.find((i) => i.id === 'admin_mvp_mois');
   assert.equal(mvp?.unlocked, true);
   assert.equal(mvp?.isManualAdminBadge, true);
   assert.equal(mvp?.xpType, 'Distinction Admin');
+  // New DIVERSIFIA role & distinction badges unlocked
+  assert.equal(res.items.find((i) => i.id === 'admin_box5g_expert')?.unlocked, true);
+  assert.equal(res.items.find((i) => i.id === 'role_superviseur_diversifia')?.unlocked, true);
   // Role badge unlocked
   const roleBadge = res.items.find((i) => i.id === 'role_chef_equipe');
   assert.equal(roleBadge?.unlocked, true);
   assert.equal(roleBadge?.xpType, 'Badge de Rôle');
+  // New auto achievements unlocked (prospect_5, qualified_2, payout_5000)
+  assert.equal(res.items.find((i) => i.id === 'prospect_5')?.unlocked, true);
+  assert.equal(res.items.find((i) => i.id === 'qualified_2')?.unlocked, true);
+  assert.equal(res.items.find((i) => i.id === 'payout_5000')?.unlocked, true);
   // Rare Grand Compte unlocked
   assert.equal(res.items.find((i) => i.id === 'first_gc')?.unlocked, true);
   // Legendary still locked
@@ -98,7 +109,7 @@ test('buildTeamLeaderboard ranks collaborators by contracts, payout, and XP', ()
   assert.equal(ranked[1].rank, 2);
 });
 
-test('buildTeamMonthlyEvolution filters cleanly between global team and single collaborator', () => {
+test('buildTeamMonthlyEvolution and computeCurrentMonthPayoutSummary aggregate current month and TotalPayoutMad', () => {
   const contracts: SignedContractRecord[] = [
     {
       id: 'c1',
@@ -149,6 +160,38 @@ test('buildTeamMonthlyEvolution filters cleanly between global team and single c
   assert.equal(lastSalma.payoutMad, 4000);
 
   assert.deepEqual(buildMonthlyHistoryStrings(contracts), ['2026-11:2:5500']);
+
+  const monthSummary = computeCurrentMonthPayoutSummary(contracts, [], 'all', now);
+  assert.equal(monthSummary.ym, '2026-11');
+  assert.equal(monthSummary.currentMonthPayoutMad, 5500);
+  assert.equal(monthSummary.currentMonthContractsCount, 2);
+  assert.equal(monthSummary.totalSignedPayoutMad, 5500);
+  assert.equal(monthSummary.verseMad, 4000);
+  assert.equal(monthSummary.valideMad, 1500);
+  assert.equal(monthSummary.avgPayoutPerContractMad, 2750);
+});
+
+test('sortByDateAjout sorts fiches ascending and descending by dateAjout', () => {
+  const fiches = [
+    { id: '1', societe: 'Alpha', dateAjout: '2026-11-10T09:00:00.000Z' },
+    { id: '2', societe: 'Bravo', dateAjout: '2026-11-24T15:30:00.000Z' },
+    { id: '3', societe: 'Charlie', dateAjout: '2026-11-15T12:00:00.000Z' },
+  ];
+
+  const desc = sortByDateAjout(fiches, 'desc');
+  assert.deepEqual(
+    desc.map((f) => f.id),
+    ['2', '3', '1']
+  );
+
+  const asc = sortByDateAjout(fiches, 'asc');
+  assert.deepEqual(
+    asc.map((f) => f.id),
+    ['1', '3', '2']
+  );
+
+  assert.ok(parseDateAjoutTimestamp('2026-11-24T15:30:00.000Z') > 0);
+  assert.equal(formatDateAjoutShort('2026-11-24T15:30:00.000Z'), '24/11/2026');
 });
 
 test('ROLE_BADGE_META defines distinct Admin, Commercial, and team role labels and visual classes', async () => {

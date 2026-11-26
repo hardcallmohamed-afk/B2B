@@ -19,6 +19,7 @@ import {
   TEAM_ROLE_ORDER,
   buildTeamLeaderboard,
   buildTeamMonthlyEvolution,
+  computeCurrentMonthPayoutSummary,
   formatMad,
   type OrangeProTier,
   type PayoutStatus,
@@ -110,6 +111,16 @@ export const TeamPerformancePanel: React.FC<TeamPerformancePanelProps> = ({
   const monthlyEvolution = useMemo(
     () => buildTeamMonthlyEvolution(roleFilteredStats, roleFilteredContracts, effectiveSelectedUid),
     [roleFilteredStats, roleFilteredContracts, effectiveSelectedUid]
+  );
+
+  const currentMonthSummary = useMemo(
+    () =>
+      computeCurrentMonthPayoutSummary(
+        roleFilteredContracts,
+        roleFilteredStats,
+        effectiveSelectedUid
+      ),
+    [roleFilteredContracts, roleFilteredStats, effectiveSelectedUid]
   );
 
   const maxMonthContracts = useMemo(
@@ -266,6 +277,99 @@ export const TeamPerformancePanel: React.FC<TeamPerformancePanelProps> = ({
               Réinitialiser
             </button>
           )}
+        </div>
+      </div>
+
+      {/* Composant Total des Payouts Cumulés pour le Mois en Cours (basé sur TotalPayoutMad des contrats signés) */}
+      <div
+        data-testid="current-month-payout-card"
+        className="rounded-2xl border border-orange-200 bg-white p-4 sm:p-5"
+      >
+        <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+          <div className="space-y-1">
+            <div className="flex flex-wrap items-center gap-2 text-xs font-semibold text-orange-700">
+              <Wallet className="h-4 w-4 text-orange-600" />
+              <span>Total des Payouts Cumulés — Mois en cours ({currentMonthSummary.monthLabel})</span>
+              <span className="text-stone-400">·</span>
+              <span className="font-mono text-stone-600 tabular-nums">{currentMonthSummary.ym}</span>
+            </div>
+            <div className="flex flex-wrap items-baseline gap-3 pt-1">
+              <span
+                data-testid="current-month-payout-amount"
+                className="text-2xl sm:text-3xl font-extrabold text-stone-900 font-mono tabular-nums"
+              >
+                {formatMad(currentMonthSummary.effectiveDisplayPayoutMad)}
+              </span>
+              <span className="text-xs text-stone-500">
+                sur{' '}
+                <strong className="text-stone-800 tabular-nums">
+                  {currentMonthSummary.currentMonthContractsCount > 0
+                    ? currentMonthSummary.currentMonthContractsCount
+                    : currentMonthSummary.totalSignedContractsCount}
+                </strong>{' '}
+                contrat(s) signé(s)
+              </span>
+              {currentMonthSummary.growthPct !== null && (
+                <span
+                  className={`text-xs font-semibold tabular-nums ${
+                    currentMonthSummary.growthPct >= 0 ? 'text-emerald-700' : 'text-amber-700'
+                  }`}
+                >
+                  {currentMonthSummary.growthPct >= 0 ? '+' : ''}
+                  {currentMonthSummary.growthPct}% vs mois précédent
+                </span>
+              )}
+            </div>
+            <p className="text-xs text-stone-500">
+              Calculé automatiquement à partir du <strong className="text-stone-700">TotalPayoutMad</strong> de tous les contrats signés{' '}
+              {selectedMember ? `par ${selectedMember.displayName}` : 'par l’équipe commerciale DIVERSIFIA'}.
+            </p>
+          </div>
+
+          <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-4 lg:min-w-[460px]">
+            <div className="rounded-xl border border-stone-200 bg-stone-50/70 p-2.5">
+              <div className="text-[11px] text-stone-500">Mois ({currentMonthSummary.ym})</div>
+              <div className="mt-1 text-sm font-bold text-stone-900 font-mono tabular-nums">
+                {formatMad(currentMonthSummary.currentMonthPayoutMad)}
+              </div>
+              <div className="mt-0.5 text-[10px] text-stone-500 tabular-nums">
+                {currentMonthSummary.currentMonthContractsCount} contrat(s) ce mois
+              </div>
+            </div>
+
+            <div className="rounded-xl border border-orange-200 bg-orange-50/60 p-2.5">
+              <div className="text-[11px] font-medium text-orange-800">Cumul TotalPayoutMad</div>
+              <div
+                data-testid="cumulative-total-payout-mad"
+                className="mt-1 text-sm font-bold text-orange-950 font-mono tabular-nums"
+              >
+                {formatMad(currentMonthSummary.totalSignedPayoutMad)}
+              </div>
+              <div className="mt-0.5 text-[10px] text-orange-800 tabular-nums">
+                {currentMonthSummary.totalSignedContractsCount} contrat(s) au total
+              </div>
+            </div>
+
+            <div className="rounded-xl border border-emerald-200 bg-emerald-50/60 p-2.5">
+              <div className="text-[11px] font-medium text-emerald-800">Versé / Validé</div>
+              <div className="mt-1 text-sm font-bold text-emerald-950 font-mono tabular-nums">
+                {formatMad(currentMonthSummary.verseMad + currentMonthSummary.valideMad)}
+              </div>
+              <div className="mt-0.5 text-[10px] text-emerald-800 tabular-nums">
+                En attente : {formatMad(currentMonthSummary.enAttenteMad)}
+              </div>
+            </div>
+
+            <div className="rounded-xl border border-stone-200 bg-stone-50/70 p-2.5">
+              <div className="text-[11px] text-stone-500">Moyenne / Contrat</div>
+              <div className="mt-1 text-sm font-bold text-stone-900 font-mono tabular-nums">
+                {formatMad(currentMonthSummary.avgPayoutPerContractMad)}
+              </div>
+              <div className="mt-0.5 text-[10px] text-stone-500">
+                Grille DIVERSIFIA
+              </div>
+            </div>
+          </div>
         </div>
       </div>
 

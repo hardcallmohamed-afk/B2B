@@ -99,6 +99,8 @@ import {
   ROLE_BADGE_META,
   buildMonthlyHistoryStrings,
   evaluateAchievements,
+  formatDateAjoutShort,
+  parseDateAjoutTimestamp,
   type CollaboratorMetrics,
   type OrangeProTier,
   type PayoutStatus,
@@ -2933,7 +2935,7 @@ export default function App() {
   const [statutFilter, setStatutFilter] = useState<StatutCRM | ''>('');
   const [onlyReadyToCall, setOnlyReadyToCall] = useState(false);
   const [onlyBottlenecks, setOnlyBottlenecks] = useState(false);
-  const [sortField, setSortField] = useState<'societe' | 'ville' | 'effectif' | 'maturite' | 'velocite'>('maturite');
+  const [sortField, setSortField] = useState<'societe' | 'ville' | 'effectif' | 'maturite' | 'velocite' | 'dateAjout'>('maturite');
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
 
   // 5. Refs & Modales
@@ -5089,7 +5091,10 @@ export default function App() {
       if (sortField === 'societe') cmp = a.societe.localeCompare(b.societe);
       else if (sortField === 'ville') cmp = a.ville.localeCompare(b.ville);
       else if (sortField === 'effectif') cmp = (parseInt(a.effectif, 10) || 0) - (parseInt(b.effectif, 10) || 0);
-      else if (sortField === 'velocite') {
+      else if (sortField === 'dateAjout') {
+        cmp = parseDateAjoutTimestamp(a.dateAjout) - parseDateAjoutTimestamp(b.dateAjout);
+        if (cmp === 0) cmp = a.societe.localeCompare(b.societe);
+      } else if (sortField === 'velocite') {
         const va = velocityReport.byFicheId.get(a.id);
         const vb = velocityReport.byFicheId.get(b.id);
         const rankA = va?.isBottleneck ? 2 : va?.level === 'slow' ? 1 : va?.level === 'terminal' ? -1 : 0;
@@ -7957,6 +7962,27 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
                       Kanban
                     </button>
                   </div>
+                  <button
+                    type="button"
+                    data-testid="toolbar-sort-date-ajout-btn"
+                    onClick={() => toggleSort('dateAjout')}
+                    title="Trier par Date d'ajout (ascendant / descendant)"
+                    className={`px-2.5 py-1.5 rounded-lg border text-xs font-semibold flex items-center gap-1 whitespace-nowrap transition-colors ${
+                      sortField === 'dateAjout'
+                        ? 'bg-orange-600 text-white border-orange-600'
+                        : 'bg-white text-stone-700 border-stone-300 hover:bg-stone-50'
+                    }`}
+                  >
+                    <ArrowUpDown className="w-3.5 h-3.5" />
+                    <span>
+                      Date d&apos;ajout{' '}
+                      {sortField === 'dateAjout'
+                        ? sortDir === 'desc'
+                          ? '(↓ Récentes)'
+                          : '(↑ Anciennes)'
+                        : ''}
+                    </span>
+                  </button>
                   <span className="text-stone-600 font-medium whitespace-nowrap" data-testid="portfolio-count">
                     {filteredFiches.length} / {fiches.length} fiches
                   </span>
@@ -8154,13 +8180,32 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
                           Vélocité <ArrowUpDown className="w-3 h-3" />
                         </button>
                       </th>
+                      <th className="p-3">
+                        <button
+                          type="button"
+                          data-testid="sort-date-ajout-btn"
+                          onClick={() => toggleSort('dateAjout')}
+                          className={`flex items-center gap-1 hover:text-stone-900 whitespace-nowrap ${
+                            sortField === 'dateAjout' ? 'text-orange-700 font-bold' : ''
+                          }`}
+                          title="Trier par Date d'ajout (ascendant / descendant)"
+                        >
+                          <span>Date d&apos;ajout</span>
+                          {sortField === 'dateAjout' && (
+                            <span className="font-mono text-[10px]">
+                              {sortDir === 'desc' ? '↓' : '↑'}
+                            </span>
+                          )}
+                          <ArrowUpDown className="w-3 h-3" />
+                        </button>
+                      </th>
                       <th className="p-3 text-right">Actions terrain</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-stone-100">
                     {filteredFiches.length === 0 ? (
                       <tr>
-                        <td colSpan={9} className="p-8 sm:p-10 text-center">
+                        <td colSpan={10} className="p-8 sm:p-10 text-center">
                           {accessibleFiches.length === 0 ? (
                             <div
                               data-testid="empty-initial-portfolio"
@@ -8589,6 +8634,14 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
                                   </div>
                                 );
                               })()}
+                            </td>
+
+                            <td
+                              className="p-3 whitespace-nowrap font-mono text-[11px] text-stone-600 tabular-nums"
+                              data-testid={`table-date-ajout-${f.id}`}
+                              title={f.dateAjout || ''}
+                            >
+                              {formatDateAjoutShort(f.dateAjout)}
                             </td>
 
                             <td className="p-3 text-right whitespace-nowrap">

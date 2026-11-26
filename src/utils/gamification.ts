@@ -685,6 +685,15 @@ export const ADMIN_DISTINCTION_BADGES: ManualBadgeDefinition[] = [
     iconKey: 'shield',
     category: 'role',
   },
+  {
+    id: 'role_superviseur_diversifia',
+    title: 'Rôle : Superviseur DIVERSIFIA',
+    description: 'Badge de rôle officiel des superviseurs et directeurs de plateau DIVERSIFIA.',
+    rarity: 'epique',
+    xpBoost: 550,
+    iconKey: 'crown',
+    category: 'role',
+  },
   // Distinctions de Performance (attribuables par le Super-Admin)
   {
     id: 'admin_mvp_mois',
@@ -714,6 +723,24 @@ export const ADMIN_DISTINCTION_BADGES: ManualBadgeDefinition[] = [
     category: 'distinction',
   },
   {
+    id: 'admin_box5g_expert',
+    title: 'Expert Box 5G & FTTH',
+    description: 'Distinction décernée pour la maîtrise des déploiements Box 5G et Fibre FTTH 100M/200M.',
+    rarity: 'rare',
+    xpBoost: 350,
+    iconKey: 'zap',
+    category: 'distinction',
+  },
+  {
+    id: 'admin_flotte_master',
+    title: 'Maître Flotte Mobile Pro',
+    description: 'Performance remarquable sur les forfaits Flotte Mobile 15H, 31H et Illimité.',
+    rarity: 'rare',
+    xpBoost: 400,
+    iconKey: 'phone',
+    category: 'distinction',
+  },
+  {
     id: 'admin_crm_quality',
     title: 'Excellence Qualité CRM',
     description: 'Portefeuille exemplaire : fiches complètes, décideurs et suivi rigoureux.',
@@ -729,6 +756,15 @@ export const ADMIN_DISTINCTION_BADGES: ManualBadgeDefinition[] = [
     rarity: 'commun',
     xpBoost: 100,
     iconKey: 'heart',
+    category: 'distinction',
+  },
+  {
+    id: 'admin_diversifia_ambassador',
+    title: 'Ambassadeur DIVERSIFIA',
+    description: 'Distinction d’honneur attribuée aux piliers incarnant l’excellence DIVERSIFIA.',
+    rarity: 'legendaire',
+    xpBoost: 1200,
+    iconKey: 'star',
     category: 'distinction',
   },
   {
@@ -756,7 +792,7 @@ interface AutoAchievementDefinition {
 }
 
 const AUTO_ACHIEVEMENTS: AutoAchievementDefinition[] = [
-  // COMMUN (6)
+  // COMMUN (8)
   {
     id: 'first_prospect',
     title: 'Premier Prospect',
@@ -766,6 +802,17 @@ const AUTO_ACHIEVEMENTS: AutoAchievementDefinition[] = [
     xpType: 'Prospection',
     iconKey: 'building',
     target: 1,
+    getValue: (m) => m.totalProspects,
+  },
+  {
+    id: 'prospect_5',
+    title: 'Décollage Terrain',
+    description: 'Ajoutez vos 5 premières entreprises prospects dans le portefeuille.',
+    rarity: 'commun',
+    xpBoost: 60,
+    xpType: 'Prospection',
+    iconKey: 'building',
+    target: 5,
     getValue: (m) => m.totalProspects,
   },
   {
@@ -788,6 +835,17 @@ const AUTO_ACHIEVEMENTS: AutoAchievementDefinition[] = [
     xpType: 'Pipeline',
     iconKey: 'calendar',
     target: 1,
+    getValue: (m) => m.qualifiedCount,
+  },
+  {
+    id: 'qualified_2',
+    title: 'Double Ouverture',
+    description: 'Obtenez 2 comptes qualifiés (RDV pris, Devis envoyé ou Signé).',
+    rarity: 'commun',
+    xpBoost: 90,
+    xpType: 'Pipeline',
+    iconKey: 'calendar',
+    target: 2,
     getValue: (m) => m.qualifiedCount,
   },
   {
@@ -825,7 +883,7 @@ const AUTO_ACHIEVEMENTS: AutoAchievementDefinition[] = [
     getValue: (m) => m.totalPayoutMad,
   },
 
-  // PEU COMMUN (6)
+  // PEU COMMUN (8)
   {
     id: 'prospect_30',
     title: 'Bâtisseur de Secteur',
@@ -871,6 +929,28 @@ const AUTO_ACHIEVEMENTS: AutoAchievementDefinition[] = [
     getValue: (m) => m.pmeContracts,
   },
   {
+    id: 'multi_contact_10',
+    title: 'Maître de l’Enrichissement',
+    description: 'Enrichissez 10 fiches avec plusieurs numéros ou adresses email.',
+    rarity: 'peu_commun',
+    xpBoost: 160,
+    xpType: 'Qualité CRM',
+    iconKey: 'phone',
+    target: 10,
+    getValue: (m) => m.multiContactFiches,
+  },
+  {
+    id: 'maturity_10',
+    title: 'Fiches Haute Précision',
+    description: 'Atteignez 10 fiches avec une maturité CRM supérieure ou égale à 85%.',
+    rarity: 'peu_commun',
+    xpBoost: 180,
+    xpType: 'Qualité CRM',
+    iconKey: 'shield',
+    target: 10,
+    getValue: (m) => m.highMaturityFiches,
+  },
+  {
     id: 'cities_4',
     title: 'Couverture Régionale',
     description: 'Prospectez activement sur au moins 4 villes différentes.',
@@ -894,7 +974,18 @@ const AUTO_ACHIEVEMENTS: AutoAchievementDefinition[] = [
     getValue: (m) => m.totalPayoutMad,
   },
 
-  // RARE (5)
+  // RARE (9)
+  {
+    id: 'contracts_5',
+    title: 'Quintuplé Commercial',
+    description: 'Signez 5 contrats B2B validés dans le portefeuille.',
+    rarity: 'rare',
+    xpBoost: 350,
+    xpType: 'Ventes',
+    iconKey: 'medal',
+    target: 5,
+    getValue: (m) => m.contractsCount,
+  },
   {
     id: 'contracts_10',
     title: 'Closer Confirmé',
@@ -905,6 +996,17 @@ const AUTO_ACHIEVEMENTS: AutoAchievementDefinition[] = [
     iconKey: 'star',
     target: 10,
     getValue: (m) => m.contractsCount,
+  },
+  {
+    id: 'pme_5',
+    title: 'Pilier PME',
+    description: 'Signez 5 contrats sur le segment PME (Fibre Pro & Flotte).',
+    rarity: 'rare',
+    xpBoost: 420,
+    xpType: 'Offres Pro',
+    iconKey: 'briefcase',
+    target: 5,
+    getValue: (m) => m.pmeContracts,
   },
   {
     id: 'first_gc',
@@ -929,6 +1031,17 @@ const AUTO_ACHIEVEMENTS: AutoAchievementDefinition[] = [
     getValue: (m) => m.highMaturityFiches,
   },
   {
+    id: 'cities_6',
+    title: 'Conquérant Multi-Villes',
+    description: 'Déployez votre prospection active sur au moins 6 villes.',
+    rarity: 'rare',
+    xpBoost: 320,
+    xpType: 'Territoire',
+    iconKey: 'map',
+    target: 6,
+    getValue: (m) => m.distinctCities,
+  },
+  {
     id: 'prospect_100',
     title: 'Centurion B2B',
     description: 'Dépassez les 100 entreprises suivies dans votre portefeuille.',
@@ -938,6 +1051,18 @@ const AUTO_ACHIEVEMENTS: AutoAchievementDefinition[] = [
     iconKey: 'building',
     target: 100,
     getValue: (m) => m.totalProspects,
+  },
+  {
+    id: 'payout_5000',
+    title: 'Cap des 5 000 MAD',
+    description: 'Cumulez 5 000 MAD de commissions sur vos contrats signés.',
+    rarity: 'rare',
+    xpBoost: 350,
+    xpType: 'Payout',
+    iconKey: 'wallet',
+    target: 5000,
+    unit: 'MAD',
+    getValue: (m) => m.totalPayoutMad,
   },
   {
     id: 'payout_10000',
@@ -952,7 +1077,7 @@ const AUTO_ACHIEVEMENTS: AutoAchievementDefinition[] = [
     getValue: (m) => m.totalPayoutMad,
   },
 
-  // ÉPIQUE (4)
+  // ÉPIQUE (6)
   {
     id: 'contracts_25',
     title: 'Machine à Signer',
@@ -987,6 +1112,17 @@ const AUTO_ACHIEVEMENTS: AutoAchievementDefinition[] = [
     getValue: (m) => m.qualifiedCount,
   },
   {
+    id: 'prospect_200',
+    title: 'Baron du Portefeuille',
+    description: 'Constituez un portefeuille de 200 entreprises B2B suivies.',
+    rarity: 'epique',
+    xpBoost: 900,
+    xpType: 'Prospection',
+    iconKey: 'layers',
+    target: 200,
+    getValue: (m) => m.totalProspects,
+  },
+  {
     id: 'payout_30000',
     title: 'Top Performer 30k MAD',
     description: 'Atteignez 30 000 MAD de payout cumulé.',
@@ -998,8 +1134,20 @@ const AUTO_ACHIEVEMENTS: AutoAchievementDefinition[] = [
     unit: 'MAD',
     getValue: (m) => m.totalPayoutMad,
   },
+  {
+    id: 'payout_50000',
+    title: 'Élite 50k MAD',
+    description: 'Franchissez le cap des 50 000 MAD de commissions cumulées.',
+    rarity: 'epique',
+    xpBoost: 1400,
+    xpType: 'Payout',
+    iconKey: 'wallet',
+    target: 50000,
+    unit: 'MAD',
+    getValue: (m) => m.totalPayoutMad,
+  },
 
-  // LÉGENDAIRE (3)
+  // LÉGENDAIRE (5)
   {
     id: 'contracts_50',
     title: 'Légende Orange Pro',
@@ -1009,6 +1157,17 @@ const AUTO_ACHIEVEMENTS: AutoAchievementDefinition[] = [
     xpType: 'Ventes',
     iconKey: 'trophy',
     target: 50,
+    getValue: (m) => m.contractsCount,
+  },
+  {
+    id: 'contracts_100',
+    title: 'Centurion des Signatures',
+    description: 'Signez 100 contrats B2B et inscrivez un record historique chez DIVERSIFIA.',
+    rarity: 'legendaire',
+    xpBoost: 4500,
+    xpType: 'Ventes',
+    iconKey: 'trophy',
+    target: 100,
     getValue: (m) => m.contractsCount,
   },
   {
@@ -1031,6 +1190,18 @@ const AUTO_ACHIEVEMENTS: AutoAchievementDefinition[] = [
     xpType: 'Payout',
     iconKey: 'trophy',
     target: 100000,
+    unit: 'MAD',
+    getValue: (m) => m.totalPayoutMad,
+  },
+  {
+    id: 'payout_250000',
+    title: 'Empereur DIVERSIFIA (250k MAD)',
+    description: 'Cumulez 250 000 MAD de payouts commissions sur l’ensemble de vos signatures.',
+    rarity: 'legendaire',
+    xpBoost: 6000,
+    xpType: 'Payout',
+    iconKey: 'crown',
+    target: 250000,
     unit: 'MAD',
     getValue: (m) => m.totalPayoutMad,
   },
@@ -1328,6 +1499,165 @@ export function buildTeamLeaderboard(
   return rows.map((row, idx) => ({ ...row, rank: idx + 1 }));
 }
 
+export interface CurrentMonthPayoutSummary {
+  ym: string;
+  monthLabel: string;
+  currentMonthPayoutMad: number;
+  currentMonthContractsCount: number;
+  totalSignedPayoutMad: number;
+  totalSignedContractsCount: number;
+  effectiveDisplayPayoutMad: number;
+  verseMad: number;
+  valideMad: number;
+  enAttenteMad: number;
+  avgPayoutPerContractMad: number;
+  previousMonthPayoutMad: number;
+  growthPct: number | null;
+}
+
+const FULL_MONTHS_FR = [
+  'Janvier',
+  'Février',
+  'Mars',
+  'Avril',
+  'Mai',
+  'Juin',
+  'Juillet',
+  'Août',
+  'Septembre',
+  'Octobre',
+  'Novembre',
+  'Décembre',
+];
+
+export function computeCurrentMonthPayoutSummary(
+  contracts: SignedContractRecord[],
+  members: TeamStatRecord[],
+  selectedUid: string | 'all' = 'all',
+  now = new Date()
+): CurrentMonthPayoutSummary {
+  const ym = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+  const prevDate = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+  const prevYm = `${prevDate.getFullYear()}-${String(prevDate.getMonth() + 1).padStart(2, '0')}`;
+  const monthLabel = `${FULL_MONTHS_FR[now.getMonth()]} ${now.getFullYear()}`;
+
+  const scopedContracts =
+    selectedUid === 'all' ? contracts : contracts.filter((c) => c.ownerId === selectedUid);
+  const scopedMembers =
+    selectedUid === 'all' ? members : members.filter((m) => m.uid === selectedUid);
+
+  let currentMonthPayoutMad = 0;
+  let currentMonthContractsCount = 0;
+  let previousMonthPayoutMad = 0;
+
+  let verseMad = 0;
+  let valideMad = 0;
+  let enAttenteMad = 0;
+
+  let contractsTotalPayoutMad = 0;
+  for (const c of scopedContracts) {
+    const amount = Math.max(0, Number(c.payoutMad) || 0);
+    contractsTotalPayoutMad += amount;
+    if (c.payoutStatus === 'Versé') verseMad += amount;
+    else if (c.payoutStatus === 'Validé') valideMad += amount;
+    else enAttenteMad += amount;
+
+    const cYm = (c.signedAt || '').slice(0, 7);
+    if (cYm === ym) {
+      currentMonthPayoutMad += amount;
+      currentMonthContractsCount += 1;
+    } else if (cYm === prevYm) {
+      previousMonthPayoutMad += amount;
+    }
+  }
+
+  // Fallback / complement from TeamStatRecord.monthlyHistory when viewing team members whose individual contract docs aren't loaded locally
+  const ownersWithContractDocs = new Set(scopedContracts.map((c) => c.ownerId));
+  for (const m of scopedMembers) {
+    if (ownersWithContractDocs.has(m.uid)) continue;
+    for (const entry of m.monthlyHistory || []) {
+      const [eYm, cStr, pStr] = entry.split(':');
+      if (eYm === ym) {
+        currentMonthContractsCount += parseInt(cStr, 10) || 0;
+        currentMonthPayoutMad += parseInt(pStr, 10) || 0;
+      } else if (eYm === prevYm) {
+        previousMonthPayoutMad += parseInt(pStr, 10) || 0;
+      }
+    }
+  }
+
+  const membersTotalPayoutMad = scopedMembers.reduce(
+    (sum, m) => sum + (Number(m.totalPayoutMad) || 0),
+    0
+  );
+  const membersTotalContracts = scopedMembers.reduce(
+    (sum, m) => sum + (Number(m.totalContracts) || 0),
+    0
+  );
+
+  const totalSignedPayoutMad = Math.max(contractsTotalPayoutMad, membersTotalPayoutMad);
+  const totalSignedContractsCount = Math.max(scopedContracts.length, membersTotalContracts);
+
+  // If no contracts carry a dated entry for the current month yet, fall back to totalSignedPayoutMad so the cumulative indicator always reflects TotalPayoutMad of signed contracts
+  const effectiveDisplayPayoutMad =
+    currentMonthPayoutMad > 0 ? currentMonthPayoutMad : totalSignedPayoutMad;
+
+  const activeCountForAvg =
+    currentMonthContractsCount > 0 ? currentMonthContractsCount : totalSignedContractsCount;
+  const avgPayoutPerContractMad =
+    activeCountForAvg > 0 ? Math.round(effectiveDisplayPayoutMad / activeCountForAvg) : 0;
+
+  const growthPct =
+    previousMonthPayoutMad > 0
+      ? Math.round(((currentMonthPayoutMad - previousMonthPayoutMad) / previousMonthPayoutMad) * 100)
+      : null;
+
+  return {
+    ym,
+    monthLabel,
+    currentMonthPayoutMad,
+    currentMonthContractsCount,
+    totalSignedPayoutMad,
+    totalSignedContractsCount,
+    effectiveDisplayPayoutMad,
+    verseMad,
+    valideMad,
+    enAttenteMad,
+    avgPayoutPerContractMad,
+    previousMonthPayoutMad,
+    growthPct,
+  };
+}
+
 export function formatMad(amount: number): string {
   return `${Math.round(amount || 0).toLocaleString('fr-FR')} MAD`;
+}
+
+export function parseDateAjoutTimestamp(dateAjout?: string): number {
+  if (!dateAjout || typeof dateAjout !== 'string') return 0;
+  const ts = Date.parse(dateAjout.trim());
+  return Number.isFinite(ts) ? ts : 0;
+}
+
+export function formatDateAjoutShort(dateAjout?: string): string {
+  const ts = parseDateAjoutTimestamp(dateAjout);
+  if (ts <= 0) return '—';
+  const d = new Date(ts);
+  const day = String(d.getDate()).padStart(2, '0');
+  const month = String(d.getMonth() + 1).padStart(2, '0');
+  const year = d.getFullYear();
+  return `${day}/${month}/${year}`;
+}
+
+export function sortByDateAjout<T extends { dateAjout?: string; societe?: string }>(
+  items: readonly T[],
+  direction: 'asc' | 'desc' = 'desc'
+): T[] {
+  const copy = [...items];
+  copy.sort((a, b) => {
+    const diff = parseDateAjoutTimestamp(a.dateAjout) - parseDateAjoutTimestamp(b.dateAjout);
+    const cmp = diff !== 0 ? diff : (a.societe || '').localeCompare(b.societe || '');
+    return direction === 'asc' ? cmp : -cmp;
+  });
+  return copy;
 }

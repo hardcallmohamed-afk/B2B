@@ -252,7 +252,7 @@ export const CrmSidebar: React.FC<CrmSidebarProps> = ({
             {!compact && (
               <div className="min-w-0">
                 <div className="text-sm font-extrabold tracking-[0.06em] text-white truncate leading-tight">
-                  DIVERSIFIA
+                  CRM DIVERSIFIA
                 </div>
                 <div className="text-[9.5px] font-bold uppercase tracking-wider text-[#F96614] truncate">
                   Distributeur Orange Pro
