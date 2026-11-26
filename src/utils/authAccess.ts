@@ -5,37 +5,159 @@ export const FIREBASE_PROJECT_ID = 'gen-lang-client-0884936685';
 
 export type ManagedUserRole = 'commercial' | 'grand_compte' | 'team_lead' | 'manager';
 
+export interface RoleCapabilities {
+  role: ManagedUserRole | 'super_admin';
+  level: 1 | 2 | 3 | 4 | 5;
+  label: string;
+  unlockedPerks: string[];
+  restrictedToSuperAdmin: readonly [
+    'Gestion des Utilisateurs & Rôles',
+    'Coffre Clés API Cloud (/api_keys)',
+    'Carte GPS Temps Réel (3s) & Radar Collaborateurs',
+  ];
+  canManageOwnPortfolio: boolean;
+  canUseAiEmailStudio: boolean;
+  canUseCommissionCalculator: boolean;
+  canBatchAudit8Workers: boolean;
+  canPrioritizeGrandCompte: boolean;
+  canUseDeepCrawlerL2: boolean;
+  canUseMdmDeduplication: boolean;
+  canViewSquadLeaderboard: boolean;
+  canSuperviseTeamPayouts: boolean;
+  canAwardTeamDistinctions: boolean;
+  canExportFullBackupJson: boolean;
+  // 3 accès strictement verrouillés au Super-Admin (jamais accordés aux autres rôles)
+  canManageUsers: boolean;
+  canAccessApiKeysVault: boolean;
+  canAccessLiveGpsMap: boolean;
+}
+
+export const SUPER_ADMIN_EXCLUSIVE_FEATURES = [
+  'Gestion des Utilisateurs & Rôles',
+  'Coffre Clés API Cloud (/api_keys)',
+  'Carte GPS Temps Réel (3s) & Radar Collaborateurs',
+] as const;
+
 export const MANAGED_ROLE_OPTIONS: ReadonlyArray<{
   value: ManagedUserRole;
   label: string;
   shortLabel: string;
   description: string;
+  perks: ReadonlyArray<string>;
 }> = [
   {
     value: 'commercial',
     label: 'Commercial B2B',
     shortLabel: 'Commercial',
     description: 'Prospection terrain, qualification & signatures TPE/PME',
+    perks: [
+      'Portefeuille CRM personnel & Pipeline Kanban',
+      'Calculateur de commission DIVERSIFIA & Studio Email IA',
+      'Suivi de ses contrats signés & 50 badges de progression',
+    ],
   },
   {
     value: 'grand_compte',
     label: 'Expert Grand Compte',
     shortLabel: 'Grand Compte',
     description: 'Fibre Dédiée, flottes corporate & dossiers grands comptes',
+    perks: [
+      'Tous les accès Commercial B2B + Priorité Grands Comptes (≥ 30 sal.)',
+      'Audit & Enrichissement IA en rafale (8 workers parallèles)',
+      'Simulateur avancé Fibre Dédiée / Flotte Corporate & Export CSV complet',
+    ],
   },
   {
     value: 'team_lead',
     label: 'Chef d’Équipe',
     shortLabel: 'Chef d’Équipe',
     description: 'Animation d’escouade terrain & accompagnement commercial',
+    perks: [
+      'Tous les accès Expert Grand Compte + Crawler Profond Niveau 1 & 2',
+      'Module Déduplication MDM & Fusion intelligente des doublons',
+      'Suivi détaillé des performances et objectifs de son escouade',
+    ],
   },
   {
     value: 'manager',
     label: 'Superviseur / Manager',
     shortLabel: 'Superviseur',
-    description: 'Pilotage commercial, suivi territorial & performance équipe',
+    description: 'Pilotage commercial, suivi territorial & performance équipe (sans accès Admin/API/Map)',
+    perks: [
+      'Tous les accès Chef d’Équipe + Supervision Équipe & Payouts multi-zones',
+      'Pré-validation des commissions & Attribution de distinctions d’équipe',
+      'Export Backup JSON global (Sans accès Comptes, Coffre API ni Carte GPS)',
+    ],
   },
 ];
+
+export function getRoleCapabilities(
+  role: ManagedUserRole | 'super_admin' | string | undefined,
+  isVerifiedSuperAdminUser = false
+): RoleCapabilities {
+  if (isVerifiedSuperAdminUser || role === 'super_admin') {
+    return {
+      role: 'super_admin',
+      level: 5,
+      label: 'Super Admin Principal',
+      unlockedPerks: [
+        'Accès intégral CRM DIVERSIFIA toutes zones & tous modules',
+        'Exclusif : Carte GPS Temps Réel (3s) & Radar de Suivi Collaborateurs',
+        'Exclusif : Gestion des Utilisateurs, Rôles & Pointage',
+        'Exclusif : Coffre Clés API Cloud (/api_keys/{provider})',
+      ],
+      restrictedToSuperAdmin: SUPER_ADMIN_EXCLUSIVE_FEATURES,
+      canManageOwnPortfolio: true,
+      canUseAiEmailStudio: true,
+      canUseCommissionCalculator: true,
+      canBatchAudit8Workers: true,
+      canPrioritizeGrandCompte: true,
+      canUseDeepCrawlerL2: true,
+      canUseMdmDeduplication: true,
+      canViewSquadLeaderboard: true,
+      canSuperviseTeamPayouts: true,
+      canAwardTeamDistinctions: true,
+      canExportFullBackupJson: true,
+      canManageUsers: true,
+      canAccessApiKeysVault: true,
+      canAccessLiveGpsMap: true,
+    };
+  }
+
+  const normalized = normalizeManagedRole(role);
+  const opt = MANAGED_ROLE_OPTIONS.find((o) => o.value === normalized) || MANAGED_ROLE_OPTIONS[0];
+  const level: 1 | 2 | 3 | 4 =
+    normalized === 'manager'
+      ? 4
+      : normalized === 'team_lead'
+        ? 3
+        : normalized === 'grand_compte'
+          ? 2
+          : 1;
+
+  return {
+    role: normalized,
+    level,
+    label: opt.label,
+    unlockedPerks: [...opt.perks],
+    restrictedToSuperAdmin: SUPER_ADMIN_EXCLUSIVE_FEATURES,
+    canManageOwnPortfolio: true,
+    canUseAiEmailStudio: true,
+    canUseCommissionCalculator: true,
+    canBatchAudit8Workers: level >= 2,
+    canPrioritizeGrandCompte: level >= 2,
+    canUseDeepCrawlerL2: level >= 3,
+    canUseMdmDeduplication: level >= 3,
+    canViewSquadLeaderboard: level >= 3,
+    canSuperviseTeamPayouts: level >= 4,
+    canAwardTeamDistinctions: level >= 4,
+    canExportFullBackupJson: level >= 4,
+    // STRICTEMENT VERROUILLÉ : Aucun rôle autre que le Super-Admin n'a accès à ces 3 modules
+    canManageUsers: false,
+    canAccessApiKeysVault: false,
+    canAccessLiveGpsMap: false,
+  };
+}
 
 export function normalizeManagedRole(raw: unknown): ManagedUserRole {
   if (raw === 'manager' || raw === 'team_lead' || raw === 'grand_compte' || raw === 'commercial') {

@@ -91,6 +91,7 @@ import {
 import { findSmartDuplicateGroups } from './utils/deduplication';
 import {
   evaluateUserAccess,
+  getRoleCapabilities,
   isSuperAdminEmail,
   normalizeManagedRole,
   type ManagedAppUser,
@@ -124,6 +125,7 @@ import {
   isDuringWorkHours,
   shouldFlagAbruptClosure,
   computeHeartbeatDeltaSeconds,
+  startAutomaticMultiPlatformLocationEngine,
   type FieldActivityStatus,
 } from './utils/attendance';
 import {
@@ -3328,17 +3330,24 @@ export default function App() {
   const currentUserRole: TeamRole = isSuperAdmin
     ? 'super_admin'
     : normalizeManagedRole(appUserProfile?.role);
+  const roleCapabilities = useMemo(
+    () => getRoleCapabilities(currentUserRole, isSuperAdmin),
+    [currentUserRole, isSuperAdmin]
+  );
 
   const extractShortCloudError = (err: unknown): string => {
     return parseFriendlyCloudError(err).shortTag;
   };
 
-  // Empêche tout non-admin d'accéder aux onglets Administration / Coffre Clés API
+  // Empêche strictement tout autre rôle d'accéder à la Gestion des Utilisateurs, au Coffre Clés API ou à la Carte GPS Temps Réel
   useEffect(() => {
-    if (!isSuperAdmin && (activeTab === 'admin' || activeTab === 'vault')) {
+    if (
+      (!roleCapabilities.canManageUsers && !roleCapabilities.canAccessLiveGpsMap && activeTab === 'admin') ||
+      (!roleCapabilities.canAccessApiKeysVault && activeTab === 'vault')
+    ) {
       setActiveTab('portefeuille');
     }
-  }, [isSuperAdmin, activeTab]);
+  }, [roleCapabilities, activeTab]);
 
   // Liste temps réel /app_users réservée exclusivement au Super-Admin (filtrée par createdBy == adminUid)
   useEffect(() => {
@@ -3602,46 +3611,28 @@ export default function App() {
       }
     };
 
-    // Suivi GPS temps réel silencieux en arrière-plan (lorsque disponible sur l'appareil)
-    let geoWatchId: number | null = null;
-    if (typeof navigator !== 'undefined' && 'geolocation' in navigator) {
-      try {
-        geoWatchId = navigator.geolocation.watchPosition(
-          (pos) => {
-            if (cancelled) return;
-            const prevLat = liveFieldContextRef.current.lat;
-            const prevLng = liveFieldContextRef.current.lng;
-            const nextLat = pos.coords.latitude;
-            const nextLng = pos.coords.longitude;
-            const spdKmh =
-              typeof pos.coords.speed === 'number' && Number.isFinite(pos.coords.speed) && pos.coords.speed > 0
-                ? Math.round(pos.coords.speed * 3.6)
-                : 0;
-            if (
-              prevLat !== null &&
-              prevLng !== null &&
-              (Math.abs(nextLat - prevLat) > 0.0001 || Math.abs(nextLng - prevLng) > 0.0001 || spdKmh >= 3)
-            ) {
-              liveFieldContextRef.current.lastMoveActivityMs = Date.now();
-            }
-            liveFieldContextRef.current.lat = nextLat;
-            liveFieldContextRef.current.lng = nextLng;
-            liveFieldContextRef.current.accuracyMeters = Math.round(pos.coords.accuracy || 18);
-            liveFieldContextRef.current.speedKmh = spdKmh;
-          },
-          () => {
-            // Silencieux : repli automatique sur la coordonnée réseau de la zone / ville du collaborateur
-          },
-          {
-            enableHighAccuracy: true,
-            maximumAge: 3_000,
-            timeout: 10_000,
-          }
-        );
-      } catch {
-        // Ignore geolocation errors silently
-      }
-    }
+    // Acquisition & Suivi GPS automatique multi-plateforme (Android, Apple iOS/macOS, PC Windows/Linux)
+    const stopAutoLocationEngine = startAutomaticMultiPlatformLocationEngine({
+      onLocationUpdate: (fix) => {
+        if (cancelled) return;
+        const prevLat = liveFieldContextRef.current.lat;
+        const prevLng = liveFieldContextRef.current.lng;
+        const nextLat = fix.lat;
+        const nextLng = fix.lng;
+        const spdKmh = fix.speedKmh;
+        if (
+          prevLat !== null &&
+          prevLng !== null &&
+          (Math.abs(nextLat - prevLat) > 0.00008 || Math.abs(nextLng - prevLng) > 0.00008 || spdKmh >= 3)
+        ) {
+          liveFieldContextRef.current.lastMoveActivityMs = Date.now();
+        }
+        liveFieldContextRef.current.lat = nextLat;
+        liveFieldContextRef.current.lng = nextLng;
+        liveFieldContextRef.current.accuracyMeters = fix.accuracyMeters;
+        liveFieldContextRef.current.speedKmh = spdKmh;
+      },
+    });
 
     // Boucle rapide 3 secondes (3000 ms) : pousse immédiatement tout changement de position GPS ou de fiche client active
     let lastPushedTelemetryLabel = initialTelemetryLabel;
@@ -3835,13 +3826,7 @@ export default function App() {
       cancelled = true;
       window.clearInterval(fastTelemetryTimer);
       window.clearInterval(heartbeatTimer);
-      if (geoWatchId !== null && typeof navigator !== 'undefined' && 'geolocation' in navigator) {
-        try {
-          navigator.geolocation.clearWatch(geoWatchId);
-        } catch {
-          // Ignore
-        }
-      }
+      stopAutoLocationEngine();
       document.removeEventListener('visibilitychange', handleVisibilityChange);
       window.removeEventListener('offline', handleOffline);
       window.removeEventListener('online', handleOnline);

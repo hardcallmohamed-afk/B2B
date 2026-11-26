@@ -16,7 +16,12 @@ import {
   resolveCollaboratorCoordinates,
   stripFieldTelemetrySuffix,
   computeDistanceKm,
+  computeMercatorMarkerPosition,
+  computeVisibleGoogleMapTiles,
+  panMercatorCenterByPixels,
+  projectLatLngToMercatorWorld,
 } from './attendance';
+import { getRoleCapabilities } from './authAccess';
 
 test('splitFirstAndLastName separates prénom and nom cleanly', () => {
   assert.deepEqual(splitFirstAndLastName('Youssef Bennani'), {
@@ -137,3 +142,91 @@ test('encodeLiveFieldTelemetry, parseLiveFieldTelemetry, and resolveCollaborator
   const distFesMeknes = computeDistanceKm(34.0331, -5.0003, 33.8935, -5.5473);
   assert.ok(distFesMeknes > 45 && distFesMeknes < 65);
 });
+
+test('6-decimal GPS precision and Web Mercator Google Maps HD projection place markers accurately at center and pan smoothly', () => {
+  const encoded6 = encodeLiveFieldTelemetry({
+    baseDeviceLabel: 'Android · Chrome (Mobile)',
+    status: 'en_deplacement',
+    lat: 33.893524,
+    lng: -5.547271,
+    accuracyMeters: 8,
+    speedKmh: 42,
+    clientName: 'Ste Atlas Logistique',
+    actionLabel: 'Déplacement Terrain',
+  });
+  const parsed6 = parseLiveFieldTelemetry(encoded6, true);
+  assert.equal(parsed6.lat, 33.893524);
+  assert.equal(parsed6.lng, -5.547271);
+
+  const resolved6 = resolveCollaboratorCoordinates({
+    uid: 'u_exact_gps',
+    zone: 'Meknès',
+    lat: parsed6.lat,
+    lng: parsed6.lng,
+  });
+  assert.equal(resolved6.source, 'gps_live');
+  assert.equal(resolved6.lat, 33.893524);
+  assert.equal(resolved6.lng, -5.547271);
+
+  // At map center, marker position must land at exact center pixel (viewportWidth/2, viewportHeight/2)
+  const centerMarker = computeMercatorMarkerPosition({
+    lat: 33.893524,
+    lng: -5.547271,
+    centerLat: 33.893524,
+    centerLng: -5.547271,
+    zoom: 16,
+    viewportWidth: 768,
+    viewportHeight: 420,
+  });
+  assert.ok(Math.abs(centerMarker.leftPx - 384) < 0.01);
+  assert.ok(Math.abs(centerMarker.topPx - 210) < 0.01);
+  assert.equal(centerMarker.isInsideViewport, true);
+
+  const tilesResult = computeVisibleGoogleMapTiles({
+    centerLat: 33.893524,
+    centerLng: -5.547271,
+    zoom: 16,
+    viewportWidth: 768,
+    viewportHeight: 420,
+    mapStyle: 'hybride',
+  });
+  assert.ok(tilesResult.tiles.length >= 6);
+  assert.ok(tilesResult.tiles[0].url.includes('google.com/vt/lyrs=y'));
+
+  const worldBefore = projectLatLngToMercatorWorld(33.893524, -5.547271, 16);
+  const panned = panMercatorCenterByPixels(33.893524, -5.547271, 128, -64, 16);
+  const worldAfter = projectLatLngToMercatorWorld(panned.lat, panned.lng, 16);
+  assert.ok(Math.abs(worldAfter.worldX - (worldBefore.worldX - 128)) < 1);
+  assert.ok(Math.abs(worldAfter.worldY - (worldBefore.worldY + 64)) < 1);
+});
+
+test('getRoleCapabilities grants progressive CRM privileges per role while strictly locking Users, API Keys Vault, and Live GPS Map to Super-Admin', () => {
+  const nonAdminRoles = ['commercial', 'grand_compte', 'team_lead', 'manager'] as const;
+  for (const r of nonAdminRoles) {
+    const caps = getRoleCapabilities(r, false);
+    assert.equal(caps.canManageUsers, false, `${r} must never access User Management`);
+    assert.equal(caps.canAccessApiKeysVault, false, `${r} must never access API Keys Vault`);
+    assert.equal(caps.canAccessLiveGpsMap, false, `${r} must never access Live GPS Map`);
+    assert.ok(caps.unlockedPerks.length >= 3);
+  }
+
+  // Progressive perks verification
+  const commCaps = getRoleCapabilities('commercial', false);
+  const gcCaps = getRoleCapabilities('grand_compte', false);
+  const leadCaps = getRoleCapabilities('team_lead', false);
+  const mgrCaps = getRoleCapabilities('manager', false);
+
+  assert.equal(commCaps.canPrioritizeGrandCompte, false);
+  assert.equal(gcCaps.canPrioritizeGrandCompte, true);
+  assert.equal(gcCaps.canUseMdmDeduplication, false);
+  assert.equal(leadCaps.canUseMdmDeduplication, true);
+  assert.equal(leadCaps.canSuperviseTeamPayouts, false);
+  assert.equal(mgrCaps.canSuperviseTeamPayouts, true);
+
+  // Only verified Super-Admin gets the 3 exclusive modules
+  const superCaps = getRoleCapabilities('super_admin', true);
+  assert.equal(superCaps.canManageUsers, true);
+  assert.equal(superCaps.canAccessApiKeysVault, true);
+  assert.equal(superCaps.canAccessLiveGpsMap, true);
+});
+

@@ -348,11 +348,12 @@ function sanitizeTelemetryPart(val: string | undefined, maxLen: number): string 
 }
 
 /**
- * Packs live field status, GPS coordinates, and current client activity inside the 160-char currentDevice field
+ * Packs live field status, 6-decimal high-precision GPS coordinates (~0.11m precision),
+ * and current client activity inside the 160-char currentDevice field
  * so it is 100% compatible with deployed Firestore security rules.
  */
 export function encodeLiveFieldTelemetry(input: LiveFieldTelemetryInput): string {
-  const base = sanitizeTelemetryPart(stripFieldTelemetrySuffix(input.baseDeviceLabel), 46) || 'Appareil Web';
+  const base = sanitizeTelemetryPart(stripFieldTelemetrySuffix(input.baseDeviceLabel), 38) || 'Appareil Web';
   const status: FieldActivityStatus = input.status || 'au_travail';
   const hasCoords =
     typeof input.lat === 'number' &&
@@ -360,10 +361,10 @@ export function encodeLiveFieldTelemetry(input: LiveFieldTelemetryInput): string
     Number.isFinite(input.lat) &&
     Number.isFinite(input.lng);
   const coordPart = hasCoords
-    ? `${input.lat!.toFixed(4)},${input.lng!.toFixed(4)},${Math.max(0, Math.round(Number(input.accuracyMeters) || 25))},${Math.max(0, Math.round(Number(input.speedKmh) || 0))}`
+    ? `${input.lat!.toFixed(6)},${input.lng!.toFixed(6)},${Math.max(0, Math.round(Number(input.accuracyMeters) || 15))},${Math.max(0, Math.round(Number(input.speedKmh) || 0))}`
     : '';
-  const clientPart = sanitizeTelemetryPart(input.clientName, 34);
-  const actionPart = sanitizeTelemetryPart(input.actionLabel, 20);
+  const clientPart = sanitizeTelemetryPart(input.clientName, 32);
+  const actionPart = sanitizeTelemetryPart(input.actionLabel, 18);
   return `${base}||@FT|${status}|${coordPart}|${clientPart}|${actionPart}`.slice(0, 160);
 }
 
@@ -441,7 +442,7 @@ export function parseLiveFieldTelemetry(
       lat = parsedLat;
       lng = parsedLng;
       hasLiveGps = true;
-      accuracyMeters = Number.isFinite(Number(accStr)) ? Number(accStr) : 25;
+      accuracyMeters = Number.isFinite(Number(accStr)) ? Number(accStr) : 15;
       speedKmh = Number.isFinite(Number(spdStr)) ? Number(spdStr) : 0;
     }
   }
@@ -460,7 +461,7 @@ export function parseLiveFieldTelemetry(
 }
 
 /**
- * Resolves live GPS coordinates or deterministic zone fallback coordinates for the dispatch radar.
+ * Resolves exact 6-decimal live GPS coordinates or deterministic street-level city coordinates.
  */
 export function resolveCollaboratorCoordinates(params: {
   uid: string;
@@ -480,8 +481,8 @@ export function resolveCollaboratorCoordinates(params: {
     Number.isFinite(params.lng)
   ) {
     return {
-      lat: params.lat,
-      lng: params.lng,
+      lat: Number(params.lat.toFixed(6)),
+      lng: Number(params.lng.toFixed(6)),
       source: 'gps_live',
       cityLabel: params.zone || 'Position GPS Directe',
     };
@@ -501,17 +502,17 @@ export function resolveCollaboratorCoordinates(params: {
     }
   }
 
-  // Deterministic micro-offset from uid so multiple agents in the same city stay distinct on the radar
+  // Micro-offset (~40m–120m around the city center boulevard) when falling back to zone_reseau
   let hash = 0;
   for (let i = 0; i < (params.uid || '').length; i++) {
     hash = (hash * 31 + params.uid.charCodeAt(i)) % 1000;
   }
-  const offsetLat = ((hash % 29) - 14) * 0.0022;
-  const offsetLng = (((hash >> 3) % 29) - 14) * 0.0022;
+  const offsetLat = ((hash % 17) - 8) * 0.00035;
+  const offsetLng = (((hash >> 3) % 17) - 8) * 0.00035;
 
   return {
-    lat: Number((matched.lat + offsetLat).toFixed(4)),
-    lng: Number((matched.lng + offsetLng).toFixed(4)),
+    lat: Number((matched.lat + offsetLat).toFixed(6)),
+    lng: Number((matched.lng + offsetLng).toFixed(6)),
     source: 'zone_reseau',
     cityLabel: matched.label,
   };
@@ -536,3 +537,425 @@ export function computeDistanceKm(
   const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
   return Number((R * c).toFixed(2));
 }
+
+/**
+ * Exact Web Mercator (EPSG:3857) projection used by Google Maps HD tiles.
+ * Converts (lat, lng) at zoom Z into global pixel coordinates (256 * 2^Z world size).
+ */
+export function projectLatLngToMercatorWorld(
+  lat: number,
+  lng: number,
+  zoom: number
+): { worldX: number; worldY: number } {
+  const clampedLat = Math.max(-85.05112878, Math.min(85.05112878, Number(lat) || 0));
+  const clampedLng = ((Number(lng) || 0) + 180) % 360 - 180;
+  const scale = 256 * Math.pow(2, zoom);
+  const worldX = ((clampedLng + 180) / 360) * scale;
+  const sinLat = Math.sin((clampedLat * Math.PI) / 180);
+  const worldY =
+    (0.5 - Math.log((1 + sinLat) / (1 - sinLat)) / (4 * Math.PI)) * scale;
+  return { worldX, worldY };
+}
+
+/**
+ * Inverse Web Mercator projection: converts a pixel delta (dx, dy) from (centerLat, centerLng)
+ * at zoom Z back to exact (lat, lng) so dragging the map pans accurately at any zoom level.
+ */
+export function panMercatorCenterByPixels(
+  centerLat: number,
+  centerLng: number,
+  dxPixels: number,
+  dyPixels: number,
+  zoom: number
+): { lat: number; lng: number } {
+  const scale = 256 * Math.pow(2, zoom);
+  const { worldX, worldY } = projectLatLngToMercatorWorld(centerLat, centerLng, zoom);
+  const nextX = Math.max(0, Math.min(scale, worldX - dxPixels));
+  const nextY = Math.max(0, Math.min(scale, worldY - dyPixels));
+  const lng = (nextX / scale) * 360 - 180;
+  const n = Math.PI - (2 * Math.PI * nextY) / scale;
+  const lat = (180 / Math.PI) * Math.atan(0.5 * (Math.exp(n) - Math.exp(-n)));
+  return {
+    lat: Number(Math.max(-85, Math.min(85, lat)).toFixed(6)),
+    lng: Number(Math.max(-180, Math.min(180, lng)).toFixed(6)),
+  };
+}
+
+export interface GoogleMapTileDescriptor {
+  key: string;
+  tx: number;
+  ty: number;
+  z: number;
+  leftPx: number;
+  topPx: number;
+  url: string;
+}
+
+/**
+ * Computes visible 256x256 Google Maps HD tiles for a given viewport (widthPx, heightPx),
+ * center (centerLat, centerLng), integer zoom Z (5..19), and Google Maps layer mode.
+ */
+export function computeVisibleGoogleMapTiles(params: {
+  centerLat: number;
+  centerLng: number;
+  zoom: number;
+  viewportWidth: number;
+  viewportHeight: number;
+  mapStyle: 'plan' | 'satellite' | 'hybride' | 'terrain' | 'radar';
+}): {
+  tiles: GoogleMapTileDescriptor[];
+  centerWorldX: number;
+  centerWorldY: number;
+  intZoom: number;
+} {
+  const intZoom = Math.max(5, Math.min(19, Math.round(params.zoom)));
+  const maxTileIdx = Math.pow(2, intZoom);
+  const { worldX: centerWorldX, worldY: centerWorldY } = projectLatLngToMercatorWorld(
+    params.centerLat,
+    params.centerLng,
+    intZoom
+  );
+
+  const halfW = Math.max(320, params.viewportWidth) / 2;
+  const halfH = Math.max(200, params.viewportHeight) / 2;
+
+  const minTileX = Math.floor((centerWorldX - halfW) / 256) - 1;
+  const maxTileX = Math.floor((centerWorldX + halfW) / 256) + 1;
+  const minTileY = Math.max(0, Math.floor((centerWorldY - halfH) / 256) - 1);
+  const maxTileY = Math.min(maxTileIdx - 1, Math.floor((centerWorldY + halfH) / 256) + 1);
+
+  // Google Maps HD lyrs parameter: m = Plan standard, s = Satellite pur, y = Hybride (Satellite + routes), p = Terrain/Relief
+  const lyrs =
+    params.mapStyle === 'satellite'
+      ? 's'
+      : params.mapStyle === 'hybride'
+        ? 'y'
+        : params.mapStyle === 'terrain'
+          ? 'p'
+          : 'm';
+
+  const tiles: GoogleMapTileDescriptor[] = [];
+  for (let ty = minTileY; ty <= maxTileY; ty++) {
+    for (let tx = minTileX; tx <= maxTileX; tx++) {
+      const wrappedTx = ((tx % maxTileIdx) + maxTileIdx) % maxTileIdx;
+      const serverIdx = Math.abs(wrappedTx + ty) % 4;
+      const leftPx = Math.round(tx * 256 - centerWorldX + halfW);
+      const topPx = Math.round(ty * 256 - centerWorldY + halfH);
+      tiles.push({
+        key: `${intZoom}-${wrappedTx}-${ty}-${lyrs}`,
+        tx: wrappedTx,
+        ty,
+        z: intZoom,
+        leftPx,
+        topPx,
+        url: `https://mt${serverIdx}.google.com/vt/lyrs=${lyrs}&x=${wrappedTx}&y=${ty}&z=${intZoom}&hl=fr`,
+      });
+    }
+  }
+
+  return { tiles, centerWorldX, centerWorldY, intZoom };
+}
+
+/**
+ * Computes exact pixel offset (leftPx, topPx) of a collaborator marker (lat, lng)
+ * inside the Google Maps HD viewport so the pin lands on the exact GPS street/building.
+ */
+export function computeMercatorMarkerPosition(params: {
+  lat: number;
+  lng: number;
+  centerLat: number;
+  centerLng: number;
+  zoom: number;
+  viewportWidth: number;
+  viewportHeight: number;
+}): {
+  leftPx: number;
+  topPx: number;
+  isInsideViewport: boolean;
+} {
+  const intZoom = Math.max(5, Math.min(19, Math.round(params.zoom)));
+  const centerWorld = projectLatLngToMercatorWorld(params.centerLat, params.centerLng, intZoom);
+  const pointWorld = projectLatLngToMercatorWorld(params.lat, params.lng, intZoom);
+  const halfW = Math.max(320, params.viewportWidth) / 2;
+  const halfH = Math.max(200, params.viewportHeight) / 2;
+  const leftPx = Math.round(pointWorld.worldX - centerWorld.worldX + halfW);
+  const topPx = Math.round(pointWorld.worldY - centerWorld.worldY + halfH);
+  const isInsideViewport =
+    leftPx >= -40 &&
+    leftPx <= params.viewportWidth + 40 &&
+    topPx >= -40 &&
+    topPx <= params.viewportHeight + 40;
+  return { leftPx, topPx, isInsideViewport };
+}
+
+export interface AutoAcquiredCoordinates {
+  lat: number;
+  lng: number;
+  accuracyMeters: number;
+  speedKmh: number;
+  method: 'gps_hardware' | 'wifi_network' | 'ip_geo' | 'cache';
+}
+
+const AUTO_GEO_CACHE_KEY = 'op_auto_device_coords_v1';
+
+/**
+ * Automatically acquires device coordinates across Android, iPhone/iPad (Apple iOS), macOS, and Windows PC:
+ * 1. Immediate local cache hydration (0ms)
+ * 2. Silent HTTPS IP/Network geolocation fallback (works on 100% of PCs & phones with zero browser popup)
+ * 3. Native HTML5 High-Accuracy GPS + Wi-Fi/Cell fallback + automatic permission & first-gesture hook
+ */
+export function startAutomaticMultiPlatformLocationEngine(params: {
+  onLocationUpdate: (coords: AutoAcquiredCoordinates) => void;
+}): () => void {
+  let disposed = false;
+  let watchId: number | null = null;
+  let retryIntervalId: number | null = null;
+  let hasHardwareFix = false;
+
+  const saveAndEmit = (coords: AutoAcquiredCoordinates) => {
+    if (disposed) return;
+    if (
+      !Number.isFinite(coords.lat) ||
+      !Number.isFinite(coords.lng) ||
+      Math.abs(coords.lat) > 90 ||
+      Math.abs(coords.lng) > 180
+    ) {
+      return;
+    }
+    if (coords.method === 'gps_hardware' || coords.method === 'wifi_network') {
+      hasHardwareFix = true;
+    }
+    try {
+      if (typeof window !== 'undefined' && window.localStorage) {
+        window.localStorage.setItem(
+          AUTO_GEO_CACHE_KEY,
+          JSON.stringify({
+            lat: Number(coords.lat.toFixed(6)),
+            lng: Number(coords.lng.toFixed(6)),
+            accuracyMeters: coords.accuracyMeters,
+            updatedAt: Date.now(),
+          })
+        );
+      }
+    } catch {
+      // ignore storage quota
+    }
+    params.onLocationUpdate({
+      ...coords,
+      lat: Number(coords.lat.toFixed(6)),
+      lng: Number(coords.lng.toFixed(6)),
+    });
+  };
+
+  // 1. Hydrate immediately from cached coordinates if available
+  try {
+    if (typeof window !== 'undefined' && window.localStorage) {
+      const raw = window.localStorage.getItem(AUTO_GEO_CACHE_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (typeof parsed?.lat === 'number' && typeof parsed?.lng === 'number') {
+          params.onLocationUpdate({
+            lat: Number(parsed.lat.toFixed(6)),
+            lng: Number(parsed.lng.toFixed(6)),
+            accuracyMeters: Number(parsed.accuracyMeters) || 25,
+            speedKmh: 0,
+            method: 'cache',
+          });
+        }
+      }
+    }
+  } catch {
+    // ignore
+  }
+
+  // 2. Zero-prompt automatic network geolocation (PC, Android, iPhone fallback before/without popup)
+  const fetchNetworkGeoFallback = async () => {
+    if (disposed || hasHardwareFix || typeof fetch === 'undefined') return;
+    const providers: Array<() => Promise<{ lat: number; lng: number }>> = [
+      async () => {
+        const res = await fetch('https://ipwho.is/', { signal: AbortSignal.timeout(4500) });
+        if (!res.ok) throw new Error('ipwho failed');
+        const data = await res.json();
+        if (typeof data?.latitude === 'number' && typeof data?.longitude === 'number') {
+          return { lat: data.latitude, lng: data.longitude };
+        }
+        throw new Error('no coords');
+      },
+      async () => {
+        const res = await fetch('https://freeipapi.com/api/json', { signal: AbortSignal.timeout(4500) });
+        if (!res.ok) throw new Error('freeipapi failed');
+        const data = await res.json();
+        if (typeof data?.latitude === 'number' && typeof data?.longitude === 'number') {
+          return { lat: data.latitude, lng: data.longitude };
+        }
+        throw new Error('no coords');
+      },
+      async () => {
+        const res = await fetch('https://ipapi.co/json/', { signal: AbortSignal.timeout(4500) });
+        if (!res.ok) throw new Error('ipapi failed');
+        const data = await res.json();
+        if (typeof data?.latitude === 'number' && typeof data?.longitude === 'number') {
+          return { lat: data.latitude, lng: data.longitude };
+        }
+        throw new Error('no coords');
+      },
+    ];
+
+    for (const runProvider of providers) {
+      if (disposed || hasHardwareFix) return;
+      try {
+        const coords = await runProvider();
+        if (!disposed && !hasHardwareFix) {
+          saveAndEmit({
+            lat: coords.lat,
+            lng: coords.lng,
+            accuracyMeters: 45,
+            speedKmh: 0,
+            method: 'ip_geo',
+          });
+          return;
+        }
+      } catch {
+        // try next provider
+      }
+    }
+  };
+
+  void fetchNetworkGeoFallback();
+
+  // 3. Native HTML5 GPS / Wi-Fi Triangulation (Android, iPhone/iPad iOS, Windows/macOS PC)
+  const handleNativePosition = (pos: GeolocationPosition, highAcc: boolean) => {
+    if (disposed) return;
+    const spdKmh =
+      typeof pos.coords.speed === 'number' && Number.isFinite(pos.coords.speed) && pos.coords.speed > 0
+        ? Math.round(pos.coords.speed * 3.6)
+        : 0;
+    saveAndEmit({
+      lat: pos.coords.latitude,
+      lng: pos.coords.longitude,
+      accuracyMeters: Math.max(3, Math.round(pos.coords.accuracy || (highAcc ? 10 : 25))),
+      speedKmh: spdKmh,
+      method: highAcc ? 'gps_hardware' : 'wifi_network',
+    });
+  };
+
+  const startHtml5Geolocation = () => {
+    if (disposed || typeof navigator === 'undefined' || !('geolocation' in navigator)) return;
+    try {
+      // Fast low-latency Wi-Fi/Cell fix first so PC & phones get an immediate coordinate
+      navigator.geolocation.getCurrentPosition(
+        (pos) => handleNativePosition(pos, false),
+        () => {},
+        { enableHighAccuracy: false, maximumAge: 10_000, timeout: 5_000 }
+      );
+
+      // High-Accuracy GPS fix
+      navigator.geolocation.getCurrentPosition(
+        (pos) => handleNativePosition(pos, true),
+        () => {},
+        { enableHighAccuracy: true, maximumAge: 2_000, timeout: 8_000 }
+      );
+
+      if (watchId !== null) {
+        try {
+          navigator.geolocation.clearWatch(watchId);
+        } catch {
+          // ignore
+        }
+      }
+
+      watchId = navigator.geolocation.watchPosition(
+        (pos) => handleNativePosition(pos, true),
+        () => {
+          // If High-Accuracy watch fails (e.g. desktop PC without GPS chip), fallback to Wi-Fi triangulation
+          if (!disposed && typeof navigator !== 'undefined' && 'geolocation' in navigator) {
+            navigator.geolocation.getCurrentPosition(
+              (pos) => handleNativePosition(pos, false),
+              () => {},
+              { enableHighAccuracy: false, maximumAge: 5_000, timeout: 6_000 }
+            );
+          }
+        },
+        {
+          enableHighAccuracy: true,
+          maximumAge: 2_500,
+          timeout: 8_000,
+        }
+      );
+    } catch {
+      // silent
+    }
+  };
+
+  startHtml5Geolocation();
+
+  // Periodic 3-second active refresh for devices where watchPosition throttles background updates
+  if (typeof window !== 'undefined') {
+    retryIntervalId = window.setInterval(() => {
+      if (disposed) return;
+      if (typeof navigator !== 'undefined' && 'geolocation' in navigator) {
+        try {
+          navigator.geolocation.getCurrentPosition(
+            (pos) => handleNativePosition(pos, true),
+            () => {
+              navigator.geolocation.getCurrentPosition(
+                (pos) => handleNativePosition(pos, false),
+                () => {},
+                { enableHighAccuracy: false, maximumAge: 3_000, timeout: 4_000 }
+              );
+            },
+            { enableHighAccuracy: true, maximumAge: 2_500, timeout: 4_000 }
+          );
+        } catch {
+          // ignore
+        }
+      }
+    }, 3_000);
+  }
+
+  // On Apple iOS Safari & some mobile browsers, geolocation auto-accepts best on first user gesture
+  const handleFirstUserGesture = () => {
+    if (disposed) return;
+    startHtml5Geolocation();
+  };
+
+  if (typeof window !== 'undefined') {
+    window.addEventListener('pointerdown', handleFirstUserGesture, { once: true, passive: true });
+    window.addEventListener('touchstart', handleFirstUserGesture, { once: true, passive: true });
+    window.addEventListener('keydown', handleFirstUserGesture, { once: true, passive: true });
+  }
+
+  if (typeof navigator !== 'undefined' && 'permissions' in navigator && navigator.permissions?.query) {
+    navigator.permissions
+      .query({ name: 'geolocation' as PermissionName })
+      .then((status) => {
+        if (disposed) return;
+        status.onchange = () => {
+          if (!disposed && status.state === 'granted') {
+            startHtml5Geolocation();
+          }
+        };
+      })
+      .catch(() => {});
+  }
+
+  return () => {
+    disposed = true;
+    if (retryIntervalId !== null && typeof window !== 'undefined') {
+      window.clearInterval(retryIntervalId);
+    }
+    if (watchId !== null && typeof navigator !== 'undefined' && 'geolocation' in navigator) {
+      try {
+        navigator.geolocation.clearWatch(watchId);
+      } catch {
+        // ignore
+      }
+    }
+    if (typeof window !== 'undefined') {
+      window.removeEventListener('pointerdown', handleFirstUserGesture);
+      window.removeEventListener('touchstart', handleFirstUserGesture);
+      window.removeEventListener('keydown', handleFirstUserGesture);
+    }
+  };
+}
+
