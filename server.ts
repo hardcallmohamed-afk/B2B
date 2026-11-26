@@ -90,9 +90,10 @@ function getFirebaseAdminServices() {
     : initializeAdminApp({ projectId: config.projectId });
 
   const adminAuth = getAdminAuth(adminApp);
-  const adminDb = config.firestoreDatabaseId
-    ? getAdminFirestore(adminApp, config.firestoreDatabaseId)
-    : getAdminFirestore(adminApp);
+  const adminDb =
+    config.firestoreDatabaseId && config.firestoreDatabaseId !== '(default)'
+      ? getAdminFirestore(adminApp, config.firestoreDatabaseId)
+      : getAdminFirestore(adminApp);
 
   return { adminApp, adminAuth, adminDb, config };
 }
@@ -271,7 +272,7 @@ async function authenticateVerifiedCaller(
       if (/PERMISSION_DENIED|7 PERMISSION_DENIED|Could not load the default credentials/i.test(msg)) {
         res.status(503).json({
           error:
-            'Droits IAM Firestore manquants sur le serveur. Accordez le rôle roles/datastore.viewer au compte de service d’aperçu dans Google Cloud IAM.',
+            'Droits IAM Firestore manquants sur le serveur. Accordez le rôle roles/datastore.user au compte de service d’aperçu dans Google Cloud IAM.',
         });
         return null;
       }
@@ -1312,7 +1313,15 @@ Produis un audit structuré, actionnable immédiatement sur le terrain (Meknès 
         };
       });
       res.json({ keys });
-    } catch {
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (/PERMISSION_DENIED|7 PERMISSION_DENIED|Could not load the default credentials/i.test(msg)) {
+        res.status(503).json({
+          error:
+            'Accès Firestore refusé côté serveur (IAM). Accordez le rôle roles/datastore.user au compte de service d’aperçu dans Google Cloud IAM.',
+        });
+        return;
+      }
       res.status(500).json({ error: 'Impossible de lire le coffre des clés API.' });
     }
   });
@@ -1356,7 +1365,15 @@ Produis un audit structuré, actionnable immédiatement sur le terrain (Meknès 
       await ref.set(payload, { merge: true });
 
       res.json({ success: true, provider });
-    } catch {
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (/PERMISSION_DENIED|7 PERMISSION_DENIED|Could not load the default credentials/i.test(msg)) {
+        res.status(503).json({
+          error:
+            'Accès Firestore refusé côté serveur (IAM). Accordez le rôle roles/datastore.user au compte de service d’aperçu dans Google Cloud IAM pour enregistrer des clés API.',
+        });
+        return;
+      }
       res.status(500).json({ error: 'Échec de l’enregistrement de la clé API.' });
     }
   });
@@ -1378,7 +1395,15 @@ Produis un audit structuré, actionnable immédiatement sur le terrain (Meknès 
     try {
       await services.adminDb.doc(`api_keys/${provider}`).delete();
       res.json({ success: true, provider });
-    } catch {
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (/PERMISSION_DENIED|7 PERMISSION_DENIED|Could not load the default credentials/i.test(msg)) {
+        res.status(503).json({
+          error:
+            'Accès Firestore refusé côté serveur (IAM). Accordez le rôle roles/datastore.user au compte de service d’aperçu dans Google Cloud IAM.',
+        });
+        return;
+      }
       res.status(500).json({ error: 'Échec de la suppression de la clé API.' });
     }
   });
