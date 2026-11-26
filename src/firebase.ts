@@ -1351,10 +1351,19 @@ function summarizePresenceDiag(
     `exEmailOk=${exEmailOk}`,
     `emailLen=${clean.email.length}`,
     `nameLen=${clean.displayName.length}`,
+    `firstLen=${clean.firstName.length}`,
+    `lastLen=${clean.lastName.length}`,
+    `phoneLen=${clean.phonePro.length}`,
     `zoneLen=${clean.zone.length}`,
     `devLen=${clean.currentDevice.length}`,
     `devs=${clean.devicesUsed.length}`,
     `disc=${clean.workHoursDisconnectTimes.length}`,
+    `discCount=${clean.workHoursDisconnectCount}`,
+    `loginLen=${clean.lastLoginAt.length}`,
+    `logoutLen=${clean.lastLogoutAt.length}`,
+    `seenLen=${clean.lastSeenAt.length}`,
+    `workDiscLen=${clean.lastWorkDisconnectAt.length}`,
+    `dateLen=${clean.activeDateKey.length}`,
     `today=${clean.todayWorkedSeconds}`,
     `total=${clean.totalWorkedSeconds}`,
     `sessLen=${clean.currentSessionId.length}`,
@@ -1509,6 +1518,7 @@ export async function syncMyUserPresenceProfile(params: {
 
   const executeAttempt = async () => {
     let diagStep = 'get';
+    let diagPrimaryErr = '';
     let diagExisted = false;
     let diagHadTs = false;
     let diagExtraCount = 0;
@@ -1569,7 +1579,8 @@ export async function syncMyUserPresenceProfile(params: {
             updatedAt: serverTimestamp(),
           });
           return;
-        } catch {
+        } catch (primaryErr) {
+          diagPrimaryErr = primaryErr instanceof Error ? primaryErr.message : String(primaryErr);
           await selfHealFromServer();
           return;
         }
@@ -1609,7 +1620,8 @@ export async function syncMyUserPresenceProfile(params: {
             updatedAt: serverTimestamp(),
           });
           return;
-        } catch {
+        } catch (primaryErr) {
+          diagPrimaryErr = primaryErr instanceof Error ? primaryErr.message : String(primaryErr);
           await selfHealFromServer(prev);
           return;
         }
@@ -1619,7 +1631,7 @@ export async function syncMyUserPresenceProfile(params: {
     } catch (innerErr) {
       throw withPresenceStepTag(
         innerErr,
-        `step=${diagStep};exists=${diagExisted};hadTs=${diagHadTs};miss=${diagMissingCount};extra=${diagExtraCount};${diagPayloadSummary}`
+        `step=${diagStep};exists=${diagExisted};hadTs=${diagHadTs};miss=${diagMissingCount};extra=${diagExtraCount}${diagPrimaryErr ? `;firstErr=${diagPrimaryErr.slice(0, 80)}` : ''};${diagPayloadSummary}`
       );
     }
   };
@@ -1677,6 +1689,7 @@ export async function startAttendanceSession(params: {
 
   const executeAttempt = async () => {
     let diagStep = 'get';
+    let diagPrimaryErr = '';
     let diagExisted = false;
     let diagHadTs = false;
     let diagExtraCount = 0;
@@ -1870,7 +1883,8 @@ export async function startAttendanceSession(params: {
               updatedAt: serverTimestamp(),
             });
             return;
-          } catch {
+          } catch (primaryErr) {
+            diagPrimaryErr = primaryErr instanceof Error ? primaryErr.message : String(primaryErr);
             await selfHealFromServer();
             return;
           }
@@ -1879,7 +1893,8 @@ export async function startAttendanceSession(params: {
           try {
             await repairExistingUserPresenceDoc(presRef, prev, cleanPres);
             return;
-          } catch {
+          } catch (primaryErr) {
+            diagPrimaryErr = primaryErr instanceof Error ? primaryErr.message : String(primaryErr);
             await selfHealFromServer();
             return;
           }
@@ -1896,7 +1911,8 @@ export async function startAttendanceSession(params: {
             updatedAt: serverTimestamp(),
           });
           return;
-        } catch {
+        } catch (primaryErr) {
+          diagPrimaryErr = primaryErr instanceof Error ? primaryErr.message : String(primaryErr);
           await selfHealFromServer();
           return;
         }
@@ -1904,7 +1920,7 @@ export async function startAttendanceSession(params: {
     } catch (innerErr) {
       throw withPresenceStepTag(
         innerErr,
-        `step=${diagStep};exists=${diagExisted};hadTs=${diagHadTs};miss=${diagMissingCount};extra=${diagExtraCount}${diagPayloadSummary ? `;${diagPayloadSummary}` : ''}`
+        `step=${diagStep};exists=${diagExisted};hadTs=${diagHadTs};miss=${diagMissingCount};extra=${diagExtraCount}${diagPrimaryErr ? `;firstErr=${diagPrimaryErr.slice(0, 80)}` : ''}${diagPayloadSummary ? `;${diagPayloadSummary}` : ''}`
       );
     }
   };

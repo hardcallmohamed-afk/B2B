@@ -150,7 +150,17 @@ service cloud.firestore {
         && (arr.size() <= 16 || (arr[16] is string && arr[16].size() <= maxItemLen))
         && (arr.size() <= 17 || (arr[17] is string && arr[17].size() <= maxItemLen))
         && (arr.size() <= 18 || (arr[18] is string && arr[18].size() <= maxItemLen))
-        && (arr.size() <= 19 || (arr[19] is string && arr[19].size() <= maxItemLen));
+        && (arr.size() <= 19 || (arr[19] is string && arr[19].size() <= maxItemLen))
+        && (arr.size() <= 20 || (arr[20] is string && arr[20].size() <= maxItemLen))
+        && (arr.size() <= 21 || (arr[21] is string && arr[21].size() <= maxItemLen))
+        && (arr.size() <= 22 || (arr[22] is string && arr[22].size() <= maxItemLen))
+        && (arr.size() <= 23 || (arr[23] is string && arr[23].size() <= maxItemLen))
+        && (arr.size() <= 24 || (arr[24] is string && arr[24].size() <= maxItemLen))
+        && (arr.size() <= 25 || (arr[25] is string && arr[25].size() <= maxItemLen))
+        && (arr.size() <= 26 || (arr[26] is string && arr[26].size() <= maxItemLen))
+        && (arr.size() <= 27 || (arr[27] is string && arr[27].size() <= maxItemLen))
+        && (arr.size() <= 28 || (arr[28] is string && arr[28].size() <= maxItemLen))
+        && (arr.size() <= 29 || (arr[29] is string && arr[29].size() <= maxItemLen));
     }
 
     // 3. Entity Validation Blueprints (Anti-Update-Gap)
@@ -907,7 +917,20 @@ service cloud.firestore {
           // Action 1: Super-Admin updates collaborator profile metadata or own presence (including legacy doc self-heal)
           (
             isSuperAdmin()
-            && (!('email' in existing()) || !(existing().email is string) || incoming().email.lower() == existing().email.lower() || userId == request.auth.uid)
+            && (!('uid' in existing()) || !(existing().uid is string) || existing().uid == '' || incoming().uid == existing().uid)
+            && (!('orgScope' in existing()) || !(existing().orgScope is string) || existing().orgScope != 'orange_pro_team' || incoming().orgScope == existing().orgScope)
+            && (!('email' in existing()) || !(existing().email is string) || existing().email.size() < 3 || incoming().email.lower() == existing().email.lower() || userId == request.auth.uid)
+            && (
+              incoming().diff(existing()).affectedKeys().hasOnly([
+                'email', 'displayName', 'firstName', 'lastName', 'phonePro', 'avatarDataUrl',
+                'role', 'zone', 'isOnline', 'currentDevice', 'devicesUsed',
+                'lastLoginAt', 'lastLogoutAt', 'lastSeenAt', 'lastWorkDisconnectAt',
+                'workHoursDisconnectCount', 'workHoursDisconnectTimes',
+                'activeDateKey', 'todayWorkedSeconds', 'totalWorkedSeconds',
+                'currentSessionId', 'updatedAt'
+              ])
+              || !isValidUserPresence(existing(), userId)
+            )
           )
           ||
           // Action 2: Collaborator updates own profile, device list, and live attendance status (role & email strictly bound)
