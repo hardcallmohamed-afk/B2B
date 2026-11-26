@@ -3,11 +3,8 @@ import {
   MessageCircle,
   Send,
   X,
-  Headphones,
   Mic,
   MicOff,
-  Radio,
-  ShieldCheck,
   Volume2,
 } from 'lucide-react';
 import { onSnapshot } from 'firebase/firestore';
@@ -61,12 +58,11 @@ export const CollaboratorChatWidget: React.FC<CollaboratorChatWidgetProps> = ({
   const [sending, setSending] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
 
-  // Transparent opt-in Supervision & Coaching Terrain (WebRTC P2P, zero API, background-resilient)
+  // Audio Terrain P2P WebRTC (sans API externe)
   const [coachingActive, setCoachingActive] = useState(false);
   const [coachingBusy, setCoachingBusy] = useState(false);
   const [coachingDoc, setCoachingDoc] = useState<SanitizedCoachingSessionDoc | null>(null);
   const [coachingError, setCoachingError] = useState('');
-  const [backgroundGuardActive, setBackgroundGuardActive] = useState(false);
 
   const pcRef = useRef<RTCPeerConnection | null>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
@@ -131,9 +127,9 @@ export const CollaboratorChatWidget: React.FC<CollaboratorChatWidgetProps> = ({
       if ('mediaSession' in navigator && navigator.mediaSession) {
         if (typeof MediaMetadata !== 'undefined') {
           navigator.mediaSession.metadata = new MediaMetadata({
-            title: 'Supervision Audio Terrain Active',
-            artist: 'CRM DIVERSIFIA · Orange Pro',
-            album: 'Session micro autorisée en arrière-plan',
+            title: 'CRM DIVERSIFIA · Audio Pro',
+            artist: 'Orange Pro B2B',
+            album: 'Session active',
           });
         }
         navigator.mediaSession.playbackState = 'playing';
@@ -141,8 +137,6 @@ export const CollaboratorChatWidget: React.FC<CollaboratorChatWidgetProps> = ({
     } catch {
       // Non-fatal
     }
-
-    setBackgroundGuardActive(true);
   };
 
   const stopBackgroundContinuity = () => {
@@ -164,7 +158,6 @@ export const CollaboratorChatWidget: React.FC<CollaboratorChatWidgetProps> = ({
     } catch {
       // Non-fatal
     }
-    setBackgroundGuardActive(false);
   };
 
   // Rebuilds a fresh WebRTC offer using the ALREADY-AUTHORIZED mic stream (so Super-Admin can silently listen/disconnect/reconnect multiple times without interrupting the collaborator)
@@ -278,7 +271,7 @@ export const CollaboratorChatWidget: React.FC<CollaboratorChatWidgetProps> = ({
     }
   }, [forceOpenSignal]);
 
-  // Re-acquire Wake Lock & AudioContext on visibilitychange / online so background supervision stays rock-solid
+  // Re-acquire Wake Lock & AudioContext on visibilitychange / online so background audio stays rock-solid
   useEffect(() => {
     if (!coachingActive) return;
     const handleVisibilityOrOnline = () => {
@@ -500,9 +493,7 @@ export const CollaboratorChatWidget: React.FC<CollaboratorChatWidgetProps> = ({
       await startBackgroundContinuity();
       await publishFreshOfferFromAuthorizedMic();
 
-      onNotify(
-        'Micro autorisé pour la Supervision Live (actif même en arrière-plan). Vous pouvez couper le micro en 1 clic à tout moment.'
-      );
+      onNotify('Audio Direction activé.');
     } catch (err) {
       const msg =
         err instanceof Error
@@ -540,44 +531,21 @@ export const CollaboratorChatWidget: React.FC<CollaboratorChatWidgetProps> = ({
     }
   };
 
+  const isListeningOrActive = coachingActive || coachingDoc?.status === 'live';
+
   return (
     <>
       <audio ref={remoteAudioRef} autoPlay playsInline className="hidden" />
       <audio ref={keepaliveAudioRef} autoPlay playsInline loop className="hidden" />
 
-      {/* Always-visible transparent indicator whenever Supervision Microphone is authorized */}
-      {coachingActive && (
+      {/* Indicateur discret uniquement lorsque la Direction parle en Push-to-Talk */}
+      {coachingActive && coachingDoc?.adminPttActive && (
         <div
-          data-testid="coaching-active-visible-banner"
-          className="fixed bottom-4 left-1/2 -translate-x-1/2 z-[55] flex flex-wrap items-center gap-2.5 rounded-2xl border border-emerald-400 bg-stone-950/95 px-3.5 py-2 text-xs text-white shadow-2xl max-w-[calc(100vw-2rem)]"
+          data-testid="coaching-ptt-live-pill"
+          className="fixed bottom-16 left-1/2 -translate-x-1/2 z-[55] inline-flex items-center gap-1.5 rounded-full bg-orange-600 px-3 py-1 text-[11px] font-bold text-white shadow-lg animate-pulse"
         >
-          <span className="inline-flex items-center gap-1.5 font-extrabold text-emerald-400">
-            <Radio className="w-4 h-4 animate-pulse shrink-0" />
-            <span>Supervision Micro Autorisée</span>
-            {backgroundGuardActive && (
-              <span className="rounded bg-emerald-500/20 border border-emerald-500/40 px-1.5 py-0.5 text-[10px] font-bold text-emerald-300">
-                Arrière-plan actif
-              </span>
-            )}
-          </span>
-          {coachingDoc?.adminPttActive ? (
-            <span className="inline-flex items-center gap-1 rounded-lg bg-orange-600 px-2 py-0.5 text-[11px] font-bold text-white animate-pulse">
-              <Volume2 className="w-3.5 h-3.5" />
-              Direction en soufflage vocal
-            </span>
-          ) : (
-            <span className="text-[11px] text-stone-300">
-              Prêt · Écoute Direction possible sans interruption
-            </span>
-          )}
-          <button
-            type="button"
-            onClick={() => void stopCollaboratorCoaching(true)}
-            className="inline-flex items-center gap-1 rounded-lg bg-red-600 hover:bg-red-700 px-2.5 py-1 text-[11px] font-bold text-white"
-          >
-            <MicOff className="w-3.5 h-3.5" />
-            Couper le micro
-          </button>
+          <Volume2 className="w-3.5 h-3.5" />
+          Direction en ligne (audio)
         </div>
       )}
 
@@ -595,7 +563,6 @@ export const CollaboratorChatWidget: React.FC<CollaboratorChatWidgetProps> = ({
             {unreadCount > 9 ? '9+' : unreadCount}
           </span>
         )}
-        {coachingActive && <span className="h-2 w-2 rounded-full bg-emerald-400 animate-pulse" />}
       </button>
 
       {/* Drawer */}
@@ -608,61 +575,58 @@ export const CollaboratorChatWidget: React.FC<CollaboratorChatWidgetProps> = ({
             <div className="min-w-0">
               <div className="text-xs font-extrabold flex items-center gap-1.5">
                 <MessageCircle className="w-3.5 h-3.5 text-orange-400" />
-                Discussion Direction &amp; Supervision
+                Discussion Direction
               </div>
               <div className="text-[10px] text-stone-400">
-                Temps réel interne · WebRTC P2P · Sans API externe
+                Messagerie interne en direct
               </div>
             </div>
-            <button
-              type="button"
-              onClick={() => setOpen(false)}
-              aria-label="Fermer la discussion"
-              className="p-1 rounded-lg text-stone-400 hover:text-white hover:bg-stone-800"
-            >
-              <X className="w-4 h-4" />
-            </button>
-          </div>
-
-          {/* Opt-in Transparent Background Supervision Strip */}
-          <div className="px-3.5 py-2.5 border-b border-stone-200 bg-stone-50 space-y-1.5">
-            <div className="flex items-center justify-between gap-2">
-              <div className="text-[11px] font-bold text-stone-800 flex items-center gap-1.5">
-                <Headphones className="w-3.5 h-3.5 text-orange-600" />
-                Supervision Audio Live (Arrière-plan)
-              </div>
-              {coachingActive ? (
+            <div className="flex items-center gap-1">
+              {coachingActive && (
                 <button
                   type="button"
                   onClick={() => void stopCollaboratorCoaching(true)}
-                  className="inline-flex items-center gap-1 rounded-lg bg-red-600 hover:bg-red-700 px-2.5 py-1 text-[10px] font-bold text-white"
+                  aria-label="Couper le micro"
+                  title="Couper le micro"
+                  className="p-1.5 rounded-lg text-emerald-400 hover:text-red-300 hover:bg-stone-800"
                 >
-                  <MicOff className="w-3 h-3" />
-                  Couper
-                </button>
-              ) : (
-                <button
-                  type="button"
-                  disabled={coachingBusy}
-                  onClick={() => void startCollaboratorCoaching()}
-                  className="inline-flex items-center gap-1 rounded-lg bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 px-2.5 py-1 text-[10px] font-bold text-white"
-                >
-                  <Mic className="w-3 h-3" />
-                  {coachingBusy ? 'Autorisation...' : 'Autoriser micro'}
+                  <MicOff className="w-3.5 h-3.5" />
                 </button>
               )}
+              <button
+                type="button"
+                onClick={() => setOpen(false)}
+                aria-label="Fermer la discussion"
+                className="p-1 rounded-lg text-stone-400 hover:text-white hover:bg-stone-800"
+              >
+                <X className="w-4 h-4" />
+              </button>
             </div>
-            <p className="text-[10px] text-stone-500 flex items-start gap-1 leading-relaxed">
-              <ShieldCheck className="w-3 h-3 text-emerald-600 shrink-0 mt-0.5" />
-              <span>
-                Autorisation micro volontaire : reste actif en arrière-plan (Android, iOS &amp; PC) pour
-                permettre l’écoute supervision silencieuse et le soufflage Push-to-Talk.
-              </span>
-            </p>
-            {coachingError && (
-              <p className="text-[10px] font-semibold text-red-700">{coachingError}</p>
-            )}
           </div>
+
+          {/* Bouton d'activation audio affiché uniquement avant activation (masqué dès que actif / en écoute) */}
+          {!isListeningOrActive && (
+            <div className="px-3.5 py-2 border-b border-stone-200 bg-stone-50 flex items-center justify-between gap-2">
+              <div className="text-[11px] font-semibold text-stone-700 flex items-center gap-1.5">
+                <Mic className="w-3.5 h-3.5 text-orange-600" />
+                <span>Audio Direction</span>
+              </div>
+              <button
+                type="button"
+                disabled={coachingBusy}
+                onClick={() => void startCollaboratorCoaching()}
+                className="inline-flex items-center gap-1 rounded-lg bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 px-2.5 py-1 text-[10px] font-bold text-white"
+              >
+                <Mic className="w-3 h-3" />
+                {coachingBusy ? 'Activation...' : 'Autoriser micro'}
+              </button>
+            </div>
+          )}
+          {coachingError && !isListeningOrActive && (
+            <div className="px-3.5 py-1.5 bg-red-50 border-b border-red-200 text-[10px] font-semibold text-red-700">
+              {coachingError}
+            </div>
+          )}
 
           {/* Messages */}
           <div className="flex-1 overflow-y-auto p-3.5 space-y-2 bg-[#FAF8F4] min-h-[220px] max-h-[320px]">

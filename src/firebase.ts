@@ -319,6 +319,10 @@ export function getUserPresenceListQuery() {
   return query(collection(db, 'user_presence'), where('orgScope', '==', 'orange_pro_team'));
 }
 
+export function getOwnUserPresenceDocRef(uid: string) {
+  return doc(db, 'user_presence', uid);
+}
+
 export function getUserSessionsQuery(uid: string) {
   return query(collection(db, 'user_presence', uid, 'sessions'), where('orgScope', '==', 'orange_pro_team'));
 }
@@ -1941,24 +1945,52 @@ export async function heartbeatAttendanceSession(params: {
   const safeDateKey = clampUtf8Bytes(params.dateKey.trim(), 16);
   const safeSessionId = clampUtf8Bytes(params.sessionId.trim(), 128);
 
+  const safeZone = params.fallbackProfile?.zone
+    ? clampUtf8Bytes(params.fallbackProfile.zone.trim(), 80)
+    : undefined;
+
   if (!auth.currentUser || auth.currentUser.uid !== params.uid) {
     return { todayWorkedSeconds: safeToday, totalWorkedSeconds: safeTotal };
   }
 
+  const fastHeartbeatPayload: DocumentData = {
+    isOnline: true,
+    currentDevice: safeDeviceLabel,
+    lastSeenAt: safeNowIso,
+    activeDateKey: safeDateKey,
+    todayWorkedSeconds: safeToday,
+    totalWorkedSeconds: safeTotal,
+    currentSessionId: safeSessionId,
+    updatedAt: serverTimestamp(),
+  };
+  if (safeZone) {
+    fastHeartbeatPayload.zone = safeZone;
+  }
+
   try {
-    await updateDoc(presRef, {
-      isOnline: true,
-      currentDevice: safeDeviceLabel,
-      lastSeenAt: safeNowIso,
-      activeDateKey: safeDateKey,
-      todayWorkedSeconds: safeToday,
-      totalWorkedSeconds: safeTotal,
-      currentSessionId: safeSessionId,
-      updatedAt: serverTimestamp(),
-    });
-  } catch {
-    // Self-healing reconciliation from server (fixes multi-device counter skew, stale cache, or legacy schema)
+    await updateDoc(presRef, fastHeartbeatPayload);
+  } catch (firstErr) {
+    // Self-healing reconciliation from server (fixes expired mobile wake token, multi-device counter skew, stale cache, or legacy schema)
     try {
+      if (isPermissionDeniedError(firstErr)) {
+        await ensureFreshAuthUser(params.uid, true);
+        try {
+          await updateDoc(presRef, fastHeartbeatPayload);
+          try {
+            await updateDoc(sessRef, {
+              lastSeenAt: safeNowIso,
+              workedSeconds: safeSession,
+              updatedAt: serverTimestamp(),
+            });
+          } catch {
+            // Non-fatal
+          }
+          return { todayWorkedSeconds: safeToday, totalWorkedSeconds: safeTotal };
+        } catch {
+          // Fall through to full server reconciliation
+        }
+      }
+
       const snap = await getDocFromServer(presRef).catch(() => getDoc(presRef));
       if (snap.exists()) {
         const prev = snap.data();
@@ -1991,6 +2023,7 @@ export async function heartbeatAttendanceSession(params: {
             await updateDoc(presRef, {
               isOnline: true,
               currentDevice: safeDeviceLabel,
+              ...(safeZone ? { zone: safeZone } : {}),
               devicesUsed: nextDevices,
               lastSeenAt: safeNowIso,
               activeDateKey: safeDateKey,
@@ -2999,13 +3032,28 @@ export async function sendDirectChatMessage(params: {
       }
       const freshData = freshSnap.data();
       const repairedDoc = buildChannelDoc(freshData);
-      await setDoc(channelRef, {
-        ...repairedDoc,
-        createdAt: isFirestoreTimestampValue(freshData.createdAt)
-          ? freshData.createdAt
-          : serverTimestamp(),
-        updatedAt: serverTimestamp(),
-      });
+      if (isFirestoreTimestampValue(freshData.createdAt)) {
+        await updateDoc(channelRef, {
+          collabName: repairedDoc.collabName,
+          ...(repairedDoc.collabEmail !== undefined ? { collabEmail: repairedDoc.collabEmail } : {}),
+          ...(repairedDoc.collabZone !== undefined ? { collabZone: repairedDoc.collabZone } : {}),
+          lastMessageText: repairedDoc.lastMessageText,
+          lastMessageAt: repairedDoc.lastMessageAt,
+          lastSenderUid: repairedDoc.lastSenderUid,
+          ...(repairedDoc.lastSenderName !== undefined
+            ? { lastSenderName: repairedDoc.lastSenderName }
+            : {}),
+          unreadByAdmin: repairedDoc.unreadByAdmin,
+          unreadByCollab: repairedDoc.unreadByCollab,
+          updatedAt: serverTimestamp(),
+        });
+      } else {
+        await setDoc(channelRef, {
+          ...repairedDoc,
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        });
+      }
     };
 
     if (snap.exists()) {
@@ -3159,7 +3207,8 @@ export async function setCollaboratorCoachingState(
   });
   const ref = doc(db, 'coaching_sessions', collabUid);
   try {
-    const snap = await getDoc(ref);
+    await ensureFreshAuthUser(collabUid);
+    const snap = await getDocFromServer(ref).catch(() => getDoc(ref));
     if (snap.exists()) {
       await updateDoc(ref, {
         collabName: clean.collabName,

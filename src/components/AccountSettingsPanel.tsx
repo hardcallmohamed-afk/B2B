@@ -137,6 +137,12 @@ interface AccountSettingsPanelProps {
   onJumpToAdminSection?: (section: 'all' | 'users' | 'attendance' | 'vault') => void;
   onTestBadgeAlert?: () => void;
   onNotify: (msg: string, type?: 'ok' | 'warn' | 'err') => void;
+  myPresenceStatus?: {
+    isOnline: boolean;
+    lastSeenLabel: string;
+    deviceLabel: string;
+    isSuperAdmin: boolean;
+  };
 }
 
 export const AccountSettingsPanel: React.FC<AccountSettingsPanelProps> = ({
@@ -160,6 +166,7 @@ export const AccountSettingsPanel: React.FC<AccountSettingsPanelProps> = ({
   onJumpToAdminSection,
   onTestBadgeAlert,
   onNotify,
+  myPresenceStatus,
 }) => {
   const [displayName, setDisplayName] = useState(profile.displayName);
   const [avatarDataUrl, setAvatarDataUrl] = useState(profile.avatarDataUrl);
@@ -375,6 +382,23 @@ export const AccountSettingsPanel: React.FC<AccountSettingsPanelProps> = ({
                   {displayName || profile.displayName || 'Mon Compte'}
                 </h2>
                 <RoleBadge role={role} size="sm" />
+                {myPresenceStatus && (
+                  <span
+                    data-testid="account-own-presence-badge"
+                    className={`inline-flex items-center gap-1.5 rounded-md px-2 py-0.5 text-[10px] font-bold border ${
+                      myPresenceStatus.isOnline
+                        ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+                        : 'bg-stone-100 border-stone-200 text-stone-600'
+                    }`}
+                  >
+                    <span
+                      className={`w-1.5 h-1.5 rounded-full ${
+                        myPresenceStatus.isOnline ? 'bg-emerald-500 animate-pulse' : 'bg-stone-400'
+                      }`}
+                    />
+                    {myPresenceStatus.isOnline ? 'En ligne · Pointage actif' : 'Hors ligne / Synchronisation'}
+                  </span>
+                )}
                 {emailVerified && (
                   <span className="inline-flex items-center gap-1 rounded-md bg-emerald-50 border border-emerald-200 px-2 py-0.5 text-[10px] font-bold text-emerald-800">
                     <CheckCircle2 className="w-3 h-3" />
@@ -396,6 +420,16 @@ export const AccountSettingsPanel: React.FC<AccountSettingsPanelProps> = ({
                 )}
                 <span className="font-mono text-[11px] text-stone-400">ID: {uid.slice(0, 10)}…</span>
               </div>
+
+              {myPresenceStatus && !myPresenceStatus.isSuperAdmin && (
+                <div className="rounded-lg bg-stone-50 border border-stone-200 px-2.5 py-1.5 text-[11px] text-stone-600">
+                  <strong className="text-stone-800">Session connectée :</strong>{' '}
+                  {myPresenceStatus.deviceLabel || 'Appareil actif'} · Dernière synchro{' '}
+                  {myPresenceStatus.lastSeenLabel || 'à l’instant'}. L’onglet{' '}
+                  <em>Administration Utilisateurs &amp; Accès</em> est strictement réservé à la Direction (Super-Admin), qui voit votre statut{' '}
+                  <strong className="text-emerald-700">En ligne</strong> en temps réel.
+                </div>
+              )}
 
               <div className="flex flex-wrap items-center gap-1.5 pt-1">
                 <button

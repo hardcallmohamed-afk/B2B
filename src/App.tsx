@@ -160,6 +160,9 @@ import {
   isDuringWorkHours,
   shouldFlagAbruptClosure,
   computeHeartbeatDeltaSeconds,
+  reconcilePresenceOnlineState,
+  formatDateTimeShort,
+  stripFieldTelemetrySuffix,
   startAutomaticMultiPlatformLocationEngine,
   requestImmediateDeviceGpsFix,
   type FieldActivityStatus,
@@ -191,6 +194,7 @@ import {
   getTeamStatsQuery,
   getSignedContractsQuery,
   getUserPresenceListQuery,
+  getOwnUserPresenceDocRef,
   syncMyTeamStat,
   syncMyUserPresenceProfile,
   startAttendanceSession,
@@ -2998,6 +3002,7 @@ export default function App() {
   const [dedupPrimaryChoices, setDedupPrimaryChoices] = useState<Record<string, string>>({});
   const [dedupSaving, setDedupSaving] = useState(false);
   const [userPresences, setUserPresences] = useState<UserPresenceRecord[]>([]);
+  const [myPresenceRecord, setMyPresenceRecord] = useState<UserPresenceRecord | null>(null);
   const [adminSubSection, setAdminSubSection] = useState<AdminPanelSection>(() => {
     const init = resolveInitialCrmRoute();
     return (init.adminSubSection as AdminPanelSection) || 'all';
@@ -3231,6 +3236,8 @@ export default function App() {
     baseDeviceLabel: string;
     closed: boolean;
   } | null>(null);
+  const lastNetworkHeartbeatMsRef = useRef<number>(0);
+  const lastSelfHealPresenceMsRef = useRef<number>(0);
   const liveFieldContextRef = useRef<{
     lat: number | null;
     lng: number | null;
@@ -3747,6 +3754,97 @@ export default function App() {
     return () => unsub();
   }, [authReady, cloudUser, isSuperAdmin]);
 
+  // Listener temps réel sur sa PROPRE fiche /user_presence/{uid} (autorisé pour tous les rôles : affichage "En ligne" + auto-réparation si un autre onglet a fermé)
+  useEffect(() => {
+    if (!authReady || !cloudUser || !canAccessWorkspace) {
+      setMyPresenceRecord(null);
+      return;
+    }
+    const uid = cloudUser.uid;
+    const unsub = onSnapshot(
+      getOwnUserPresenceDocRef(uid),
+      (snap) => {
+        if (!snap.exists()) {
+          setMyPresenceRecord(null);
+          return;
+        }
+        const d = snap.data();
+        const serverUpdatedAtIso =
+          d.updatedAt && typeof d.updatedAt.toDate === 'function'
+            ? d.updatedAt.toDate().toISOString()
+            : '';
+        const rawLastSeenAt = typeof d.lastSeenAt === 'string' ? d.lastSeenAt : '';
+        const record: UserPresenceRecord = {
+          uid: snap.id,
+          orgScope: 'orange_pro_team',
+          email: typeof d.email === 'string' ? d.email : '',
+          displayName: typeof d.displayName === 'string' ? d.displayName : 'Collaborateur',
+          firstName: typeof d.firstName === 'string' ? d.firstName : '',
+          lastName: typeof d.lastName === 'string' ? d.lastName : '',
+          phonePro: typeof d.phonePro === 'string' ? d.phonePro : '',
+          avatarDataUrl: typeof d.avatarDataUrl === 'string' ? d.avatarDataUrl : '',
+          role: d.role === 'super_admin' ? 'super_admin' : normalizeManagedRole(d.role),
+          zone: typeof d.zone === 'string' ? d.zone : 'Meknès',
+          isOnline: Boolean(d.isOnline),
+          currentDevice: typeof d.currentDevice === 'string' ? d.currentDevice : '',
+          devicesUsed: Array.isArray(d.devicesUsed) ? (d.devicesUsed as string[]) : [],
+          lastLoginAt: typeof d.lastLoginAt === 'string' ? d.lastLoginAt : '',
+          lastLogoutAt: typeof d.lastLogoutAt === 'string' ? d.lastLogoutAt : '',
+          lastSeenAt: rawLastSeenAt || serverUpdatedAtIso,
+          updatedAtIso: serverUpdatedAtIso || undefined,
+          lastWorkDisconnectAt:
+            typeof d.lastWorkDisconnectAt === 'string' ? d.lastWorkDisconnectAt : '',
+          workHoursDisconnectCount: Number(d.workHoursDisconnectCount) || 0,
+          workHoursDisconnectTimes: Array.isArray(d.workHoursDisconnectTimes)
+            ? (d.workHoursDisconnectTimes as string[])
+            : [],
+          activeDateKey: typeof d.activeDateKey === 'string' ? d.activeDateKey : '',
+          todayWorkedSeconds: Number(d.todayWorkedSeconds) || 0,
+          totalWorkedSeconds: Number(d.totalWorkedSeconds) || 0,
+          currentSessionId: typeof d.currentSessionId === 'string' ? d.currentSessionId : '',
+        };
+        setMyPresenceRecord(record);
+
+        // Auto-réparation immédiate : si l'utilisateur est actif au premier plan mais que Firestore indique hors ligne / ancienne session
+        const cur = activeAttendanceRef.current;
+        const now = Date.now();
+        if (
+          cur &&
+          cur.uid === uid &&
+          !cur.closed &&
+          document.visibilityState !== 'hidden' &&
+          navigator.onLine !== false &&
+          (!record.isOnline || (cur.sessionId && record.currentSessionId !== cur.sessionId)) &&
+          now - lastSelfHealPresenceMsRef.current >= 6000
+        ) {
+          lastSelfHealPresenceMsRef.current = now;
+          lastNetworkHeartbeatMsRef.current = now;
+          const snapNow = latestLocalStateRef.current;
+          void heartbeatAttendanceSession({
+            uid: cur.uid,
+            sessionId: cur.sessionId,
+            nowIso: new Date(now).toISOString(),
+            dateKey: cur.dateKey,
+            todayWorkedSeconds: Math.max(cur.todayBaseSeconds, record.todayWorkedSeconds),
+            totalWorkedSeconds: Math.max(cur.totalBaseSeconds, record.totalWorkedSeconds),
+            sessionWorkedSeconds: cur.sessionSeconds,
+            deviceLabel: cur.deviceLabel,
+            fallbackProfile: {
+              email: cur.email,
+              displayName: snapNow.userProfile.displayName.trim() || cur.displayName,
+              phonePro: snapNow.userProfile.phonePro || '',
+              avatarDataUrl: snapNow.userProfile.avatarDataUrl || '',
+              role: cur.role,
+              zone: snapNow.userProfile.zone || cur.zone,
+            },
+          }).catch(() => {});
+        }
+      },
+      () => {}
+    );
+    return () => unsub();
+  }, [authReady, cloudUser, canAccessWorkspace]);
+
   // Pointage automatique : connexion, appareil utilisé, heures travaillées et déconnexions pendant les heures de travail
   useEffect(() => {
     if (!authReady || !cloudUser || !canAccessWorkspace) return;
@@ -3906,9 +4004,39 @@ export default function App() {
       })
       .catch(() => {
         if (cancelled) return;
-        // Reprise automatique fiable après 3s via heartbeat auto-réparateur (getDocFromServer)
+        // Reprise automatique fiable après 3s : retenter startAttendanceSession + heartbeat auto-réparateur
         window.setTimeout(() => {
-          if (!cancelled) {
+          if (cancelled) return;
+          const curRetry = activeAttendanceRef.current;
+          const retrySnap = latestLocalStateRef.current;
+          if (curRetry && curRetry.uid === uid && navigator.onLine !== false) {
+            void startAttendanceSession({
+              uid,
+              email,
+              displayName: retrySnap.userProfile.displayName.trim() || curRetry.displayName,
+              phonePro: retrySnap.userProfile.phonePro || '',
+              avatarDataUrl: retrySnap.userProfile.avatarDataUrl || '',
+              role: currentUserRole,
+              zone: retrySnap.userProfile.zone || curRetry.zone,
+              deviceLabel: computeLiveTelemetryLabel(),
+              deviceType: deviceInfo.deviceType,
+              sessionId: curRetry.sessionId,
+              loginAtIso: new Date().toISOString(),
+              dateKey: curRetry.dateKey,
+              pendingAbruptClosure: null,
+            })
+              .then((r) => {
+                if (cancelled) return;
+                sessionReadyOnServer = true;
+                curRetry.todayBaseSeconds = Math.max(curRetry.todayBaseSeconds, r.todayWorkedSeconds);
+                curRetry.totalBaseSeconds = Math.max(curRetry.totalBaseSeconds, r.totalWorkedSeconds);
+                curRetry.closed = false;
+              })
+              .catch(() => {
+                sessionReadyOnServer = true;
+                accumulateElapsed(true, true);
+              });
+          } else {
             sessionReadyOnServer = true;
             accumulateElapsed(true, true);
           }
@@ -3936,6 +4064,7 @@ export default function App() {
       cur.deviceLabel = computeLiveTelemetryLabel();
 
       if (commitNetwork && navigator.onLine !== false) {
+        lastNetworkHeartbeatMsRef.current = tickMs;
         const snapNow = latestLocalStateRef.current;
         heartbeatAttendanceSession({
           uid: cur.uid,
@@ -4248,12 +4377,22 @@ export default function App() {
         .catch(() => {});
     };
 
+    const handleUserInteractionHeartbeat = () => {
+      if (document.visibilityState === 'hidden' || navigator.onLine === false) return;
+      const now = Date.now();
+      if (now - lastNetworkHeartbeatMsRef.current >= 45_000) {
+        accumulateElapsed(true, true);
+      }
+    };
+
     document.addEventListener('visibilitychange', handleVisibilityChange);
     window.addEventListener('focus', handleWindowFocusOrPageShow);
     window.addEventListener('pageshow', handleWindowFocusOrPageShow);
     window.addEventListener('offline', handleOffline);
     window.addEventListener('online', handleOnline);
     window.addEventListener('pagehide', handlePageHide);
+    window.addEventListener('pointerdown', handleUserInteractionHeartbeat, { passive: true });
+    window.addEventListener('keydown', handleUserInteractionHeartbeat, { passive: true });
 
     return () => {
       cancelled = true;
@@ -4266,6 +4405,8 @@ export default function App() {
       window.removeEventListener('offline', handleOffline);
       window.removeEventListener('online', handleOnline);
       window.removeEventListener('pagehide', handlePageHide);
+      window.removeEventListener('pointerdown', handleUserInteractionHeartbeat);
+      window.removeEventListener('keydown', handleUserInteractionHeartbeat);
     };
   }, [authReady, cloudUser, canAccessWorkspace, currentUserRole]);
 
@@ -8729,18 +8870,38 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
                     data-testid="header-profile-menu-btn"
                     className="flex items-center gap-1.5 rounded-lg border border-stone-200 bg-stone-50 hover:bg-stone-100 px-2 py-1 text-xs text-stone-900 shrink-0 transition-colors"
                   >
-                    <div className="w-6 h-6 rounded-md overflow-hidden border border-stone-300 bg-white flex items-center justify-center shrink-0">
+                    <div className="relative w-6 h-6 rounded-md overflow-visible border border-stone-300 bg-white flex items-center justify-center shrink-0">
                       {userProfile.avatarDataUrl ? (
                         <img
                           src={userProfile.avatarDataUrl}
                           alt={currentUserDisplayName}
-                          className="w-full h-full object-cover"
+                          className="w-full h-full object-cover rounded-[5px]"
                         />
                       ) : (
                         <span className="text-[10px] font-extrabold text-orange-700">
                           {getUserInitials(currentUserDisplayName)}
                         </span>
                       )}
+                      <span
+                        title={
+                          myPresenceRecord?.isOnline || navigator.onLine !== false
+                            ? 'En ligne · Pointage actif'
+                            : 'Hors ligne'
+                        }
+                        className={`absolute -bottom-0.5 -right-0.5 w-2 h-2 rounded-full ring-1 ring-white ${
+                          (myPresenceRecord
+                            ? reconcilePresenceOnlineState(
+                                myPresenceRecord.isOnline,
+                                myPresenceRecord.lastSeenAt,
+                                Date.now(),
+                                undefined,
+                                myPresenceRecord.updatedAtIso
+                              ).effectiveOnline
+                            : navigator.onLine !== false)
+                            ? 'bg-emerald-500'
+                            : 'bg-stone-400'
+                        }`}
+                      />
                     </div>
                     <span
                       className="hidden sm:inline font-semibold max-w-[120px] truncate"
@@ -8779,8 +8940,53 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
                             <RoleBadge role={currentUserRole} showShort />
                           </div>
                           <div className="text-[11px] text-stone-500 truncate mt-0.5">{cloudUser.email}</div>
-                          <div className="text-[10px] text-stone-400 truncate mt-0.5">
-                            {(ROLE_BADGE_META[currentUserRole] || ROLE_BADGE_META.commercial).label}
+                          <div className="flex items-center gap-1.5 flex-wrap mt-1">
+                            <span className="text-[10px] text-stone-400 truncate">
+                              {(ROLE_BADGE_META[currentUserRole] || ROLE_BADGE_META.commercial).label}
+                            </span>
+                            <span
+                              data-testid="header-own-online-badge"
+                              className={`inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-bold ${
+                                (myPresenceRecord
+                                  ? reconcilePresenceOnlineState(
+                                      myPresenceRecord.isOnline,
+                                      myPresenceRecord.lastSeenAt,
+                                      Date.now(),
+                                      undefined,
+                                      myPresenceRecord.updatedAtIso
+                                    ).effectiveOnline
+                                  : navigator.onLine !== false)
+                                  ? 'bg-emerald-100 text-emerald-800'
+                                  : 'bg-stone-200 text-stone-700'
+                              }`}
+                            >
+                              <span
+                                className={`w-1.5 h-1.5 rounded-full ${
+                                  (myPresenceRecord
+                                    ? reconcilePresenceOnlineState(
+                                        myPresenceRecord.isOnline,
+                                        myPresenceRecord.lastSeenAt,
+                                        Date.now(),
+                                        undefined,
+                                        myPresenceRecord.updatedAtIso
+                                      ).effectiveOnline
+                                    : navigator.onLine !== false)
+                                    ? 'bg-emerald-600'
+                                    : 'bg-stone-500'
+                                }`}
+                              />
+                              {(myPresenceRecord
+                                ? reconcilePresenceOnlineState(
+                                    myPresenceRecord.isOnline,
+                                    myPresenceRecord.lastSeenAt,
+                                    Date.now(),
+                                    undefined,
+                                    myPresenceRecord.updatedAtIso
+                                  ).effectiveOnline
+                                : navigator.onLine !== false)
+                                ? 'En ligne'
+                                : 'Hors ligne'}
+                            </span>
                           </div>
                         </div>
                       </div>
@@ -11669,6 +11875,24 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
             }
             onTestBadgeAlert={handleTestBadgeAlert}
             onNotify={notify}
+            myPresenceStatus={{
+              isOnline: myPresenceRecord
+                ? reconcilePresenceOnlineState(
+                    myPresenceRecord.isOnline,
+                    myPresenceRecord.lastSeenAt,
+                    Date.now(),
+                    undefined,
+                    myPresenceRecord.updatedAtIso
+                  ).effectiveOnline
+                : navigator.onLine !== false,
+              lastSeenLabel: myPresenceRecord?.lastSeenAt
+                ? formatDateTimeShort(myPresenceRecord.lastSeenAt)
+                : 'à l’instant',
+              deviceLabel: stripFieldTelemetrySuffix(
+                myPresenceRecord?.currentDevice || activeAttendanceRef.current?.baseDeviceLabel || ''
+              ),
+              isSuperAdmin,
+            }}
           />
         )}
 
