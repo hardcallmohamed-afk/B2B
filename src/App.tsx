@@ -4028,7 +4028,7 @@ export default function App() {
     const fastTelemetryTimer = window.setInterval(() => {
       const cur = activeAttendanceRef.current;
       if (!cur || cur.closed || cur.uid !== uid) return;
-      if (!sessionReadyOnServer && Date.now() - nowMs < 4000) return;
+      if (!sessionReadyOnServer && Date.now() - nowMs < 15_000) return;
       const nextLabel = computeLiveTelemetryLabel();
       if (nextLabel !== lastPushedTelemetryLabel) {
         lastPushedTelemetryLabel = nextLabel;
@@ -4039,7 +4039,7 @@ export default function App() {
     // Heartbeat de présence toutes les 15 secondes au premier plan + keepalive 30s en arrière-plan (mobile/desktop)
     let hiddenTickParity = 0;
     const heartbeatTimer = window.setInterval(() => {
-      if (!sessionReadyOnServer && Date.now() - nowMs < 4000) return;
+      if (!sessionReadyOnServer && Date.now() - nowMs < 15_000) return;
       if (document.visibilityState !== 'hidden') {
         hiddenTickParity = 0;
         accumulateElapsed(true, true);

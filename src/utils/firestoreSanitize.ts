@@ -1311,6 +1311,75 @@ export function sanitizeUserPresencePayload(input: UserPresenceLike): SanitizedU
   };
 }
 
+export const USER_PRESENCE_REQUIRED_DATA_KEYS = [
+  'uid',
+  'orgScope',
+  'email',
+  'displayName',
+  'firstName',
+  'lastName',
+  'phonePro',
+  'avatarDataUrl',
+  'role',
+  'zone',
+  'isOnline',
+  'currentDevice',
+  'devicesUsed',
+  'lastLoginAt',
+  'lastLogoutAt',
+  'lastSeenAt',
+  'lastWorkDisconnectAt',
+  'workHoursDisconnectCount',
+  'workHoursDisconnectTimes',
+  'activeDateKey',
+  'todayWorkedSeconds',
+  'totalWorkedSeconds',
+  'currentSessionId',
+] as const;
+
+export const USER_PRESENCE_ALLOWED_KEYS = new Set<string>([
+  ...USER_PRESENCE_REQUIRED_DATA_KEYS,
+  'createdAt',
+  'updatedAt',
+]);
+
+export function inspectUserPresenceDocKeys(existingData: Record<string, unknown>): {
+  missingDataKeys: string[];
+  extraKeys: string[];
+} {
+  const missingDataKeys = USER_PRESENCE_REQUIRED_DATA_KEYS.filter(
+    (key) => !(key in existingData)
+  );
+  const extraKeys = Object.keys(existingData).filter(
+    (key) => !USER_PRESENCE_ALLOWED_KEYS.has(key)
+  );
+  return { missingDataKeys, extraKeys };
+}
+
+export function buildUserPresenceRepairUpdatePayload(
+  existingData: Record<string, unknown>,
+  cleanDoc: SanitizedUserPresenceDoc,
+  sentinels: {
+    updatedAtSentinel: unknown;
+    createdAtSentinel: unknown;
+    deleteFieldSentinel: unknown;
+    hasValidCreatedAtTimestamp: boolean;
+  }
+): Record<string, unknown> {
+  const payload: Record<string, unknown> = {
+    ...cleanDoc,
+    updatedAt: sentinels.updatedAtSentinel,
+  };
+  if (!sentinels.hasValidCreatedAtTimestamp) {
+    payload.createdAt = sentinels.createdAtSentinel;
+  }
+  const { extraKeys } = inspectUserPresenceDocKeys(existingData);
+  for (const extraKey of extraKeys) {
+    payload[extraKey] = sentinels.deleteFieldSentinel;
+  }
+  return payload;
+}
+
 export interface AttendanceSessionLike {
   id: string;
   ownerId: string;

@@ -43,6 +43,9 @@ import {
   sanitizeSignedContractPayload,
   sanitizeApiKeyConfigPayload,
   sanitizeUserPresencePayload,
+  inspectUserPresenceDocKeys,
+  buildUserPresenceRepairUpdatePayload,
+  VALID_TEAM_ROLES,
   sanitizeAttendanceSessionPayload,
   sanitizeProviderId,
   sanitizeActivitePayload,
@@ -583,7 +586,26 @@ export async function adminUpdateManagedUser(
       if (cleanPhone !== undefined) {
         presUpdate.phonePro = cleanPhone;
       }
-      await updateDoc(presRef, presUpdate);
+      try {
+        await updateDoc(presRef, presUpdate);
+      } catch {
+        const prev = presSnap.data();
+        const repaired = buildRepairedUserPresenceDoc(
+          {
+            uid,
+            email: typeof prev.email === 'string' && prev.email.length >= 3 ? prev.email : updates.email || '',
+            displayName: cleanName,
+            firstName,
+            lastName,
+            phonePro: cleanPhone !== undefined ? cleanPhone : typeof prev.phonePro === 'string' ? prev.phonePro : '',
+            avatarDataUrl: typeof prev.avatarDataUrl === 'string' ? prev.avatarDataUrl : '',
+            role: cleanRole,
+            zone: cleanZone,
+          },
+          prev
+        );
+        await repairExistingUserPresenceDoc(presRef, prev, repaired);
+      }
     } else if (updates.email) {
       const seeded = sanitizeUserPresencePayload({
         uid,
@@ -1287,6 +1309,29 @@ function isFirestoreTimestampValue(val: unknown): boolean {
   );
 }
 
+async function repairExistingUserPresenceDoc(
+  presRef: ReturnType<typeof doc>,
+  existingData: DocumentData,
+  cleanDoc: SanitizedUserPresenceDoc
+): Promise<void> {
+  const repairPayload = buildUserPresenceRepairUpdatePayload(
+    existingData as Record<string, unknown>,
+    cleanDoc,
+    {
+      updatedAtSentinel: serverTimestamp(),
+      createdAtSentinel: serverTimestamp(),
+      deleteFieldSentinel: deleteField(),
+      hasValidCreatedAtTimestamp: isFirestoreTimestampValue(existingData.createdAt),
+    }
+  );
+  await updateDoc(presRef, repairPayload);
+}
+
+function withPresenceStepTag(err: unknown, stepInfo: string): Error {
+  const baseMsg = err instanceof Error ? err.message : String(err || 'Firestore write failed');
+  return new Error(`${baseMsg} [${stepInfo}]`);
+}
+
 function buildRepairedUserPresenceDoc(
   params: {
     uid: string;
@@ -1429,89 +1474,115 @@ export async function syncMyUserPresenceProfile(params: {
   });
 
   const executeAttempt = async () => {
-    const snap = await getDocFromServer(ref).catch(() => getDoc(ref));
+    let diagStep = 'get';
+    let diagExisted = false;
+    let diagHadTs = false;
+    let diagExtraCount = 0;
+    let diagMissingCount = 0;
+    try {
+      const snap = await getDocFromServer(ref).catch(() => getDoc(ref));
 
-    const selfHealFromServer = async (fallbackPrev: DocumentData = {}) => {
-      const freshSnap = await getDocFromServer(ref).catch(() => snap);
-      if (!freshSnap.exists()) {
-        await setDoc(ref, {
-          ...cleanProfile,
-          createdAt: serverTimestamp(),
-          updatedAt: serverTimestamp(),
-        });
-        return;
-      }
-      const freshData = freshSnap.data() || fallbackPrev;
-      const repaired = buildRepairedUserPresenceDoc(
-        {
-          uid: params.uid,
-          email: params.email,
-          displayName: cleanProfile.displayName,
-          firstName: cleanProfile.firstName,
-          lastName: cleanProfile.lastName,
-          phonePro: cleanProfile.phonePro,
-          avatarDataUrl: cleanProfile.avatarDataUrl,
-          role: params.role,
-          zone: cleanProfile.zone,
-        },
-        freshData,
-        {
-          isOnline: true,
-          lastSeenAt: cleanProfile.lastSeenAt,
+      const selfHealFromServer = async (fallbackPrev: DocumentData = {}) => {
+        diagStep = 'selfHeal_get';
+        const freshSnap = await getDocFromServer(ref).catch(() => snap);
+        if (!freshSnap.exists()) {
+          diagStep = 'selfHeal_create';
+          diagExisted = false;
+          await setDoc(ref, {
+            ...cleanProfile,
+            createdAt: serverTimestamp(),
+            updatedAt: serverTimestamp(),
+          });
+          return;
         }
-      );
-      await setDoc(ref, {
-        ...repaired,
-        createdAt: isFirestoreTimestampValue(freshData.createdAt)
-          ? freshData.createdAt
-          : serverTimestamp(),
-        updatedAt: serverTimestamp(),
-      });
-    };
+        const freshData = freshSnap.data() || fallbackPrev;
+        diagExisted = true;
+        diagHadTs = isFirestoreTimestampValue(freshData.createdAt);
+        const { missingDataKeys, extraKeys } = inspectUserPresenceDocKeys(freshData);
+        diagMissingCount = missingDataKeys.length;
+        diagExtraCount = extraKeys.length;
+        diagStep = 'selfHeal_repair_update';
+        const repaired = buildRepairedUserPresenceDoc(
+          {
+            uid: params.uid,
+            email: params.email,
+            displayName: cleanProfile.displayName,
+            firstName: cleanProfile.firstName,
+            lastName: cleanProfile.lastName,
+            phonePro: cleanProfile.phonePro,
+            avatarDataUrl: cleanProfile.avatarDataUrl,
+            role: params.role,
+            zone: cleanProfile.zone,
+          },
+          freshData,
+          {
+            isOnline: true,
+            lastSeenAt: cleanProfile.lastSeenAt,
+          }
+        );
+        await repairExistingUserPresenceDoc(ref, freshData, repaired);
+      };
 
-    if (!snap.exists()) {
-      try {
-        await setDoc(ref, {
-          ...cleanProfile,
-          createdAt: serverTimestamp(),
-          updatedAt: serverTimestamp(),
-        });
-        return;
-      } catch {
-        await selfHealFromServer();
-        return;
+      if (!snap.exists()) {
+        diagStep = 'create_new';
+        diagExisted = false;
+        try {
+          await setDoc(ref, {
+            ...cleanProfile,
+            createdAt: serverTimestamp(),
+            updatedAt: serverTimestamp(),
+          });
+          return;
+        } catch {
+          await selfHealFromServer();
+          return;
+        }
       }
-    }
 
-    const prev = snap.data();
-    const hasCoreSchema =
-      prev.uid === params.uid &&
-      prev.orgScope === 'orange_pro_team' &&
-      typeof prev.email === 'string' &&
-      prev.email.length >= 3 &&
-      typeof prev.role === 'string' &&
-      isFirestoreTimestampValue(prev.createdAt);
+      const prev = snap.data();
+      diagExisted = true;
+      diagHadTs = isFirestoreTimestampValue(prev.createdAt);
+      const { missingDataKeys, extraKeys } = inspectUserPresenceDocKeys(prev);
+      diagMissingCount = missingDataKeys.length;
+      diagExtraCount = extraKeys.length;
+      const hasCoreSchema =
+        prev.uid === params.uid &&
+        prev.orgScope === 'orange_pro_team' &&
+        typeof prev.email === 'string' &&
+        prev.email.length >= 3 &&
+        typeof prev.role === 'string' &&
+        VALID_TEAM_ROLES.has(prev.role as never) &&
+        diagHadTs &&
+        diagMissingCount === 0 &&
+        diagExtraCount === 0;
 
-    if (hasCoreSchema) {
-      try {
-        await updateDoc(ref, {
-          displayName: cleanProfile.displayName,
-          firstName: cleanProfile.firstName,
-          lastName: cleanProfile.lastName,
-          phonePro: cleanProfile.phonePro,
-          avatarDataUrl: cleanProfile.avatarDataUrl,
-          zone: cleanProfile.zone,
-          isOnline: true,
-          lastSeenAt: cleanProfile.lastSeenAt,
-          updatedAt: serverTimestamp(),
-        });
-        return;
-      } catch {
+      if (hasCoreSchema) {
+        diagStep = 'fast_update';
+        try {
+          await updateDoc(ref, {
+            displayName: cleanProfile.displayName,
+            firstName: cleanProfile.firstName,
+            lastName: cleanProfile.lastName,
+            phonePro: cleanProfile.phonePro,
+            avatarDataUrl: cleanProfile.avatarDataUrl,
+            zone: cleanProfile.zone,
+            isOnline: true,
+            lastSeenAt: cleanProfile.lastSeenAt,
+            updatedAt: serverTimestamp(),
+          });
+          return;
+        } catch {
+          await selfHealFromServer(prev);
+          return;
+        }
+      } else {
         await selfHealFromServer(prev);
-        return;
       }
-    } else {
-      await selfHealFromServer(prev);
+    } catch (innerErr) {
+      throw withPresenceStepTag(
+        innerErr,
+        `step=${diagStep};exists=${diagExisted};hadTs=${diagHadTs};miss=${diagMissingCount};extra=${diagExtraCount}`
+      );
     }
   };
 
@@ -1567,183 +1638,216 @@ export async function startAttendanceSession(params: {
   let closedPriorSession = false;
 
   const executeAttempt = async () => {
-    const snap = await getDocFromServer(presRef).catch(() => getDoc(presRef));
+    let diagStep = 'get';
+    let diagExisted = false;
+    let diagHadTs = false;
+    let diagExtraCount = 0;
+    let diagMissingCount = 0;
 
-    const computePayloadFromBase = (base: DocumentData | null) => {
-      if (base) {
-        const sameDay = base.activeDateKey === params.dateKey;
-        nextTodaySeconds = sameDay
-          ? Math.max(0, Math.round(Number(base.todayWorkedSeconds) || 0))
-          : 0;
-        nextTotalSeconds = Math.max(0, Math.round(Number(base.totalWorkedSeconds) || 0));
-        nextDisconnectCount = Math.max(
-          0,
-          Math.round(Number(base.workHoursDisconnectCount) || 0)
-        );
-        nextDisconnectTimes = Array.isArray(base.workHoursDisconnectTimes)
-          ? (base.workHoursDisconnectTimes as string[])
-          : [];
-        nextLastWorkDisconnectAt =
-          typeof base.lastWorkDisconnectAt === 'string' ? base.lastWorkDisconnectAt : '';
-        nextLastLogoutAt = typeof base.lastLogoutAt === 'string' ? base.lastLogoutAt : '';
-        const prevDevices = Array.isArray(base.devicesUsed)
-          ? (base.devicesUsed as string[])
-          : [];
-        nextDevices = buildDeviceHistoryList(prevDevices, params.deviceLabel, 12);
-      }
+    try {
+      const snap = await getDocFromServer(presRef).catch(() => getDoc(presRef));
 
-      if (closedPriorSession && params.pendingAbruptClosure) {
-        nextLastLogoutAt = params.pendingAbruptClosure.logoutAtIso;
-        if (params.pendingAbruptClosure.duringWorkHours) {
-          nextDisconnectCount += 1;
-          nextLastWorkDisconnectAt = params.pendingAbruptClosure.logoutAtIso;
-          const entry = buildWorkDisconnectEntry(
-            params.pendingAbruptClosure.logoutAtIso,
-            params.pendingAbruptClosure.reason
-          );
-          nextDisconnectTimes = [entry, ...nextDisconnectTimes.filter((x) => x !== entry)].slice(
+      const computePayloadFromBase = (base: DocumentData | null) => {
+        if (base) {
+          const sameDay = base.activeDateKey === params.dateKey;
+          nextTodaySeconds = sameDay
+            ? Math.max(0, Math.round(Number(base.todayWorkedSeconds) || 0))
+            : 0;
+          nextTotalSeconds = Math.max(0, Math.round(Number(base.totalWorkedSeconds) || 0));
+          nextDisconnectCount = Math.max(
             0,
-            30
+            Math.round(Number(base.workHoursDisconnectCount) || 0)
           );
+          nextDisconnectTimes = Array.isArray(base.workHoursDisconnectTimes)
+            ? (base.workHoursDisconnectTimes as string[])
+            : [];
+          nextLastWorkDisconnectAt =
+            typeof base.lastWorkDisconnectAt === 'string' ? base.lastWorkDisconnectAt : '';
+          nextLastLogoutAt = typeof base.lastLogoutAt === 'string' ? base.lastLogoutAt : '';
+          const prevDevices = Array.isArray(base.devicesUsed)
+            ? (base.devicesUsed as string[])
+            : [];
+          nextDevices = buildDeviceHistoryList(prevDevices, params.deviceLabel, 12);
         }
-      }
 
-      return sanitizeUserPresencePayload({
-        uid: params.uid,
-        email:
-          base && typeof base.email === 'string' && base.email.length >= 3
-            ? base.email
-            : params.email,
-        displayName: params.displayName,
-        firstName,
-        lastName,
-        phonePro: params.phonePro,
-        avatarDataUrl: params.avatarDataUrl,
-        role: base && typeof base.role === 'string' ? base.role : params.role,
-        zone: params.zone,
-        isOnline: true,
-        currentDevice: params.deviceLabel,
-        devicesUsed: nextDevices,
-        lastLoginAt: params.loginAtIso,
-        lastLogoutAt: nextLastLogoutAt,
-        lastSeenAt: params.loginAtIso,
-        lastWorkDisconnectAt: nextLastWorkDisconnectAt,
-        workHoursDisconnectCount: nextDisconnectCount,
-        workHoursDisconnectTimes: nextDisconnectTimes,
-        activeDateKey: params.dateKey,
-        todayWorkedSeconds: nextTodaySeconds,
-        totalWorkedSeconds: nextTotalSeconds,
-        currentSessionId: params.sessionId,
-      });
-    };
-
-    const selfHealFromServer = async () => {
-      const freshSnap = await getDocFromServer(presRef);
-      if (!freshSnap.exists()) {
-        const freshPres = computePayloadFromBase(null);
-        await setDoc(presRef, {
-          ...freshPres,
-          createdAt: serverTimestamp(),
-          updatedAt: serverTimestamp(),
-        });
-        return;
-      }
-      const freshData = freshSnap.data();
-      const repairedPres = computePayloadFromBase(freshData);
-      await setDoc(presRef, {
-        ...repairedPres,
-        createdAt: isFirestoreTimestampValue(freshData.createdAt)
-          ? freshData.createdAt
-          : serverTimestamp(),
-        updatedAt: serverTimestamp(),
-      });
-    };
-
-    if (snap.exists()) {
-      const prev = snap.data();
-
-      // Flush unclosed session from an earlier browser/network closure if user was away >= 2 min
-      if (
-        !closedPriorSession &&
-        params.pendingAbruptClosure &&
-        params.pendingAbruptClosure.previousSessionId
-      ) {
-        try {
-          const oldSessRef = doc(
-            db,
-            'user_presence',
-            params.uid,
-            'sessions',
-            params.pendingAbruptClosure.previousSessionId
-          );
-          const oldSnap = await getDoc(oldSessRef);
-          if (oldSnap.exists() && oldSnap.data().status === 'active') {
-            closedPriorSession = true;
-            await updateDoc(oldSessRef, {
-              lastSeenAt: clampUtf8Bytes(params.pendingAbruptClosure.logoutAtIso, 64),
-              logoutAt: clampUtf8Bytes(params.pendingAbruptClosure.logoutAtIso, 64),
-              workedSeconds: Math.min(
-                86400,
-                Math.max(0, Math.round(params.pendingAbruptClosure.workedSeconds))
-              ),
-              status: params.pendingAbruptClosure.duringWorkHours
-                ? 'disconnected_work_hours'
-                : 'closed',
-              disconnectReason: clampUtf8Bytes(params.pendingAbruptClosure.reason, 80),
-              disconnectedDuringWorkHours: params.pendingAbruptClosure.duringWorkHours,
-              updatedAt: serverTimestamp(),
-            });
+        if (closedPriorSession && params.pendingAbruptClosure) {
+          nextLastLogoutAt = params.pendingAbruptClosure.logoutAtIso;
+          if (params.pendingAbruptClosure.duringWorkHours) {
+            nextDisconnectCount += 1;
+            nextLastWorkDisconnectAt = params.pendingAbruptClosure.logoutAtIso;
+            const entry = buildWorkDisconnectEntry(
+              params.pendingAbruptClosure.logoutAtIso,
+              params.pendingAbruptClosure.reason
+            );
+            nextDisconnectTimes = [entry, ...nextDisconnectTimes.filter((x) => x !== entry)].slice(
+              0,
+              30
+            );
           }
-        } catch {
-          // Non-fatal cleanup of prior session
         }
-      }
 
-      const cleanPres = computePayloadFromBase(prev);
-      const hasValidImmutableHeader =
-        prev.uid === params.uid &&
-        prev.orgScope === 'orange_pro_team' &&
-        typeof prev.email === 'string' &&
-        prev.email.length >= 3 &&
-        typeof prev.role === 'string' &&
-        isFirestoreTimestampValue(prev.createdAt);
+        return sanitizeUserPresencePayload({
+          uid: params.uid,
+          email:
+            base && typeof base.email === 'string' && base.email.length >= 3
+              ? base.email
+              : params.email,
+          displayName: params.displayName,
+          firstName,
+          lastName,
+          phonePro: params.phonePro,
+          avatarDataUrl: params.avatarDataUrl,
+          role:
+            base && typeof base.role === 'string' && VALID_TEAM_ROLES.has(base.role as never)
+              ? base.role
+              : params.role,
+          zone: params.zone,
+          isOnline: true,
+          currentDevice: params.deviceLabel,
+          devicesUsed: nextDevices,
+          lastLoginAt: params.loginAtIso,
+          lastLogoutAt: nextLastLogoutAt,
+          lastSeenAt: params.loginAtIso,
+          lastWorkDisconnectAt: nextLastWorkDisconnectAt,
+          workHoursDisconnectCount: nextDisconnectCount,
+          workHoursDisconnectTimes: nextDisconnectTimes,
+          activeDateKey: params.dateKey,
+          todayWorkedSeconds: nextTodaySeconds,
+          totalWorkedSeconds: nextTotalSeconds,
+          currentSessionId: params.sessionId,
+        });
+      };
 
-      if (hasValidImmutableHeader) {
-        try {
-          await updateDoc(presRef, {
-            displayName: cleanPres.displayName,
-            firstName: cleanPres.firstName,
-            lastName: cleanPres.lastName,
-            phonePro: cleanPres.phonePro,
-            avatarDataUrl: cleanPres.avatarDataUrl,
-            zone: cleanPres.zone,
-            isOnline: true,
-            currentDevice: cleanPres.currentDevice,
-            devicesUsed: cleanPres.devicesUsed,
-            lastLoginAt: cleanPres.lastLoginAt,
-            lastLogoutAt: cleanPres.lastLogoutAt,
-            lastSeenAt: cleanPres.lastSeenAt,
-            lastWorkDisconnectAt: cleanPres.lastWorkDisconnectAt,
-            workHoursDisconnectCount: cleanPres.workHoursDisconnectCount,
-            workHoursDisconnectTimes: cleanPres.workHoursDisconnectTimes,
-            activeDateKey: cleanPres.activeDateKey,
-            todayWorkedSeconds: cleanPres.todayWorkedSeconds,
-            totalWorkedSeconds: cleanPres.totalWorkedSeconds,
-            currentSessionId: cleanPres.currentSessionId,
+      const selfHealFromServer = async () => {
+        diagStep = 'selfHeal_get';
+        const freshSnap = await getDocFromServer(presRef);
+        if (!freshSnap.exists()) {
+          diagStep = 'selfHeal_create';
+          diagExisted = false;
+          const freshPres = computePayloadFromBase(null);
+          await setDoc(presRef, {
+            ...freshPres,
+            createdAt: serverTimestamp(),
             updatedAt: serverTimestamp(),
           });
           return;
-        } catch {
-          await selfHealFromServer();
-          return;
+        }
+        const freshData = freshSnap.data();
+        diagExisted = true;
+        diagHadTs = isFirestoreTimestampValue(freshData.createdAt);
+        const { missingDataKeys, extraKeys } = inspectUserPresenceDocKeys(freshData);
+        diagMissingCount = missingDataKeys.length;
+        diagExtraCount = extraKeys.length;
+        diagStep = 'selfHeal_repair_update';
+        const repairedPres = computePayloadFromBase(freshData);
+        await repairExistingUserPresenceDoc(presRef, freshData, repairedPres);
+      };
+
+      if (snap.exists()) {
+        const prev = snap.data();
+        diagExisted = true;
+        diagHadTs = isFirestoreTimestampValue(prev.createdAt);
+
+        // Flush unclosed session from an earlier browser/network closure if user was away >= 2 min
+        if (
+          !closedPriorSession &&
+          params.pendingAbruptClosure &&
+          params.pendingAbruptClosure.previousSessionId
+        ) {
+          try {
+            const oldSessRef = doc(
+              db,
+              'user_presence',
+              params.uid,
+              'sessions',
+              params.pendingAbruptClosure.previousSessionId
+            );
+            const oldSnap = await getDoc(oldSessRef);
+            if (oldSnap.exists() && oldSnap.data().status === 'active') {
+              closedPriorSession = true;
+              await updateDoc(oldSessRef, {
+                lastSeenAt: clampUtf8Bytes(params.pendingAbruptClosure.logoutAtIso, 64),
+                logoutAt: clampUtf8Bytes(params.pendingAbruptClosure.logoutAtIso, 64),
+                workedSeconds: Math.min(
+                  86400,
+                  Math.max(0, Math.round(params.pendingAbruptClosure.workedSeconds))
+                ),
+                status: params.pendingAbruptClosure.duringWorkHours
+                  ? 'disconnected_work_hours'
+                  : 'closed',
+                disconnectReason: clampUtf8Bytes(params.pendingAbruptClosure.reason, 80),
+                disconnectedDuringWorkHours: params.pendingAbruptClosure.duringWorkHours,
+                updatedAt: serverTimestamp(),
+              });
+            }
+          } catch {
+            // Non-fatal cleanup of prior session
+          }
+        }
+
+        const cleanPres = computePayloadFromBase(prev);
+        const { missingDataKeys, extraKeys } = inspectUserPresenceDocKeys(prev);
+        diagMissingCount = missingDataKeys.length;
+        diagExtraCount = extraKeys.length;
+        const hasValidFullSchema =
+          prev.uid === params.uid &&
+          prev.orgScope === 'orange_pro_team' &&
+          typeof prev.email === 'string' &&
+          prev.email.length >= 3 &&
+          typeof prev.role === 'string' &&
+          VALID_TEAM_ROLES.has(prev.role as never) &&
+          diagHadTs &&
+          diagMissingCount === 0 &&
+          diagExtraCount === 0;
+
+        if (hasValidFullSchema) {
+          diagStep = 'fast_update';
+          try {
+            await updateDoc(presRef, {
+              displayName: cleanPres.displayName,
+              firstName: cleanPres.firstName,
+              lastName: cleanPres.lastName,
+              phonePro: cleanPres.phonePro,
+              avatarDataUrl: cleanPres.avatarDataUrl,
+              zone: cleanPres.zone,
+              isOnline: true,
+              currentDevice: cleanPres.currentDevice,
+              devicesUsed: cleanPres.devicesUsed,
+              lastLoginAt: cleanPres.lastLoginAt,
+              lastLogoutAt: cleanPres.lastLogoutAt,
+              lastSeenAt: cleanPres.lastSeenAt,
+              lastWorkDisconnectAt: cleanPres.lastWorkDisconnectAt,
+              workHoursDisconnectCount: cleanPres.workHoursDisconnectCount,
+              workHoursDisconnectTimes: cleanPres.workHoursDisconnectTimes,
+              activeDateKey: cleanPres.activeDateKey,
+              todayWorkedSeconds: cleanPres.todayWorkedSeconds,
+              totalWorkedSeconds: cleanPres.totalWorkedSeconds,
+              currentSessionId: cleanPres.currentSessionId,
+              updatedAt: serverTimestamp(),
+            });
+            return;
+          } catch {
+            await selfHealFromServer();
+            return;
+          }
+        } else {
+          diagStep = 'legacy_repair_update';
+          try {
+            await repairExistingUserPresenceDoc(presRef, prev, cleanPres);
+            return;
+          } catch {
+            await selfHealFromServer();
+            return;
+          }
         }
       } else {
+        diagStep = 'create_new';
+        diagExisted = false;
+        const cleanPres = computePayloadFromBase(null);
         try {
           await setDoc(presRef, {
             ...cleanPres,
-            createdAt: isFirestoreTimestampValue(prev.createdAt)
-              ? prev.createdAt
-              : serverTimestamp(),
+            createdAt: serverTimestamp(),
             updatedAt: serverTimestamp(),
           });
           return;
@@ -1752,19 +1856,11 @@ export async function startAttendanceSession(params: {
           return;
         }
       }
-    } else {
-      const cleanPres = computePayloadFromBase(null);
-      try {
-        await setDoc(presRef, {
-          ...cleanPres,
-          createdAt: serverTimestamp(),
-          updatedAt: serverTimestamp(),
-        });
-        return;
-      } catch {
-        await selfHealFromServer();
-        return;
-      }
+    } catch (innerErr) {
+      throw withPresenceStepTag(
+        innerErr,
+        `step=${diagStep};exists=${diagExisted};hadTs=${diagHadTs};miss=${diagMissingCount};extra=${diagExtraCount}`
+      );
     }
   };
 
@@ -1949,11 +2045,7 @@ export async function heartbeatAttendanceSession(params: {
               currentSessionId: safeSessionId,
             }
           );
-          await setDoc(presRef, {
-            ...repaired,
-            createdAt: isFirestoreTimestampValue(prev.createdAt) ? prev.createdAt : serverTimestamp(),
-            updatedAt: serverTimestamp(),
-          });
+          await repairExistingUserPresenceDoc(presRef, prev, repaired);
         }
       } else if (params.fallbackProfile) {
         const { firstName, lastName } = splitFirstAndLastName(params.fallbackProfile.displayName);
@@ -2110,13 +2202,7 @@ export async function closeAttendanceSession(params: {
               currentSessionId: '',
             }
           );
-          await setDoc(presRef, {
-            ...repaired,
-            createdAt: isFirestoreTimestampValue(prev.createdAt)
-              ? prev.createdAt
-              : serverTimestamp(),
-            updatedAt: serverTimestamp(),
-          });
+          await repairExistingUserPresenceDoc(presRef, prev, repaired);
         }
       }
     }

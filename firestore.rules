@@ -907,7 +907,7 @@ service cloud.firestore {
           // Action 1: Super-Admin updates collaborator profile metadata or own presence (including legacy doc self-heal)
           (
             isSuperAdmin()
-            && (!('email' in existing()) || incoming().email == existing().email || userId == request.auth.uid)
+            && (!('email' in existing()) || !(existing().email is string) || incoming().email.lower() == existing().email.lower() || userId == request.auth.uid)
           )
           ||
           // Action 2: Collaborator updates own profile, device list, and live attendance status (role & email immutable)
@@ -916,18 +916,30 @@ service cloud.firestore {
             && incoming().uid == request.auth.uid
             && (!('uid' in existing()) || incoming().uid == existing().uid)
             && (!('orgScope' in existing()) || incoming().orgScope == existing().orgScope)
-            && (!('email' in existing()) || incoming().email == existing().email)
+            && (!('email' in existing()) || !(existing().email is string) || incoming().email.lower() == existing().email.lower())
             && (!('role' in existing()) || incoming().role == existing().role)
             && (
               (
                 'activeDateKey' in existing()
                 && 'todayWorkedSeconds' in existing()
+                && existing().activeDateKey is string
+                && existing().todayWorkedSeconds is number
+                && existing().todayWorkedSeconds >= 0
+                && existing().todayWorkedSeconds <= 86400
                 && incoming().activeDateKey == existing().activeDateKey
                 && incoming().todayWorkedSeconds >= existing().todayWorkedSeconds
                 && incoming().todayWorkedSeconds <= existing().todayWorkedSeconds + 600
               )
               || (
-                (!('activeDateKey' in existing()) || incoming().activeDateKey != existing().activeDateKey)
+                (
+                  !('activeDateKey' in existing())
+                  || !('todayWorkedSeconds' in existing())
+                  || !(existing().activeDateKey is string)
+                  || !(existing().todayWorkedSeconds is number)
+                  || existing().todayWorkedSeconds < 0
+                  || existing().todayWorkedSeconds > 86400
+                  || incoming().activeDateKey != existing().activeDateKey
+                )
                 && incoming().todayWorkedSeconds >= 0
                 && incoming().todayWorkedSeconds <= 600
               )
@@ -935,19 +947,28 @@ service cloud.firestore {
             && incoming().todayWorkedSeconds <= 86400
             && (
               !('totalWorkedSeconds' in existing())
+              || !(existing().totalWorkedSeconds is number)
+              || existing().totalWorkedSeconds < 0
+              || existing().totalWorkedSeconds > 100000000
               || (
                 incoming().totalWorkedSeconds >= existing().totalWorkedSeconds
                 && incoming().totalWorkedSeconds <= existing().totalWorkedSeconds + 600
               )
             )
-            && incoming().diff(existing()).affectedKeys().hasOnly([
-              'displayName', 'firstName', 'lastName', 'phonePro', 'avatarDataUrl',
-              'zone', 'isOnline', 'currentDevice', 'devicesUsed',
-              'lastLoginAt', 'lastLogoutAt', 'lastSeenAt', 'lastWorkDisconnectAt',
-              'workHoursDisconnectCount', 'workHoursDisconnectTimes',
-              'activeDateKey', 'todayWorkedSeconds', 'totalWorkedSeconds',
-              'currentSessionId', 'updatedAt'
-            ])
+            && (
+              incoming().diff(existing()).affectedKeys().hasOnly([
+                'displayName', 'firstName', 'lastName', 'phonePro', 'avatarDataUrl',
+                'zone', 'isOnline', 'currentDevice', 'devicesUsed',
+                'lastLoginAt', 'lastLogoutAt', 'lastSeenAt', 'lastWorkDisconnectAt',
+                'workHoursDisconnectCount', 'workHoursDisconnectTimes',
+                'activeDateKey', 'todayWorkedSeconds', 'totalWorkedSeconds',
+                'currentSessionId', 'updatedAt'
+              ])
+              || (
+                !isValidUserPresence(existing(), userId)
+                && incoming().role == get(/databases/$(database)/documents/app_users/$(userId)).data.role
+              )
+            )
           )
         );
 

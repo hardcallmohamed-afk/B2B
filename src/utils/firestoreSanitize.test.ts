@@ -628,7 +628,61 @@ test('clampUtf8Bytes keeps user_presence and direct_chats payloads within Firest
   assert.ok(byteLen(chan.lastSenderName || '') <= 120);
 });
 
+test('buildUserPresenceRepairUpdatePayload omits valid createdAt, heals invalid createdAt, and deletes legacy extra keys', async () => {
+  const {
+    sanitizeUserPresencePayload,
+    inspectUserPresenceDocKeys,
+    buildUserPresenceRepairUpdatePayload,
+  } = await import('./firestoreSanitize');
 
+  const cleanPres = sanitizeUserPresencePayload({
+    uid: 'eHlHBvh4asbWuG24W1RAph3SHil1',
+    email: 'hardcallmohamed@gmail.com',
+    displayName: 'HARDCALL CONTACT',
+    role: 'super_admin',
+    zone: 'Meknès',
+    isOnline: true,
+    currentDevice: 'Windows · Chrome (PC / Bureau)',
+  });
 
+  const legacyWithValidTs: Record<string, unknown> = {
+    uid: 'eHlHBvh4asbWuG24W1RAph3SHil1',
+    email: 'hardcallmohamed@gmail.com',
+    displayName: 'HARDCALL',
+    legacyGhostField: 'old',
+    lastPingAt: 123456,
+    createdAt: { toDate: () => new Date() },
+  };
+  const inspected = inspectUserPresenceDocKeys(legacyWithValidTs);
+  assert.ok(inspected.missingDataKeys.includes('workHoursDisconnectTimes'));
+  assert.deepEqual(inspected.extraKeys, ['legacyGhostField', 'lastPingAt']);
 
+  const DELETE_SENTINEL = Symbol('deleteField');
+  const SERVER_TS_CREATED = Symbol('serverCreatedAt');
+  const SERVER_TS_UPDATED = Symbol('serverUpdatedAt');
 
+  const repairValidTs = buildUserPresenceRepairUpdatePayload(legacyWithValidTs, cleanPres, {
+    updatedAtSentinel: SERVER_TS_UPDATED,
+    createdAtSentinel: SERVER_TS_CREATED,
+    deleteFieldSentinel: DELETE_SENTINEL,
+    hasValidCreatedAtTimestamp: true,
+  });
+  assert.equal('createdAt' in repairValidTs, false);
+  assert.equal(repairValidTs.updatedAt, SERVER_TS_UPDATED);
+  assert.equal(repairValidTs.legacyGhostField, DELETE_SENTINEL);
+  assert.equal(repairValidTs.lastPingAt, DELETE_SENTINEL);
+  assert.equal(repairValidTs.orgScope, 'orange_pro_team');
+
+  const repairMissingTs = buildUserPresenceRepairUpdatePayload(
+    { uid: 'u1', oldField: true },
+    cleanPres,
+    {
+      updatedAtSentinel: SERVER_TS_UPDATED,
+      createdAtSentinel: SERVER_TS_CREATED,
+      deleteFieldSentinel: DELETE_SENTINEL,
+      hasValidCreatedAtTimestamp: false,
+    }
+  );
+  assert.equal(repairMissingTs.createdAt, SERVER_TS_CREATED);
+  assert.equal(repairMissingTs.oldField, DELETE_SENTINEL);
+});
