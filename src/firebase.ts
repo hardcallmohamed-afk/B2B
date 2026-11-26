@@ -1248,6 +1248,14 @@ export function getUserSkillsCollection(uid: string) {
   return collection(db, 'users', uid, 'skills');
 }
 
+function isFirestoreTimestampValue(val: unknown): boolean {
+  return Boolean(
+    val &&
+      typeof val === 'object' &&
+      typeof (val as { toDate?: unknown }).toDate === 'function'
+  );
+}
+
 export async function syncMyUserPresenceProfile(params: {
   uid: string;
   email: string;
@@ -1262,7 +1270,7 @@ export async function syncMyUserPresenceProfile(params: {
   const { firstName, lastName } = splitFirstAndLastName(params.displayName);
 
   try {
-    const snap = await getDoc(ref);
+    const snap = await getDocFromServer(ref).catch(() => getDoc(ref));
     const cleanProfile = sanitizeUserPresencePayload({
       uid: params.uid,
       email: params.email,
@@ -1288,13 +1296,17 @@ export async function syncMyUserPresenceProfile(params: {
         // Race condition: document may have been created concurrently by startAttendanceSession
         const freshSnap = await getDocFromServer(ref);
         if (!freshSnap.exists()) throw new Error('Failed to create user_presence');
-        await updateDoc(ref, {
-          displayName: cleanProfile.displayName,
-          firstName: cleanProfile.firstName,
-          lastName: cleanProfile.lastName,
-          phonePro: cleanProfile.phonePro,
-          avatarDataUrl: cleanProfile.avatarDataUrl,
-          zone: cleanProfile.zone,
+        const freshData = freshSnap.data();
+        await setDoc(ref, {
+          ...cleanProfile,
+          email:
+            typeof freshData.email === 'string' && freshData.email.length >= 3
+              ? freshData.email
+              : cleanProfile.email,
+          role: typeof freshData.role === 'string' ? freshData.role : cleanProfile.role,
+          createdAt: isFirestoreTimestampValue(freshData.createdAt)
+            ? freshData.createdAt
+            : serverTimestamp(),
           updatedAt: serverTimestamp(),
         });
         return;
@@ -1303,12 +1315,12 @@ export async function syncMyUserPresenceProfile(params: {
 
     const prev = snap.data();
     const hasCoreSchema =
-      typeof prev.uid === 'string' &&
+      prev.uid === params.uid &&
       prev.orgScope === 'orange_pro_team' &&
       typeof prev.email === 'string' &&
       prev.email.length >= 3 &&
       typeof prev.role === 'string' &&
-      Boolean(prev.createdAt);
+      isFirestoreTimestampValue(prev.createdAt);
 
     if (hasCoreSchema) {
       await updateDoc(ref, {
@@ -1321,7 +1333,7 @@ export async function syncMyUserPresenceProfile(params: {
         updatedAt: serverTimestamp(),
       });
     } else {
-      // Self-heal legacy partial presence doc while preserving existing createdAt/email if present
+      // Self-heal legacy partial presence doc while preserving existing valid timestamp/email
       const repaired = sanitizeUserPresencePayload({
         uid: params.uid,
         email: typeof prev.email === 'string' && prev.email.length >= 3 ? prev.email : params.email,
@@ -1350,7 +1362,7 @@ export async function syncMyUserPresenceProfile(params: {
       });
       await setDoc(ref, {
         ...repaired,
-        createdAt: prev.createdAt || serverTimestamp(),
+        createdAt: isFirestoreTimestampValue(prev.createdAt) ? prev.createdAt : serverTimestamp(),
         updatedAt: serverTimestamp(),
       });
     }
@@ -1393,7 +1405,7 @@ export async function startAttendanceSession(params: {
   let nextDevices: string[] = [params.deviceLabel];
 
   try {
-    const snap = await getDoc(presRef);
+    const snap = await getDocFromServer(presRef).catch(() => getDoc(presRef));
     if (snap.exists()) {
       const prev = snap.data();
       const sameDay = prev.activeDateKey === params.dateKey;
@@ -1478,7 +1490,7 @@ export async function startAttendanceSession(params: {
         typeof prev.email === 'string' &&
         prev.email.length >= 3 &&
         typeof prev.role === 'string' &&
-        Boolean(prev.createdAt);
+        isFirestoreTimestampValue(prev.createdAt);
 
       if (hasValidImmutableHeader) {
         try {
@@ -1508,14 +1520,14 @@ export async function startAttendanceSession(params: {
           // Self-heal if legacy doc contained extra/malformed keys
           await setDoc(presRef, {
             ...cleanPres,
-            createdAt: prev.createdAt || serverTimestamp(),
+            createdAt: isFirestoreTimestampValue(prev.createdAt) ? prev.createdAt : serverTimestamp(),
             updatedAt: serverTimestamp(),
           });
         }
       } else {
         await setDoc(presRef, {
           ...cleanPres,
-          createdAt: prev.createdAt || serverTimestamp(),
+          createdAt: isFirestoreTimestampValue(prev.createdAt) ? prev.createdAt : serverTimestamp(),
           updatedAt: serverTimestamp(),
         });
       }
@@ -1551,23 +1563,20 @@ export async function startAttendanceSession(params: {
           updatedAt: serverTimestamp(),
         });
       } catch {
-        // Race condition: document was created concurrently on server; switch to clean updateDoc
+        // Race condition: document was created concurrently on server; switch to self-healing setDoc
         const freshSnap = await getDocFromServer(presRef);
         if (!freshSnap.exists()) throw new Error('Unable to initialize user_presence');
-        await updateDoc(presRef, {
-          displayName: cleanPres.displayName,
-          firstName: cleanPres.firstName,
-          lastName: cleanPres.lastName,
-          phonePro: cleanPres.phonePro,
-          avatarDataUrl: cleanPres.avatarDataUrl,
-          zone: cleanPres.zone,
-          isOnline: true,
-          currentDevice: cleanPres.currentDevice,
-          devicesUsed: cleanPres.devicesUsed,
-          lastLoginAt: cleanPres.lastLoginAt,
-          lastSeenAt: cleanPres.lastSeenAt,
-          activeDateKey: cleanPres.activeDateKey,
-          currentSessionId: cleanPres.currentSessionId,
+        const freshData = freshSnap.data();
+        await setDoc(presRef, {
+          ...cleanPres,
+          email:
+            typeof freshData.email === 'string' && freshData.email.length >= 3
+              ? freshData.email
+              : cleanPres.email,
+          role: typeof freshData.role === 'string' ? freshData.role : cleanPres.role,
+          createdAt: isFirestoreTimestampValue(freshData.createdAt)
+            ? freshData.createdAt
+            : serverTimestamp(),
           updatedAt: serverTimestamp(),
         });
       }

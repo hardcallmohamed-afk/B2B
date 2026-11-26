@@ -18,7 +18,7 @@ service cloud.firestore {
     function isSuperAdmin() {
       return isVerifiedUser()
         && request.auth.token.email is string
-        && request.auth.token.email == 'hardcallmohamed@gmail.com';
+        && request.auth.token.email.lower() == 'hardcallmohamed@gmail.com';
     }
     function isValidId(id) {
       return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
@@ -200,7 +200,12 @@ service cloud.firestore {
     function isValidAvatarDataUrl(val) {
       return val is string
         && val.size() <= 45000
-        && (val.size() == 0 || val.matches('^data:image/(jpeg|png|webp);base64,[A-Za-z0-9+/=]+$'));
+        && (
+          val.size() == 0
+          || (val.size() > 23 && val[0:23] == 'data:image/jpeg;base64,')
+          || (val.size() > 22 && val[0:22] == 'data:image/png;base64,')
+          || (val.size() > 23 && val[0:23] == 'data:image/webp;base64,')
+        );
     }
 
     function isValidTeamStat(data, targetUid) {
@@ -870,11 +875,9 @@ service cloud.firestore {
 
       allow update: if isValidId(userId)
         && isValidUserPresence(incoming(), userId)
-        && (!('uid' in existing()) || incoming().uid == existing().uid)
-        && (!('orgScope' in existing()) || incoming().orgScope == existing().orgScope)
         && (
           ('createdAt' in existing() && existing().createdAt is timestamp && incoming().createdAt == existing().createdAt)
-          || (!('createdAt' in existing()) && incoming().createdAt == request.time)
+          || ((!('createdAt' in existing()) || !(existing().createdAt is timestamp)) && incoming().createdAt == request.time)
         )
         && incoming().updatedAt == request.time
         && (
@@ -888,6 +891,8 @@ service cloud.firestore {
           (
             isOwner(userId)
             && incoming().uid == request.auth.uid
+            && (!('uid' in existing()) || incoming().uid == existing().uid)
+            && (!('orgScope' in existing()) || incoming().orgScope == existing().orgScope)
             && (!('email' in existing()) || incoming().email == existing().email)
             && (!('role' in existing()) || incoming().role == existing().role)
             && (
