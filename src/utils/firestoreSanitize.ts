@@ -48,6 +48,12 @@ export interface FicheLike {
   prochaineRelanceAt?: string;
   rdvAt?: string;
   rdvLieu?: string;
+  assignedByUid?: string;
+  assignedByName?: string;
+  assignedAt?: string;
+  restoredByName?: string;
+  restoredAt?: string;
+  restoredReason?: string;
 }
 
 export interface EmailSkillLike {
@@ -133,6 +139,12 @@ export interface SanitizedFicheDoc {
   prochaineRelanceAt?: string;
   rdvAt?: string;
   rdvLieu?: string;
+  assignedByUid?: string;
+  assignedByName?: string;
+  assignedAt?: string;
+  restoredByName?: string;
+  restoredAt?: string;
+  restoredReason?: string;
 }
 
 export interface SanitizedEmailSkillDoc {
@@ -155,6 +167,11 @@ export const VALID_ACTIVITE_TYPES = new Set([
   'rdv',
   'devis',
   'statut',
+  'attribution',
+  'acces',
+  'modification',
+  'restitution',
+  'signature',
 ] as const);
 
 export type ActiviteType =
@@ -165,7 +182,12 @@ export type ActiviteType =
   | 'note'
   | 'rdv'
   | 'devis'
-  | 'statut';
+  | 'statut'
+  | 'attribution'
+  | 'acces'
+  | 'modification'
+  | 'restitution'
+  | 'signature';
 
 export const VALID_ACTIVITE_RESULTATS = new Set([
   'joint',
@@ -194,6 +216,9 @@ export interface ActiviteLike {
   resultat: string;
   texte: string;
   auteurNom: string;
+  auteurUid?: string;
+  auteurRole?: string;
+  createdAtIso?: string;
   rdvAt?: string;
   rdvLieu?: string;
   prochaineRelanceAt?: string;
@@ -209,9 +234,66 @@ export interface SanitizedActiviteDoc {
   resultat: ActiviteResultat;
   texte: string;
   auteurNom: string;
+  auteurUid?: string;
+  auteurRole?: string;
+  createdAtIso?: string;
   rdvAt?: string;
   rdvLieu?: string;
   prochaineRelanceAt?: string;
+}
+
+export const VALID_CLOUD_NOTIFICATION_KINDS = new Set([
+  'fiche_assigned',
+  'fiche_accessed',
+  'fiche_restored',
+  'fiche_updated',
+  'contract_signed',
+  'contract_status_changed',
+] as const);
+
+export type CloudNotificationKind =
+  | 'fiche_assigned'
+  | 'fiche_accessed'
+  | 'fiche_restored'
+  | 'fiche_updated'
+  | 'contract_signed'
+  | 'contract_status_changed';
+
+export interface CloudNotificationLike {
+  id?: string;
+  recipientUid: string;
+  senderUid: string;
+  senderName: string;
+  senderRole?: string;
+  kind: string;
+  title: string;
+  message: string;
+  ficheId?: string;
+  ficheOwnerId?: string;
+  numeroFiche?: string;
+  societe?: string;
+  targetTab?: 'crm' | 'team' | 'badges';
+  read?: boolean;
+  createdAtIso?: string;
+}
+
+export interface SanitizedCloudNotificationDoc {
+  id: string;
+  orgScope: 'orange_pro_team';
+  recipientUid: string;
+  senderUid: string;
+  senderName: string;
+  senderRole?: string;
+  kind: CloudNotificationKind;
+  title: string;
+  message: string;
+  ficheId?: string;
+  ficheOwnerId?: string;
+  numeroFiche?: string;
+  societe?: string;
+  targetTab?: 'crm' | 'team' | 'badges';
+  read: boolean;
+  createdAtIso: string;
 }
 
 export const VALID_MANAGED_ROLES = new Set([
@@ -410,6 +492,24 @@ export function sanitizeFichePayload(ownerId: string, fiche: FicheLike): Sanitiz
   if (typeof fiche.rdvLieu === 'string' && fiche.rdvLieu.trim().length > 0) {
     doc.rdvLieu = clampString(fiche.rdvLieu.trim(), 160);
   }
+  if (typeof fiche.assignedByUid === 'string' && fiche.assignedByUid.trim().length > 0) {
+    doc.assignedByUid = sanitizeDocId(fiche.assignedByUid, 'user');
+  }
+  if (typeof fiche.assignedByName === 'string' && fiche.assignedByName.trim().length > 0) {
+    doc.assignedByName = clampString(fiche.assignedByName.trim(), 120);
+  }
+  if (typeof fiche.assignedAt === 'string' && fiche.assignedAt.trim().length > 0) {
+    doc.assignedAt = clampString(fiche.assignedAt.trim(), 64);
+  }
+  if (typeof fiche.restoredByName === 'string' && fiche.restoredByName.trim().length > 0) {
+    doc.restoredByName = clampString(fiche.restoredByName.trim(), 120);
+  }
+  if (typeof fiche.restoredAt === 'string' && fiche.restoredAt.trim().length > 0) {
+    doc.restoredAt = clampString(fiche.restoredAt.trim(), 64);
+  }
+  if (typeof fiche.restoredReason === 'string' && fiche.restoredReason.trim().length > 0) {
+    doc.restoredReason = clampString(fiche.restoredReason.trim(), 300);
+  }
 
   return doc;
 }
@@ -445,8 +545,15 @@ export function sanitizeActivitePayload(
     resultat,
     texte: rawTexte,
     auteurNom,
+    createdAtIso: clampString(input.createdAtIso?.trim?.() ?? '', 64) || new Date().toISOString(),
   };
 
+  if (typeof input.auteurUid === 'string' && input.auteurUid.trim().length > 0) {
+    doc.auteurUid = sanitizeDocId(input.auteurUid, 'user');
+  }
+  if (typeof input.auteurRole === 'string' && input.auteurRole.trim().length > 0) {
+    doc.auteurRole = clampString(input.auteurRole.trim(), 40);
+  }
   if (typeof input.rdvAt === 'string' && input.rdvAt.trim().length > 0) {
     doc.rdvAt = clampString(input.rdvAt.trim(), 64);
   }
@@ -455,6 +562,62 @@ export function sanitizeActivitePayload(
   }
   if (typeof input.prochaineRelanceAt === 'string' && input.prochaineRelanceAt.trim().length > 0) {
     doc.prochaineRelanceAt = clampString(input.prochaineRelanceAt.trim(), 64);
+  }
+
+  return doc;
+}
+
+export function sanitizeCloudNotificationPayload(
+  input: CloudNotificationLike
+): SanitizedCloudNotificationDoc {
+  const cleanId = sanitizeDocId(
+    input.id || `ntf_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
+    'ntf'
+  );
+  const recipientUid = sanitizeDocId(input.recipientUid, 'user');
+  const senderUid = sanitizeDocId(input.senderUid, 'user');
+  const rawSenderName = clampString(input.senderName?.trim?.() ?? '', 120);
+  const senderName = rawSenderName.length >= 1 ? rawSenderName : 'Collaborateur';
+  const rawKind = clampString(input.kind, 40).toLowerCase();
+  const kind: CloudNotificationKind = VALID_CLOUD_NOTIFICATION_KINDS.has(rawKind as never)
+    ? (rawKind as CloudNotificationKind)
+    : 'fiche_updated';
+  const rawTitle = clampString(input.title?.trim?.() ?? '', 200);
+  const title = rawTitle.length >= 1 ? rawTitle : 'Notification CRM';
+  const message = clampString(input.message?.trim?.() ?? '', 600);
+  const createdAtIso =
+    clampString(input.createdAtIso?.trim?.() ?? '', 64) || new Date().toISOString();
+
+  const doc: SanitizedCloudNotificationDoc = {
+    id: cleanId,
+    orgScope: 'orange_pro_team',
+    recipientUid,
+    senderUid,
+    senderName,
+    kind,
+    title,
+    message,
+    read: Boolean(input.read),
+    createdAtIso,
+  };
+
+  if (typeof input.senderRole === 'string' && input.senderRole.trim().length > 0) {
+    doc.senderRole = clampString(input.senderRole.trim(), 40);
+  }
+  if (typeof input.ficheId === 'string' && input.ficheId.trim().length > 0) {
+    doc.ficheId = clampString(input.ficheId.trim(), 128);
+  }
+  if (typeof input.ficheOwnerId === 'string' && input.ficheOwnerId.trim().length > 0) {
+    doc.ficheOwnerId = clampString(input.ficheOwnerId.trim(), 128);
+  }
+  if (typeof input.numeroFiche === 'string' && input.numeroFiche.trim().length > 0) {
+    doc.numeroFiche = clampString(input.numeroFiche.trim(), 32);
+  }
+  if (typeof input.societe === 'string' && input.societe.trim().length > 0) {
+    doc.societe = clampString(input.societe.trim(), 200);
+  }
+  if (input.targetTab === 'crm' || input.targetTab === 'team' || input.targetTab === 'badges') {
+    doc.targetTab = input.targetTab;
   }
 
   return doc;

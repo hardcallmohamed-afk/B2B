@@ -29,6 +29,9 @@ interface ActiviteModalProps {
   fiche: FicheEntreprise | null;
   currentUserName: string;
   currentUserUid: string;
+  ficheOwnerUid?: string;
+  actorUid?: string;
+  actorRole?: string;
   onFicheUpdated: (updatedFiche: FicheEntreprise) => void;
   onNotify: (msg: string, type?: 'ok' | 'err' | 'warn' | 'info') => void;
 }
@@ -46,9 +49,13 @@ export const ActiviteModal: React.FC<ActiviteModalProps> = ({
   fiche,
   currentUserName,
   currentUserUid,
+  ficheOwnerUid,
+  actorUid,
+  actorRole,
   onFicheUpdated,
   onNotify,
 }) => {
+  const effectiveOwnerUid = ficheOwnerUid || currentUserUid;
   const [type, setType] = useState<ActiviteType>('appel');
   const [resultat, setResultat] = useState<ActiviteResultat>('joint');
   const [texte, setTexte] = useState('');
@@ -73,7 +80,7 @@ export const ActiviteModal: React.FC<ActiviteModalProps> = ({
     setErrorMessage(null);
     setHistory([]);
     setIsLoadingHistory(true);
-    fetchFicheActivites(currentUserUid, fiche.id)
+    fetchFicheActivites(effectiveOwnerUid, fiche.id)
       .then((items) => {
         if (!cancelled) {
           setHistory(items || []);
@@ -92,7 +99,7 @@ export const ActiviteModal: React.FC<ActiviteModalProps> = ({
     return () => {
       cancelled = true;
     };
-  }, [isOpen, fiche, currentUserUid]);
+  }, [isOpen, fiche, effectiveOwnerUid]);
 
   if (!isOpen || !fiche) return null;
 
@@ -128,14 +135,18 @@ export const ActiviteModal: React.FC<ActiviteModalProps> = ({
 
     setIsSaving(true);
     try {
-      await saveFicheActivite(currentUserUid, fiche.id, {
+      const nowIso = new Date().toISOString();
+      await saveFicheActivite(effectiveOwnerUid, fiche.id, {
         id: activiteId,
-        ownerId: currentUserUid,
+        ownerId: effectiveOwnerUid,
         ficheId: fiche.id,
         type,
         resultat,
         texte: texte.trim().slice(0, 1000),
         auteurNom: auteur,
+        auteurUid: actorUid || currentUserUid,
+        auteurRole: actorRole,
+        createdAtIso: nowIso,
         prochaineRelanceAt: cleanRelanceAt,
         rdvAt: cleanRdvAt,
         rdvLieu: cleanRdvLieu,

@@ -244,6 +244,37 @@
           "maxLength": 160,
           "description": "Lieu ou adresse du rendez-vous commercial Orange Pro."
         },
+        "assignedByUid": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "UID du superviseur ayant attribué la fiche."
+        },
+        "assignedByName": {
+          "type": "string",
+          "maxLength": 120,
+          "description": "Nom du superviseur ayant attribué la fiche."
+        },
+        "assignedAt": {
+          "type": "string",
+          "maxLength": 64,
+          "description": "Horodatage ISO de la dernière attribution de la fiche."
+        },
+        "restoredByName": {
+          "type": "string",
+          "maxLength": 120,
+          "description": "Nom du superviseur ayant restitué une fiche signée."
+        },
+        "restoredAt": {
+          "type": "string",
+          "maxLength": 64,
+          "description": "Horodatage ISO de la restitution d'une fiche signée."
+        },
+        "restoredReason": {
+          "type": "string",
+          "maxLength": 300,
+          "description": "Motif de restitution ou réouverture de la fiche."
+        },
         "createdAt": {
           "type": "string",
           "format": "date-time"
@@ -905,7 +936,7 @@
         },
         "type": {
           "type": "string",
-          "enum": ["appel", "whatsapp", "email", "visite", "note", "rdv", "devis", "statut"]
+          "enum": ["appel", "whatsapp", "email", "visite", "note", "rdv", "devis", "statut", "attribution", "acces", "modification", "restitution", "signature"]
         },
         "resultat": {
           "type": "string",
@@ -918,6 +949,19 @@
         "auteurNom": {
           "type": "string",
           "maxLength": 120
+        },
+        "auteurUid": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "auteurRole": {
+          "type": "string",
+          "maxLength": 40
+        },
+        "createdAtIso": {
+          "type": "string",
+          "maxLength": 64
         },
         "rdvAt": {
           "type": "string",
@@ -948,6 +992,106 @@
         "resultat",
         "texte",
         "auteurNom",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "AppNotification": {
+      "title": "AppNotification",
+      "description": "Notification temps réel inter-utilisateurs (attribution de fiche, accès collaborateur, restitution de fiche signée, contrat).",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "orgScope": {
+          "type": "string",
+          "enum": ["orange_pro_team"]
+        },
+        "recipientUid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "senderUid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "senderName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "senderRole": {
+          "type": "string",
+          "maxLength": 40
+        },
+        "kind": {
+          "type": "string",
+          "enum": ["fiche_assigned", "fiche_accessed", "fiche_restored", "fiche_updated", "contract_signed", "contract_status_changed"]
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "message": {
+          "type": "string",
+          "maxLength": 600
+        },
+        "ficheId": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "ficheOwnerId": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "numeroFiche": {
+          "type": "string",
+          "maxLength": 32
+        },
+        "societe": {
+          "type": "string",
+          "maxLength": 200
+        },
+        "targetTab": {
+          "type": "string",
+          "enum": ["crm", "team", "badges"]
+        },
+        "read": {
+          "type": "boolean"
+        },
+        "createdAtIso": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "orgScope",
+        "recipientUid",
+        "senderUid",
+        "senderName",
+        "kind",
+        "title",
+        "message",
+        "read",
+        "createdAtIso",
         "createdAt",
         "updatedAt"
       ]
@@ -1013,6 +1157,12 @@
         "$ref": "#/entities/EmailSkill"
       },
       "description": "Skills de rédaction Email IA appartenant exclusivement à l'utilisateur."
+    },
+    "/notifications/{notifId}": {
+      "schema": {
+        "$ref": "#/entities/AppNotification"
+      },
+      "description": "Notifications temps réel inter-utilisateurs (attribution, accès fiche, restitution, contrats)."
     }
   }
 }

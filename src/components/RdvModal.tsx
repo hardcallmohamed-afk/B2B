@@ -18,6 +18,9 @@ interface RdvModalProps {
   fiche: FicheEntreprise | null;
   currentUserName: string;
   currentUserUid: string;
+  ficheOwnerUid?: string;
+  actorUid?: string;
+  actorRole?: string;
   onRdvConfirmed: (updatedFiche: FicheEntreprise) => void;
   onNotify: (msg: string, type?: 'ok' | 'err' | 'warn' | 'info') => void;
 }
@@ -28,6 +31,9 @@ export const RdvModal: React.FC<RdvModalProps> = ({
   fiche,
   currentUserName,
   currentUserUid,
+  ficheOwnerUid,
+  actorUid,
+  actorRole,
   onRdvConfirmed,
   onNotify,
 }) => {
@@ -84,15 +90,19 @@ export const RdvModal: React.FC<RdvModalProps> = ({
     setIsSaving(true);
     try {
       const nowIso = new Date().toISOString();
+      const effectiveOwnerUid = ficheOwnerUid || currentUserUid;
       // Enregistrer l'activité officielle type 'rdv'
-      await saveFicheActivite(currentUserUid, fiche.id, {
+      await saveFicheActivite(effectiveOwnerUid, fiche.id, {
         id: activiteId,
-        ownerId: currentUserUid,
+        ownerId: effectiveOwnerUid,
         ficheId: fiche.id,
         type: 'rdv',
         resultat: 'rdv_fixe',
         texte: note.trim().slice(0, 1000) || `Rendez-vous fixé pour le ${new Date(cleanRdvAt).toLocaleString('fr-FR')} à ${cleanRdvLieu}.`,
         auteurNom: auteur,
+        auteurUid: actorUid || currentUserUid,
+        auteurRole: actorRole,
+        createdAtIso: nowIso,
         rdvAt: cleanRdvAt,
         rdvLieu: cleanRdvLieu,
       });

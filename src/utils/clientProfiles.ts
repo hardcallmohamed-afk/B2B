@@ -1,6 +1,7 @@
 import type { FicheEntreprise, SecteurCode } from '../App';
 import {
   buildMonthlyHistoryStrings,
+  isConfirmedPayoutStatus,
   type SignedContractRecord,
 } from './gamification';
 
@@ -409,10 +410,10 @@ export function buildMemberContractSyncSummary(ownerContracts: SignedContractRec
   totalPayoutMad: number;
   monthlyHistory: string[];
 } {
-  const active = ownerContracts.filter((c) => c.payoutStatus !== 'Refusé');
-  const totalContracts = active.length;
+  const confirmed = ownerContracts.filter((c) => isConfirmedPayoutStatus(c.payoutStatus));
+  const totalContracts = confirmed.length;
   const totalPayoutMad = Math.round(
-    active.reduce((sum, c) => sum + Math.max(0, Number(c.payoutMad) || 0), 0)
+    confirmed.reduce((sum, c) => sum + Math.max(0, Number(c.payoutMad) || 0), 0)
   );
   const monthlyHistory = buildMonthlyHistoryStrings(ownerContracts);
   return { totalContracts, totalPayoutMad, monthlyHistory };

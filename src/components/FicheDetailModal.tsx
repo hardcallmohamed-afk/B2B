@@ -25,6 +25,8 @@ import {
   RefreshCw,
   FileText,
   Lock,
+  UserPlus,
+  RotateCcw,
 } from 'lucide-react';
 import {
   SECTEURS_META,
@@ -36,12 +38,18 @@ import {
   type SecteurCode,
   type StatutCRM,
 } from '../App';
-import { computeDefaultPayoutMad, formatMad } from '../utils/gamification';
+import {
+  ROLE_BADGE_META,
+  computeDefaultPayoutMad,
+  formatMad,
+  type TeamRole,
+} from '../utils/gamification';
 import { getClientTypeProfile } from '../utils/clientProfiles';
 import { resolveCityAndRegionFromZoneString } from '../utils/moroccoCities';
 import {
   ACTIVITE_RESULTAT_META,
   ACTIVITE_TYPE_META,
+  formatAuditDateTimeFr,
   formatFriendlyDateFr,
 } from '../utils/activiteHelpers';
 import type { SanitizedActiviteDoc } from '../utils/firestoreSanitize';
@@ -51,7 +59,10 @@ interface FicheDetailModalProps {
   isOpen: boolean;
   fiche: FicheEntreprise | null;
   currentUserUid: string;
+  ficheOwnerUid?: string;
+  ownerDisplayName?: string;
   isSuperAdmin: boolean;
+  canSuperviseTeam?: boolean;
   verifyingId: string | null;
   activityRefreshKey?: number;
   onClose: () => void;
@@ -65,6 +76,8 @@ interface FicheDetailModalProps {
   onVerifyWeb: (fiche: FicheEntreprise) => void;
   onOpenAssist: (fiche: FicheEntreprise) => void;
   onOpenSignContract: (fiche: FicheEntreprise) => void;
+  onOpenAssign?: (fiche: FicheEntreprise, ownerUid: string) => void;
+  onOpenRestore?: (fiche: FicheEntreprise, ownerUid: string) => void;
   onCopyText: (value: string, label: string) => void;
 }
 
@@ -81,7 +94,10 @@ export const FicheDetailModal: React.FC<FicheDetailModalProps> = ({
   isOpen,
   fiche,
   currentUserUid,
+  ficheOwnerUid,
+  ownerDisplayName,
   isSuperAdmin,
+  canSuperviseTeam = false,
   verifyingId,
   activityRefreshKey = 0,
   onClose,
@@ -95,16 +111,20 @@ export const FicheDetailModal: React.FC<FicheDetailModalProps> = ({
   onVerifyWeb,
   onOpenAssist,
   onOpenSignContract,
+  onOpenAssign,
+  onOpenRestore,
   onCopyText,
 }) => {
   const [activites, setActivites] = useState<SanitizedActiviteDoc[]>([]);
   const [loadingActivites, setLoadingActivites] = useState(false);
+  const resolvedOwnerUid = ficheOwnerUid || currentUserUid;
+  const hasSupervision = isSuperAdmin || canSuperviseTeam;
 
   useEffect(() => {
-    if (!isOpen || !fiche || !currentUserUid) return;
+    if (!isOpen || !fiche || !resolvedOwnerUid) return;
     let cancelled = false;
     setLoadingActivites(true);
-    fetchFicheActivites(currentUserUid, fiche.id)
+    fetchFicheActivites(resolvedOwnerUid, fiche.id)
       .then((list) => {
         if (!cancelled) setActivites(list || []);
       })
@@ -117,7 +137,7 @@ export const FicheDetailModal: React.FC<FicheDetailModalProps> = ({
     return () => {
       cancelled = true;
     };
-  }, [isOpen, fiche?.id, currentUserUid, activityRefreshKey]);
+  }, [isOpen, fiche?.id, resolvedOwnerUid, activityRefreshKey]);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -138,15 +158,15 @@ export const FicheDetailModal: React.FC<FicheDetailModalProps> = ({
   const estimatedCommissionMad = computeDefaultPayoutMad(reco.tier, fiche.effectif, reco.offre);
   const locationInfo = resolveCityAndRegionFromZoneString(fiche.ville || 'Maroc');
   const waNumber = buildWhatsAppNumber(fiche.telephone);
-  const isLockedSigned = fiche.statut === 'Signé Orange Pro' && !isSuperAdmin;
+  const isLockedSigned = fiche.statut === 'Signé Orange Pro' && !hasSupervision;
 
   const extraPhones = fiche.telephonesSupplementaires || [];
   const extraEmails = fiche.emailsSupplementaires || [];
 
   const reloadHistory = () => {
-    if (!currentUserUid) return;
+    if (!resolvedOwnerUid) return;
     setLoadingActivites(true);
-    fetchFicheActivites(currentUserUid, fiche.id)
+    fetchFicheActivites(resolvedOwnerUid, fiche.id)
       .then((list) => setActivites(list || []))
       .catch(() => setActivites([]))
       .finally(() => setLoadingActivites(false));
@@ -334,6 +354,30 @@ export const FicheDetailModal: React.FC<FicheDetailModalProps> = ({
               Enrichir
             </button>
 
+            {hasSupervision && onOpenAssign && (
+              <button
+                type="button"
+                data-testid="fiche-detail-assign-btn"
+                onClick={() => onOpenAssign(fiche, resolvedOwnerUid)}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-orange-300 bg-orange-50 hover:bg-orange-100 px-2.5 py-1.5 text-xs font-bold text-orange-900 transition-colors"
+              >
+                <UserPlus className="w-3.5 h-3.5" />
+                {fiche.statut === 'Signé Orange Pro' ? 'Réattribuer' : 'Attribuer'}
+              </button>
+            )}
+
+            {hasSupervision && fiche.statut === 'Signé Orange Pro' && onOpenRestore && (
+              <button
+                type="button"
+                data-testid="fiche-detail-restore-btn"
+                onClick={() => onOpenRestore(fiche, resolvedOwnerUid)}
+                className="inline-flex items-center gap-1.5 rounded-lg bg-violet-600 hover:bg-violet-700 px-3 py-1.5 text-xs font-bold text-white transition-colors"
+              >
+                <RotateCcw className="w-3.5 h-3.5" />
+                Restituer au collaborateur
+              </button>
+            )}
+
             {fiche.statut !== 'Signé Orange Pro' && (
               <button
                 type="button"
@@ -349,6 +393,28 @@ export const FicheDetailModal: React.FC<FicheDetailModalProps> = ({
 
         {/* Scrollable Body */}
         <div className="flex-1 overflow-y-auto p-5 space-y-5">
+          {(ownerDisplayName || fiche.assignedByName || fiche.restoredByName) && (
+            <div className="rounded-xl border border-stone-200 bg-white px-4 py-2.5 text-xs flex flex-wrap items-center gap-x-4 gap-y-1.5">
+              {ownerDisplayName && (
+                <span className="text-stone-700">
+                  Portefeuille : <strong className="text-stone-900">{ownerDisplayName}</strong>
+                </span>
+              )}
+              {fiche.assignedByName && (
+                <span className="text-orange-800">
+                  Attribuée par <strong>{fiche.assignedByName}</strong>
+                  {fiche.assignedAt ? ` le ${formatAuditDateTimeFr(fiche.assignedAt)}` : ''}
+                </span>
+              )}
+              {fiche.restoredByName && (
+                <span className="text-violet-800">
+                  Restituée par <strong>{fiche.restoredByName}</strong>
+                  {fiche.restoredAt ? ` le ${formatAuditDateTimeFr(fiche.restoredAt)}` : ''}
+                  {fiche.restoredReason ? ` — ${fiche.restoredReason}` : ''}
+                </span>
+              )}
+            </div>
+          )}
           {/* 1. Profil Clientèle Réel & Recommandation Orange Pro */}
           <section className="rounded-2xl border border-stone-200 bg-white overflow-hidden">
             <div className="px-4 py-3 border-b border-stone-100 flex flex-wrap items-center justify-between gap-2 bg-stone-50/70">
@@ -680,99 +746,123 @@ export const FicheDetailModal: React.FC<FicheDetailModalProps> = ({
             <div className="px-4 py-3 border-b border-stone-100 flex items-center justify-between gap-2 bg-stone-50/70">
               <div className="flex items-center gap-2">
                 <History className="w-4 h-4 text-orange-600" />
-                <h3 className="text-sm font-bold text-stone-900">
-                  Journal d’activités &amp; Devis ({activites.length})
-                </h3>
+                  <h3 className="text-sm font-bold text-stone-900">
+                    Journal d’audit complet, Activités &amp; Devis ({activites.length})
+                  </h3>
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={reloadHistory}
+                    disabled={loadingActivites}
+                    className="inline-flex items-center gap-1 text-[11px] font-semibold text-stone-600 hover:text-stone-900 disabled:opacity-50"
+                  >
+                    <RefreshCw className={`w-3 h-3 ${loadingActivites ? 'animate-spin' : ''}`} />
+                    Actualiser
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => onOpenActivite(fiche)}
+                    className="rounded-lg border border-orange-200 bg-orange-50 hover:bg-orange-100 px-2.5 py-1 text-[11px] font-bold text-orange-800"
+                  >
+                    + Activité
+                  </button>
+                </div>
               </div>
-              <div className="flex items-center gap-2">
-                <button
-                  type="button"
-                  onClick={reloadHistory}
-                  disabled={loadingActivites}
-                  className="inline-flex items-center gap-1 text-[11px] font-semibold text-stone-600 hover:text-stone-900 disabled:opacity-50"
-                >
-                  <RefreshCw className={`w-3 h-3 ${loadingActivites ? 'animate-spin' : ''}`} />
-                  Actualiser
-                </button>
-                <button
-                  type="button"
-                  onClick={() => onOpenActivite(fiche)}
-                  className="rounded-lg border border-orange-200 bg-orange-50 hover:bg-orange-100 px-2.5 py-1 text-[11px] font-bold text-orange-800"
-                >
-                  + Activité
-                </button>
-              </div>
-            </div>
 
-            <div className="p-4">
-              {loadingActivites ? (
-                <div className="py-6 text-center text-xs text-stone-500">
-                  Chargement de l’historique d’activités...
-                </div>
-              ) : activites.length === 0 ? (
-                <div className="py-6 text-center text-xs text-stone-500 space-y-2">
-                  <p>Aucune activité ni devis enregistré pour cette entreprise pour le moment.</p>
-                  <div className="flex items-center justify-center gap-2">
-                    <button
-                      type="button"
-                      onClick={() => onOpenQuote(fiche)}
-                      className="rounded-lg bg-orange-600 hover:bg-orange-700 px-3 py-1.5 text-xs font-bold text-white"
-                    >
-                      Générer le 1er Devis PDF
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => onOpenActivite(fiche)}
-                      className="rounded-lg border border-stone-300 bg-white hover:bg-stone-50 px-3 py-1.5 text-xs font-semibold text-stone-700"
-                    >
-                      Logger un appel
-                    </button>
+              <div className="p-4">
+                {loadingActivites ? (
+                  <div className="py-6 text-center text-xs text-stone-500">
+                    Chargement de l’historique complet d’audit et d’activités...
                   </div>
-                </div>
-              ) : (
-                <div className="divide-y divide-stone-100">
-                  {activites.map((act) => {
-                    const typeMeta = ACTIVITE_TYPE_META[act.type] || { label: act.type };
-                    const resMeta = ACTIVITE_RESULTAT_META[act.resultat] || { label: act.resultat };
-                    return (
-                      <div key={act.id} className="py-3 first:pt-0 last:pb-0 text-xs">
-                        <div className="flex flex-wrap items-center justify-between gap-2">
-                          <div className="flex items-center gap-2 font-bold text-stone-900">
-                            <span>{typeMeta.label}</span>
-                            <span className="text-stone-400">·</span>
-                            <span className="font-semibold text-stone-600">{resMeta.label}</span>
+                ) : activites.length === 0 ? (
+                  <div className="py-6 text-center text-xs text-stone-500 space-y-2">
+                    <p>Aucune action ni activité enregistrée pour cette entreprise pour le moment.</p>
+                    <div className="flex items-center justify-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => onOpenQuote(fiche)}
+                        className="rounded-lg bg-orange-600 hover:bg-orange-700 px-3 py-1.5 text-xs font-bold text-white"
+                      >
+                        Générer le 1er Devis PDF
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => onOpenActivite(fiche)}
+                        className="rounded-lg border border-stone-300 bg-white hover:bg-stone-50 px-3 py-1.5 text-xs font-semibold text-stone-700"
+                      >
+                        Logger un appel
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="divide-y divide-stone-100">
+                    {activites.map((act) => {
+                      const typeMeta = ACTIVITE_TYPE_META[act.type] || {
+                        label: act.type,
+                        bgClass: 'bg-stone-50 border-stone-200',
+                        textClass: 'text-stone-700',
+                      };
+                      const resMeta = ACTIVITE_RESULTAT_META[act.resultat] || { label: '' };
+                      const roleLabel =
+                        act.auteurRole && act.auteurRole in ROLE_BADGE_META
+                          ? ROLE_BADGE_META[act.auteurRole as TeamRole].shortLabel
+                          : act.auteurRole || '';
+                      return (
+                        <div key={act.id} className="py-3 first:pt-0 last:pb-0 text-xs">
+                          <div className="flex flex-wrap items-center justify-between gap-2">
+                            <div className="flex flex-wrap items-center gap-1.5">
+                              <span
+                                className={`inline-flex items-center rounded-md border px-2 py-0.5 text-[10px] font-bold ${typeMeta.bgClass} ${typeMeta.textClass}`}
+                              >
+                                {typeMeta.label}
+                              </span>
+                              {resMeta.label && (
+                                <span className="text-[11px] font-semibold text-stone-600">
+                                  · {resMeta.label}
+                                </span>
+                              )}
+                            </div>
+                            <div className="flex flex-wrap items-center gap-2 text-[11px] text-stone-500">
+                              <span className="font-semibold text-stone-800">
+                                {act.auteurNom}
+                                {roleLabel ? ` (${roleLabel})` : ''}
+                              </span>
+                              <span>·</span>
+                              <span className="font-mono text-[10px] text-stone-500 tabular-nums">
+                                {formatAuditDateTimeFr(act.createdAtIso)}
+                              </span>
+                            </div>
                           </div>
-                          <span className="text-[11px] text-stone-500">
-                            {act.auteurNom}
-                          </span>
+                          {act.texte && (
+                            <p className="mt-1.5 text-stone-700 leading-relaxed whitespace-pre-wrap">
+                              {act.texte}
+                            </p>
+                          )}
+                          {(act.rdvAt || act.prochaineRelanceAt) && (
+                            <div className="mt-1.5 flex flex-wrap items-center gap-3 text-[11px] text-stone-500">
+                              {act.rdvAt && (
+                                <span>
+                                  RDV : <strong className="text-stone-700">{formatFriendlyDateFr(act.rdvAt)}</strong>
+                                  {act.rdvLieu ? ` (${act.rdvLieu})` : ''}
+                                </span>
+                              )}
+                              {act.prochaineRelanceAt && (
+                                <span>
+                                  Relance :{' '}
+                                  <strong className="text-stone-700">
+                                    {formatFriendlyDateFr(act.prochaineRelanceAt)}
+                                  </strong>
+                                </span>
+                              )}
+                            </div>
+                          )}
                         </div>
-                        <p className="mt-1 text-stone-700 leading-relaxed whitespace-pre-wrap">
-                          {act.texte}
-                        </p>
-                        {(act.rdvAt || act.prochaineRelanceAt) && (
-                          <div className="mt-1.5 flex flex-wrap items-center gap-3 text-[11px] text-stone-500">
-                            {act.rdvAt && (
-                              <span>
-                                RDV : <strong className="text-stone-700">{formatFriendlyDateFr(act.rdvAt)}</strong>
-                                {act.rdvLieu ? ` (${act.rdvLieu})` : ''}
-                              </span>
-                            )}
-                            {act.prochaineRelanceAt && (
-                              <span>
-                                Relance :{' '}
-                                <strong className="text-stone-700">
-                                  {formatFriendlyDateFr(act.prochaineRelanceAt)}
-                                </strong>
-                              </span>
-                            )}
-                          </div>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
           </section>
         </div>
       </div>

@@ -7,9 +7,17 @@ import {
   Wallet,
   XCircle,
   Clock,
+  UserPlus,
+  Eye,
+  RotateCcw,
+  Pencil,
 } from 'lucide-react';
 import { RARITY_META, formatMad } from '../utils/gamification';
-import { countUnreadNotifications, type AppNotification } from '../utils/notifications';
+import {
+  countUnreadNotifications,
+  getNotificationSoundProfile,
+  type AppNotification,
+} from '../utils/notifications';
 import { BadgeArtwork } from './BadgeArtwork';
 
 interface NotificationBellProps {
@@ -17,9 +25,39 @@ interface NotificationBellProps {
   onMarkAllRead: () => void;
   onOpenBadges: () => void;
   onOpenTeam?: () => void;
+  onOpenCrm?: () => void;
+  onSelectNotification?: (notification: AppNotification) => void;
 }
 
 function renderNotificationIcon(n: AppNotification) {
+  if (n.kind === 'fiche_assigned') {
+    return (
+      <div className="w-9 h-9 rounded-xl border border-orange-200 bg-orange-50 text-orange-700 flex items-center justify-center shrink-0">
+        <UserPlus className="w-4 h-4" />
+      </div>
+    );
+  }
+  if (n.kind === 'fiche_accessed') {
+    return (
+      <div className="w-9 h-9 rounded-xl border border-sky-200 bg-sky-50 text-sky-700 flex items-center justify-center shrink-0">
+        <Eye className="w-4 h-4" />
+      </div>
+    );
+  }
+  if (n.kind === 'fiche_restored') {
+    return (
+      <div className="w-9 h-9 rounded-xl border border-violet-200 bg-violet-50 text-violet-700 flex items-center justify-center shrink-0">
+        <RotateCcw className="w-4 h-4" />
+      </div>
+    );
+  }
+  if (n.kind === 'fiche_updated') {
+    return (
+      <div className="w-9 h-9 rounded-xl border border-amber-200 bg-amber-50 text-amber-700 flex items-center justify-center shrink-0">
+        <Pencil className="w-4 h-4" />
+      </div>
+    );
+  }
   if (n.kind === 'contract_signed') {
     return (
       <div className="w-9 h-9 rounded-xl border border-orange-200 bg-orange-50 text-orange-700 flex items-center justify-center shrink-0">
@@ -64,6 +102,8 @@ export const NotificationBell: React.FC<NotificationBellProps> = ({
   onMarkAllRead,
   onOpenBadges,
   onOpenTeam,
+  onOpenCrm,
+  onSelectNotification,
 }) => {
   const [open, setOpen] = useState(false);
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -107,7 +147,7 @@ export const NotificationBell: React.FC<NotificationBellProps> = ({
             ? 'border-orange-300 bg-orange-50 text-orange-900 hover:bg-orange-100'
             : 'border-stone-300 bg-white text-stone-700 hover:bg-stone-50'
         }`}
-        title="Notifications (contrats, payouts, succès & badges)"
+        title="Notifications (fiches attribuées, accès, contrats, payouts & succès)"
       >
         <Bell className="w-4 h-4" />
         {unread > 0 && (
@@ -125,10 +165,12 @@ export const NotificationBell: React.FC<NotificationBellProps> = ({
           <div className="px-3 py-2.5 sm:px-4 sm:py-3 border-b border-stone-100 flex items-center justify-between gap-2 bg-stone-50/70">
             <div className="min-w-0">
               <h3 className="text-xs font-extrabold text-stone-900 truncate">
-                Notifications, Contrats &amp; Succès
+                Notifications CRM, Équipe &amp; Succès
               </h3>
               <p className="text-[10px] sm:text-[11px] text-stone-500">
-                {unread > 0 ? `${unread} nouvelle${unread > 1 ? 's' : ''} alerte${unread > 1 ? 's' : ''}` : 'Tout est à jour'}
+                {unread > 0
+                  ? `${unread} nouvelle${unread > 1 ? 's' : ''} alerte${unread > 1 ? 's' : ''}`
+                  : 'Tout est à jour'}
               </p>
             </div>
             <div className="flex items-center gap-1.5 shrink-0">
@@ -156,12 +198,17 @@ export const NotificationBell: React.FC<NotificationBellProps> = ({
           <div className="max-h-[58vh] sm:max-h-80 overflow-y-auto divide-y divide-stone-100">
             {notifications.length === 0 ? (
               <div className="px-3.5 py-6 sm:px-4 sm:py-8 text-center text-xs text-stone-500">
-                Aucune notification pour le moment. Vous serez alerté dès qu’un contrat est signé, qu’un statut payout change ou qu’un succès se débloque.
+                Aucune notification pour le moment. Vous serez alerté dès qu’une fiche est attribuée, consultée ou restituée, qu’un contrat change de statut ou qu’un succès se débloque.
               </div>
             ) : (
               notifications.map((n) => {
                 const isContractNotif =
                   n.kind === 'contract_signed' || n.kind === 'contract_status_changed';
+                const isFicheNotif =
+                  n.kind === 'fiche_assigned' ||
+                  n.kind === 'fiche_accessed' ||
+                  n.kind === 'fiche_restored' ||
+                  n.kind === 'fiche_updated';
                 const meta = RARITY_META[n.rarity] || RARITY_META.rare;
                 const status = n.contractMeta?.payoutStatus;
                 const statusTextCls =
@@ -173,14 +220,41 @@ export const NotificationBell: React.FC<NotificationBellProps> = ({
                         ? 'text-sky-700'
                         : 'text-orange-700';
 
+                const ficheTagLabel =
+                  n.kind === 'fiche_assigned'
+                    ? 'Fiche attribuée'
+                    : n.kind === 'fiche_accessed'
+                      ? 'Accès collaborateur'
+                      : n.kind === 'fiche_restored'
+                        ? 'Fiche restituée'
+                        : 'Fiche mise à jour';
+
+                const ficheTagCls =
+                  n.kind === 'fiche_assigned'
+                    ? 'text-orange-700'
+                    : n.kind === 'fiche_accessed'
+                      ? 'text-sky-700'
+                      : n.kind === 'fiche_restored'
+                        ? 'text-violet-700'
+                        : 'text-amber-700';
+
+                const soundProfile = getNotificationSoundProfile(n.kind, status);
+
                 return (
                   <button
                     key={n.id}
                     type="button"
+                    title={soundProfile.label}
                     onClick={() => {
                       onMarkAllRead();
                       setOpen(false);
-                      if ((isContractNotif || n.targetTab === 'team') && onOpenTeam) {
+                      if (onSelectNotification) {
+                        onSelectNotification(n);
+                        return;
+                      }
+                      if (n.targetTab === 'crm' && onOpenCrm) {
+                        onOpenCrm();
+                      } else if ((isContractNotif || n.targetTab === 'team') && onOpenTeam) {
                         onOpenTeam();
                       } else {
                         onOpenBadges();
@@ -198,6 +272,10 @@ export const NotificationBell: React.FC<NotificationBellProps> = ({
                           <span className={`text-[10px] font-bold shrink-0 tabular-nums ${statusTextCls}`}>
                             {status === 'Refusé' ? '0 MAD' : formatMad(n.contractMeta.payoutMad)}
                           </span>
+                        ) : isFicheNotif ? (
+                          <span className={`text-[10px] font-bold shrink-0 ${ficheTagCls}`}>
+                            {n.ficheMeta?.numeroFiche || 'CRM'}
+                          </span>
                         ) : (
                           <span className="text-[10px] font-bold text-orange-700 shrink-0 tabular-nums">
                             +{n.xpBoost} XP
@@ -212,6 +290,8 @@ export const NotificationBell: React.FC<NotificationBellProps> = ({
                               ? 'Signature contrat'
                               : `Statut : ${status || 'Mis à jour'}`}
                           </span>
+                        ) : isFicheNotif ? (
+                          <span className={`font-bold ${ficheTagCls}`}>{ficheTagLabel}</span>
                         ) : (
                           <span className={`px-1.5 py-0.2 rounded font-bold ${meta.pillBg} ${meta.pillText}`}>
                             {meta.label}

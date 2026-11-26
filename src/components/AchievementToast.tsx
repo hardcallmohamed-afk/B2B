@@ -1,5 +1,16 @@
 import React from 'react';
-import { Sparkles, X, FileCheck2, Wallet, XCircle, Clock } from 'lucide-react';
+import {
+  Sparkles,
+  X,
+  FileCheck2,
+  Wallet,
+  XCircle,
+  Clock,
+  UserPlus,
+  Eye,
+  RotateCcw,
+  Pencil,
+} from 'lucide-react';
 import { RARITY_META, formatMad } from '../utils/gamification';
 import type { AppNotification } from '../utils/notifications';
 import { BadgeArtwork, resolveBadgeMeta } from './BadgeArtwork';
@@ -10,6 +21,8 @@ interface AchievementToastProps {
   onDismiss: () => void;
   onOpenBadges: () => void;
   onOpenTeam?: () => void;
+  onOpenCrm?: () => void;
+  onSelectNotification?: (notification: AppNotification) => void;
 }
 
 export const AchievementToast: React.FC<AchievementToastProps> = ({
@@ -18,15 +31,23 @@ export const AchievementToast: React.FC<AchievementToastProps> = ({
   onDismiss,
   onOpenBadges,
   onOpenTeam,
+  onOpenCrm,
+  onSelectNotification,
 }) => {
   if (!notification) return null;
 
   const isContractNotif =
     notification.kind === 'contract_signed' || notification.kind === 'contract_status_changed';
+  const isFicheNotif =
+    notification.kind === 'fiche_assigned' ||
+    notification.kind === 'fiche_accessed' ||
+    notification.kind === 'fiche_restored' ||
+    notification.kind === 'fiche_updated';
   const status = notification.contractMeta?.payoutStatus;
   const meta = RARITY_META[notification.rarity] || RARITY_META.rare;
   const resolved = resolveBadgeMeta(notification.badgeId);
-  const displayTitle = isContractNotif ? notification.title : resolved?.title || notification.title;
+  const displayTitle =
+    isContractNotif || isFicheNotif ? notification.title : resolved?.title || notification.title;
 
   let headerBg = meta.headerBg;
   let headerText = meta.headerText;
@@ -38,7 +59,27 @@ export const AchievementToast: React.FC<AchievementToastProps> = ({
         ? 'Nouvelle Distinction !'
         : 'Succès Débloqué !';
 
-  if (notification.kind === 'contract_signed') {
+  if (notification.kind === 'fiche_assigned') {
+    headerBg = 'bg-orange-600';
+    headerText = 'text-white';
+    borderCls = 'border-orange-300';
+    kicker = 'Nouvelle Fiche Attribuée !';
+  } else if (notification.kind === 'fiche_accessed') {
+    headerBg = 'bg-sky-600';
+    headerText = 'text-white';
+    borderCls = 'border-sky-300';
+    kicker = 'Fiche Consultée par un Collaborateur';
+  } else if (notification.kind === 'fiche_restored') {
+    headerBg = 'bg-violet-600';
+    headerText = 'text-white';
+    borderCls = 'border-violet-300';
+    kicker = 'Fiche Signée Restituée !';
+  } else if (notification.kind === 'fiche_updated') {
+    headerBg = 'bg-amber-600';
+    headerText = 'text-white';
+    borderCls = 'border-amber-300';
+    kicker = 'Fiche Mise à Jour';
+  } else if (notification.kind === 'contract_signed') {
     headerBg = 'bg-orange-600';
     headerText = 'text-white';
     borderCls = 'border-orange-300';
@@ -74,9 +115,19 @@ export const AchievementToast: React.FC<AchievementToastProps> = ({
       data-testid="achievement-unlock-toast"
       className={`fixed top-2 inset-x-2.5 sm:inset-x-auto sm:top-3.5 sm:right-4 z-[60] sm:w-88 max-w-sm rounded-xl sm:rounded-2xl border ${borderCls} bg-white shadow-lg overflow-hidden animate-in fade-in slide-in-from-top-3 duration-200`}
     >
-      <div className={`px-2.5 py-1 sm:px-3.5 sm:py-1.5 flex items-center justify-between text-[10px] sm:text-[11px] font-extrabold ${headerBg} ${headerText}`}>
+      <div
+        className={`px-2.5 py-1 sm:px-3.5 sm:py-1.5 flex items-center justify-between text-[10px] sm:text-[11px] font-extrabold ${headerBg} ${headerText}`}
+      >
         <span className="inline-flex items-center gap-1">
-          {isContractNotif ? (
+          {notification.kind === 'fiche_assigned' ? (
+            <UserPlus className="w-3 h-3 sm:w-3.5 sm:h-3.5" />
+          ) : notification.kind === 'fiche_accessed' ? (
+            <Eye className="w-3 h-3 sm:w-3.5 sm:h-3.5" />
+          ) : notification.kind === 'fiche_restored' ? (
+            <RotateCcw className="w-3 h-3 sm:w-3.5 sm:h-3.5" />
+          ) : notification.kind === 'fiche_updated' ? (
+            <Pencil className="w-3 h-3 sm:w-3.5 sm:h-3.5" />
+          ) : isContractNotif ? (
             status === 'Refusé' ? (
               <XCircle className="w-3 h-3 sm:w-3.5 sm:h-3.5" />
             ) : status === 'Versé' ? (
@@ -99,6 +150,8 @@ export const AchievementToast: React.FC<AchievementToastProps> = ({
             <span>
               {status === 'Refusé' ? '0 MAD' : formatMad(notification.contractMeta.payoutMad)}
             </span>
+          ) : isFicheNotif ? (
+            <span>{notification.ficheMeta?.numeroFiche || 'CRM'}</span>
           ) : (
             <span>+{notification.xpBoost} XP</span>
           )}
@@ -106,7 +159,29 @@ export const AchievementToast: React.FC<AchievementToastProps> = ({
       </div>
 
       <div className="p-2.5 sm:p-3.5 flex items-start gap-2.5 sm:gap-3">
-        {isContractNotif ? (
+        {isFicheNotif ? (
+          <div
+            className={`w-10 h-10 rounded-xl border flex items-center justify-center shrink-0 ${
+              notification.kind === 'fiche_assigned'
+                ? 'border-orange-200 bg-orange-50 text-orange-700'
+                : notification.kind === 'fiche_accessed'
+                  ? 'border-sky-200 bg-sky-50 text-sky-700'
+                  : notification.kind === 'fiche_restored'
+                    ? 'border-violet-200 bg-violet-50 text-violet-700'
+                    : 'border-amber-200 bg-amber-50 text-amber-700'
+            }`}
+          >
+            {notification.kind === 'fiche_assigned' ? (
+              <UserPlus className="w-5 h-5" />
+            ) : notification.kind === 'fiche_accessed' ? (
+              <Eye className="w-5 h-5" />
+            ) : notification.kind === 'fiche_restored' ? (
+              <RotateCcw className="w-5 h-5" />
+            ) : (
+              <Pencil className="w-5 h-5" />
+            )}
+          </div>
+        ) : isContractNotif ? (
           <div
             className={`w-10 h-10 rounded-xl border flex items-center justify-center shrink-0 ${
               status === 'Refusé'
@@ -146,7 +221,7 @@ export const AchievementToast: React.FC<AchievementToastProps> = ({
             <span className="text-[11px] sm:text-xs font-extrabold text-stone-900 leading-snug truncate max-w-[200px] sm:max-w-none">
               {displayTitle}
             </span>
-            {!isContractNotif && (
+            {!isContractNotif && !isFicheNotif && (
               <span className={`rounded px-1.5 py-0.2 text-[9px] font-extrabold ${meta.pillBg} ${meta.pillText}`}>
                 {meta.label}
               </span>
@@ -160,7 +235,13 @@ export const AchievementToast: React.FC<AchievementToastProps> = ({
               type="button"
               onClick={() => {
                 onDismiss();
-                if ((isContractNotif || notification.targetTab === 'team') && onOpenTeam) {
+                if (onSelectNotification) {
+                  onSelectNotification(notification);
+                  return;
+                }
+                if (notification.targetTab === 'crm' && onOpenCrm) {
+                  onOpenCrm();
+                } else if ((isContractNotif || notification.targetTab === 'team') && onOpenTeam) {
                   onOpenTeam();
                 } else {
                   onOpenBadges();
@@ -168,7 +249,11 @@ export const AchievementToast: React.FC<AchievementToastProps> = ({
               }}
               className="text-[10px] sm:text-[11px] font-bold text-orange-700 hover:underline"
             >
-              {isContractNotif ? 'Voir Équipe & Payouts →' : 'Voir mes succès →'}
+              {isFicheNotif
+                ? 'Ouvrir la fiche →'
+                : isContractNotif
+                  ? 'Voir Équipe & Payouts →'
+                  : 'Voir mes succès →'}
             </button>
             {queueCount > 1 && (
               <button

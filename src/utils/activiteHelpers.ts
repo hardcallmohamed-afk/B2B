@@ -113,6 +113,36 @@ export const ACTIVITE_TYPE_META: Record<
     bgClass: 'bg-stone-100 border-stone-200',
     textClass: 'text-stone-700',
   },
+  attribution: {
+    label: 'Attribution de fiche',
+    iconName: 'UserPlus',
+    bgClass: 'bg-orange-50 border-orange-200',
+    textClass: 'text-orange-800',
+  },
+  acces: {
+    label: 'Accès / Consultation',
+    iconName: 'Eye',
+    bgClass: 'bg-sky-50 border-sky-200',
+    textClass: 'text-sky-800',
+  },
+  modification: {
+    label: 'Modification fiche',
+    iconName: 'Pencil',
+    bgClass: 'bg-amber-50 border-amber-200',
+    textClass: 'text-amber-800',
+  },
+  restitution: {
+    label: 'Restitution fiche signée',
+    iconName: 'RotateCcw',
+    bgClass: 'bg-violet-50 border-violet-200',
+    textClass: 'text-violet-800',
+  },
+  signature: {
+    label: 'Signature Orange Pro',
+    iconName: 'CheckCircle2',
+    bgClass: 'bg-emerald-50 border-emerald-200',
+    textClass: 'text-emerald-800',
+  },
 };
 
 export const ACTIVITE_RESULTAT_META: Record<
@@ -138,6 +168,23 @@ export function formatFriendlyDateFr(isoString: string): string {
       hour: '2-digit',
       minute: '2-digit',
     }).format(d);
+  } catch {
+    return isoString;
+  }
+}
+
+export function formatAuditDateTimeFr(isoString?: string): string {
+  if (!isoString) return 'Date inconnue';
+  try {
+    const d = new Date(isoString);
+    if (isNaN(d.getTime())) return isoString;
+    const dd = String(d.getDate()).padStart(2, '0');
+    const mm = String(d.getMonth() + 1).padStart(2, '0');
+    const yyyy = d.getFullYear();
+    const hh = String(d.getHours()).padStart(2, '0');
+    const min = String(d.getMinutes()).padStart(2, '0');
+    const ss = String(d.getSeconds()).padStart(2, '0');
+    return `${dd}/${mm}/${yyyy} à ${hh}:${min}:${ss}`;
   } catch {
     return isoString;
   }

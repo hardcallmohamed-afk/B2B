@@ -175,3 +175,59 @@ test('detectContractNotifications notifies supervisors when a collaborator signs
   );
   assert.equal(stepRepeat.created.length, 0);
 });
+
+test('getNotificationSoundProfile defines a distinct acoustic signature for every notification kind and contract status', async () => {
+  const { getNotificationSoundProfile, mapCloudNotificationDocToAppNotification } = await import(
+    './notifications'
+  );
+
+  const profiles = [
+    getNotificationSoundProfile('achievement_unlocked'),
+    getNotificationSoundProfile('role_badge_awarded'),
+    getNotificationSoundProfile('distinction_awarded'),
+    getNotificationSoundProfile('contract_signed'),
+    getNotificationSoundProfile('contract_status_changed', 'Validé'),
+    getNotificationSoundProfile('contract_status_changed', 'Versé'),
+    getNotificationSoundProfile('contract_status_changed', 'Refusé'),
+    getNotificationSoundProfile('contract_status_changed', 'En attente'),
+    getNotificationSoundProfile('fiche_assigned'),
+    getNotificationSoundProfile('fiche_accessed'),
+    getNotificationSoundProfile('fiche_restored'),
+    getNotificationSoundProfile('fiche_updated'),
+  ];
+
+  // Every profile must have a unique profileKey and a unique acoustic fingerprint (waveform + notesHz + stepSec)
+  const uniqueKeys = new Set(profiles.map((p) => p.profileKey));
+  const uniqueFingerprints = new Set(
+    profiles.map((p) => `${p.waveform}|${p.stepSec}|${p.notesHz.join(',')}`)
+  );
+  assert.equal(uniqueKeys.size, profiles.length);
+  assert.equal(uniqueFingerprints.size, profiles.length);
+
+  // Cloud notification mapping
+  const mapped = mapCloudNotificationDocToAppNotification({
+    id: 'ntf_assign_1',
+    orgScope: 'orange_pro_team',
+    recipientUid: 'collab_1',
+    senderUid: 'sup_1',
+    senderName: 'Mohamed Admin',
+    senderRole: 'super_admin',
+    kind: 'fiche_assigned',
+    title: 'Nouvelle fiche attribuée : Clinique Atlas',
+    message: 'Mohamed Admin vous a attribué la fiche OP-0012.',
+    ficheId: 'f_12',
+    ficheOwnerId: 'collab_1',
+    numeroFiche: 'OP-0012',
+    societe: 'Clinique Atlas',
+    targetTab: 'crm',
+    read: false,
+    createdAtIso: '2026-11-26T10:15:30.000Z',
+  });
+  assert.equal(mapped.id, 'cloud_ntf_assign_1');
+  assert.equal(mapped.cloudDocId, 'ntf_assign_1');
+  assert.equal(mapped.kind, 'fiche_assigned');
+  assert.equal(mapped.ficheMeta?.ficheId, 'f_12');
+  assert.equal(mapped.ficheMeta?.actorName, 'Mohamed Admin');
+  assert.equal(mapped.targetTab, 'crm');
+});
+

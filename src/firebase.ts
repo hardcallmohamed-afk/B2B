@@ -46,6 +46,7 @@ import {
   sanitizeAttendanceSessionPayload,
   sanitizeProviderId,
   sanitizeActivitePayload,
+  sanitizeCloudNotificationPayload,
   type FicheLike,
   type EmailSkillLike,
   type WorkspaceLike,
@@ -53,12 +54,14 @@ import {
   type SignedContractLike,
   type ApiKeyConfigLike,
   type ActiviteLike,
+  type CloudNotificationLike,
   type SanitizedFicheDoc,
   type SanitizedEmailSkillDoc,
   type SanitizedSignedContractDoc,
   type SanitizedUserPresenceDoc,
   type SanitizedAttendanceSessionDoc,
   type SanitizedActiviteDoc,
+  type SanitizedCloudNotificationDoc,
   type SyncDiff,
   type PayoutStatus,
 } from './utils/firestoreSanitize';
@@ -786,6 +789,12 @@ function buildMutableFicheUpdate(docData: SanitizedFicheDoc): DocumentData {
     prochaineRelanceAt,
     rdvAt,
     rdvLieu,
+    assignedByUid,
+    assignedByName,
+    assignedAt,
+    restoredByName,
+    restoredAt,
+    restoredReason,
     ...requiredMutable
   } = docData;
 
@@ -804,6 +813,12 @@ function buildMutableFicheUpdate(docData: SanitizedFicheDoc): DocumentData {
     prochaineRelanceAt: prochaineRelanceAt !== undefined ? prochaineRelanceAt : deleteField(),
     rdvAt: rdvAt !== undefined ? rdvAt : deleteField(),
     rdvLieu: rdvLieu !== undefined ? rdvLieu : deleteField(),
+    assignedByUid: assignedByUid !== undefined ? assignedByUid : deleteField(),
+    assignedByName: assignedByName !== undefined ? assignedByName : deleteField(),
+    assignedAt: assignedAt !== undefined ? assignedAt : deleteField(),
+    restoredByName: restoredByName !== undefined ? restoredByName : deleteField(),
+    restoredAt: restoredAt !== undefined ? restoredAt : deleteField(),
+    restoredReason: restoredReason !== undefined ? restoredReason : deleteField(),
   };
 }
 
@@ -1688,6 +1703,17 @@ export async function fetchFicheActivites(
     const list: SanitizedActiviteDoc[] = [];
     snap.forEach((docSnap) => {
       const d = docSnap.data();
+      let resolvedCreatedAtIso =
+        typeof d.createdAtIso === 'string' && d.createdAtIso.trim()
+          ? d.createdAtIso.trim()
+          : '';
+      if (!resolvedCreatedAtIso && d.createdAt && typeof d.createdAt.toDate === 'function') {
+        try {
+          resolvedCreatedAtIso = d.createdAt.toDate().toISOString();
+        } catch {
+          resolvedCreatedAtIso = '';
+        }
+      }
       list.push(
         sanitizeActivitePayload(uid, ficheId, {
           id: docSnap.id,
@@ -1695,14 +1721,22 @@ export async function fetchFicheActivites(
           resultat: d.resultat,
           texte: typeof d.texte === 'string' ? d.texte : '',
           auteurNom: typeof d.auteurNom === 'string' ? d.auteurNom : '',
+          auteurUid: typeof d.auteurUid === 'string' ? d.auteurUid : undefined,
+          auteurRole: typeof d.auteurRole === 'string' ? d.auteurRole : undefined,
+          createdAtIso: resolvedCreatedAtIso || undefined,
           rdvAt: typeof d.rdvAt === 'string' ? d.rdvAt : undefined,
           rdvLieu: typeof d.rdvLieu === 'string' ? d.rdvLieu : undefined,
           prochaineRelanceAt: typeof d.prochaineRelanceAt === 'string' ? d.prochaineRelanceAt : undefined,
         })
       );
     });
-    // Tri par date de création ou id décroissant (les plus récentes en haut)
-    list.sort((a, b) => b.id.localeCompare(a.id));
+    // Tri chronologique décroissant par date/heure exacte (puis id)
+    list.sort((a, b) => {
+      const ta = a.createdAtIso ? Date.parse(a.createdAtIso) : 0;
+      const tb = b.createdAtIso ? Date.parse(b.createdAtIso) : 0;
+      if (tb !== ta) return tb - ta;
+      return b.id.localeCompare(a.id);
+    });
     return list;
   } catch (error) {
     handleFirestoreError(error, OperationType.LIST, actPath);
@@ -1710,7 +1744,7 @@ export async function fetchFicheActivites(
 }
 
 /**
- * LOT 6: Consultation en lecture seule des fiches d'un collaborateur actif
+ * LOT 6: Consultation des fiches d'un collaborateur actif
  * par le Super-Admin, le Manager ou le Team Lead.
  */
 export async function fetchTeamMemberFiches(
@@ -1737,6 +1771,316 @@ export async function fetchTeamMemberFiches(
   } catch (error) {
     handleFirestoreError(error, OperationType.LIST, path);
   }
+}
+
+/**
+ * Charge le portefeuille complet de tous les collaborateurs de la plateforme (Superviseurs).
+ */
+export async function fetchAllTeamPortfolios(
+  memberUids: string[]
+): Promise<Record<string, SanitizedFicheDoc[]>> {
+  const uniqueUids = Array.from(new Set(memberUids.filter((u) => typeof u === 'string' && u.trim())));
+  const settled = await Promise.allSettled(
+    uniqueUids.map(async (uid) => ({
+      uid,
+      fiches: await fetchTeamMemberFiches(uid),
+    }))
+  );
+  const result: Record<string, SanitizedFicheDoc[]> = {};
+  for (let i = 0; i < uniqueUids.length; i++) {
+    const item = settled[i];
+    if (item.status === 'fulfilled') {
+      result[item.value.uid] = item.value.fiches;
+    } else {
+      result[uniqueUids[i]] = [];
+    }
+  }
+  return result;
+}
+
+/**
+ * Notifications temps réel inter-utilisateurs (/notifications/{notifId})
+ */
+export function getUserNotificationsQuery(uid: string) {
+  return query(collection(db, 'notifications'), where('recipientUid', '==', uid));
+}
+
+export async function createCloudNotification(
+  input: CloudNotificationLike
+): Promise<SanitizedCloudNotificationDoc | null> {
+  if (!input.recipientUid || !input.senderUid) return null;
+  const sanitized = sanitizeCloudNotificationPayload({
+    ...input,
+    read: false,
+    createdAtIso: input.createdAtIso || new Date().toISOString(),
+  });
+  try {
+    await setDoc(doc(db, 'notifications', sanitized.id), {
+      ...sanitized,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    });
+    return sanitized;
+  } catch {
+    // Non-bloquant pour les workflows CRM
+    return null;
+  }
+}
+
+export async function markCloudNotificationRead(notifId: string): Promise<void> {
+  if (!notifId) return;
+  try {
+    await updateDoc(doc(db, 'notifications', notifId), {
+      read: true,
+      updatedAt: serverTimestamp(),
+    });
+  } catch {
+    // Non-fatal
+  }
+}
+
+export async function markAllCloudNotificationsRead(notifIds: string[]): Promise<void> {
+  const cleanIds = Array.from(new Set(notifIds.filter(Boolean))).slice(0, 100);
+  if (cleanIds.length === 0) return;
+  try {
+    const batch = writeBatch(db);
+    for (const id of cleanIds) {
+      batch.update(doc(db, 'notifications', id), {
+        read: true,
+        updatedAt: serverTimestamp(),
+      });
+    }
+    await batch.commit();
+  } catch {
+    // Fallback individual update if one doc was deleted
+    await Promise.allSettled(cleanIds.map((id) => markCloudNotificationRead(id)));
+  }
+}
+
+/**
+ * Mise à jour d'une fiche d'un collaborateur par un superviseur (Super-Admin / Manager / Chef d'équipe)
+ */
+export async function updateTeamMemberFiche(
+  ownerUid: string,
+  fiche: FicheLike
+): Promise<SanitizedFicheDoc> {
+  const sanitized = sanitizeFichePayload(ownerUid, fiche);
+  const path = `users/${ownerUid}/fiches/${sanitized.id}`;
+  try {
+    await updateDoc(doc(db, 'users', ownerUid, 'fiches', sanitized.id), {
+      ...buildMutableFicheUpdate(sanitized),
+      updatedAt: serverTimestamp(),
+    });
+    return sanitized;
+  } catch (error) {
+    handleFirestoreError(error, OperationType.UPDATE, path);
+  }
+}
+
+/**
+ * Attribuer ou réattribuer une fiche (y compris une fiche signée/verrouillée) à un collaborateur.
+ * Déplace la fiche + son historique d'activités vers le portefeuille cible, journalise l'attribution,
+ * et envoie une notification cloud temps réel au collaborateur destinataire.
+ */
+export async function transferFicheToCollaborator(params: {
+  fiche: FicheLike;
+  sourceOwnerUid: string;
+  sourceOwnerName: string;
+  targetOwnerUid: string;
+  targetOwnerName: string;
+  actorUid: string;
+  actorName: string;
+  actorRole: string;
+  nextStatut?: string;
+  note?: string;
+}): Promise<SanitizedFicheDoc> {
+  const nowIso = new Date().toISOString();
+  const nextStatut = params.nextStatut || params.fiche.statut;
+  const targetFiche = sanitizeFichePayload(params.targetOwnerUid, {
+    ...params.fiche,
+    statut: nextStatut,
+    statutUpdatedAt: nowIso,
+    assignedByUid: params.actorUid,
+    assignedByName: params.actorName,
+    assignedAt: nowIso,
+  });
+
+  const targetRef = doc(db, 'users', params.targetOwnerUid, 'fiches', targetFiche.id);
+  const targetPath = `users/${params.targetOwnerUid}/fiches/${targetFiche.id}`;
+
+  // 1. Load source activities before deleting source (if transferring between two users)
+  let sourceActivities: SanitizedActiviteDoc[] = [];
+  if (params.sourceOwnerUid !== params.targetOwnerUid) {
+    try {
+      sourceActivities = await fetchFicheActivites(params.sourceOwnerUid, params.fiche.id);
+    } catch {
+      sourceActivities = [];
+    }
+  }
+
+  // 2. Write or update fiche in target user's subcollection
+  try {
+    const existingSnap = await getDoc(targetRef);
+    if (existingSnap.exists()) {
+      await updateDoc(targetRef, {
+        ...buildMutableFicheUpdate(targetFiche),
+        updatedAt: serverTimestamp(),
+      });
+    } else {
+      await setDoc(targetRef, {
+        ...targetFiche,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+    }
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, targetPath);
+  }
+
+  // 3. Migrate previous activities into target fiche if moved between different owners
+  if (params.sourceOwnerUid !== params.targetOwnerUid && sourceActivities.length > 0) {
+    for (const act of sourceActivities.slice(0, 60)) {
+      try {
+        const migrated = sanitizeActivitePayload(params.targetOwnerUid, targetFiche.id, {
+          ...act,
+          ownerId: params.targetOwnerUid,
+          ficheId: targetFiche.id,
+        });
+        await setDoc(
+          doc(db, 'users', params.targetOwnerUid, 'fiches', targetFiche.id, 'activites', migrated.id),
+          {
+            ...migrated,
+            createdAt: serverTimestamp(),
+            updatedAt: serverTimestamp(),
+          }
+        );
+      } catch {
+        // Non-fatal
+      }
+    }
+  }
+
+  // 4. Delete from source portfolio if moved to another collaborator
+  if (params.sourceOwnerUid !== params.targetOwnerUid) {
+    try {
+      await deleteDoc(doc(db, 'users', params.sourceOwnerUid, 'fiches', params.fiche.id));
+    } catch {
+      // Non-fatal if source doc already removed
+    }
+  }
+
+  // 5. Log audit entry on the target fiche
+  const isReassign = params.sourceOwnerUid !== params.targetOwnerUid;
+  const auditNote = [
+    isReassign
+      ? `Fiche attribuée à ${params.targetOwnerName} (depuis ${params.sourceOwnerName}) par ${params.actorName}.`
+      : `Fiche réaffectée / confirmée sur le portefeuille de ${params.targetOwnerName} par ${params.actorName}.`,
+    params.fiche.statut !== nextStatut ? `Statut mis à « ${nextStatut} ».` : '',
+    params.note?.trim() ? `Note : ${params.note.trim()}` : '',
+  ]
+    .filter(Boolean)
+    .join(' ');
+
+  try {
+    await saveFicheActivite(params.targetOwnerUid, targetFiche.id, {
+      id: `act_attr_${Date.now().toString(36)}`,
+      type: 'attribution',
+      resultat: 'autre',
+      texte: auditNote,
+      auteurNom: params.actorName,
+      auteurUid: params.actorUid,
+      auteurRole: params.actorRole,
+      createdAtIso: nowIso,
+    });
+  } catch {
+    // Non-fatal
+  }
+
+  // 6. Send real-time cloud notification to target collaborator (if different from actor)
+  if (params.targetOwnerUid !== params.actorUid) {
+    await createCloudNotification({
+      recipientUid: params.targetOwnerUid,
+      senderUid: params.actorUid,
+      senderName: params.actorName,
+      senderRole: params.actorRole,
+      kind: 'fiche_assigned',
+      title: `Nouvelle fiche attribuée : ${targetFiche.societe}`,
+      message: `${params.actorName} vous a attribué la fiche ${targetFiche.numeroFiche || targetFiche.societe}${targetFiche.ville ? ` (${targetFiche.ville})` : ''}${params.note?.trim() ? ` — ${params.note.trim()}` : ''}.`,
+      ficheId: targetFiche.id,
+      ficheOwnerId: params.targetOwnerUid,
+      numeroFiche: targetFiche.numeroFiche,
+      societe: targetFiche.societe,
+      targetTab: 'crm',
+      createdAtIso: nowIso,
+    });
+  }
+
+  return targetFiche;
+}
+
+/**
+ * Restituer une fiche signée/verrouillée à son collaborateur (la déverrouille et change son statut CRM)
+ * avec suivi d'audit complet et notification temps réel.
+ */
+export async function restoreSignedFicheToCollaborator(params: {
+  fiche: FicheLike;
+  ownerUid: string;
+  ownerName: string;
+  actorUid: string;
+  actorName: string;
+  actorRole: string;
+  nextStatut: string;
+  reason: string;
+}): Promise<SanitizedFicheDoc> {
+  const nowIso = new Date().toISOString();
+  const cleanReason = params.reason.trim().slice(0, 300) || 'Restitution par la supervision';
+  const updatedFiche = sanitizeFichePayload(params.ownerUid, {
+    ...params.fiche,
+    statut: params.nextStatut,
+    statutUpdatedAt: nowIso,
+    restoredByName: params.actorName,
+    restoredAt: nowIso,
+    restoredReason: cleanReason,
+  });
+
+  await updateTeamMemberFiche(params.ownerUid, updatedFiche);
+
+  // Audit log
+  try {
+    await saveFicheActivite(params.ownerUid, updatedFiche.id, {
+      id: `act_rest_${Date.now().toString(36)}`,
+      type: 'restitution',
+      resultat: 'autre',
+      texte: `Fiche signée restituée et déverrouillée par ${params.actorName} (statut : « ${params.nextStatut} »). Motif : ${cleanReason}`,
+      auteurNom: params.actorName,
+      auteurUid: params.actorUid,
+      auteurRole: params.actorRole,
+      createdAtIso: nowIso,
+    });
+  } catch {
+    // Non-fatal
+  }
+
+  // Real-time cloud notification to collaborator
+  if (params.ownerUid !== params.actorUid) {
+    await createCloudNotification({
+      recipientUid: params.ownerUid,
+      senderUid: params.actorUid,
+      senderName: params.actorName,
+      senderRole: params.actorRole,
+      kind: 'fiche_restored',
+      title: `Fiche restituée : ${updatedFiche.societe}`,
+      message: `${params.actorName} a déverrouillé et restitué la fiche ${updatedFiche.numeroFiche || updatedFiche.societe} en statut « ${params.nextStatut} » — Motif : ${cleanReason}.`,
+      ficheId: updatedFiche.id,
+      ficheOwnerId: params.ownerUid,
+      numeroFiche: updatedFiche.numeroFiche,
+      societe: updatedFiche.societe,
+      targetTab: 'crm',
+      createdAtIso: nowIso,
+    });
+  }
+
+  return updatedFiche;
 }
 
 /**

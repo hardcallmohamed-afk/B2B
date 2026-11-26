@@ -488,4 +488,138 @@ test('getClientTypeProfile provides authentic telecom details for every sector c
   }
 });
 
+test('Both En attente and Refusé contracts are strictly excluded from Total des Payouts Cumulés, leaderboard, monthly evolution, and member sync summary', async () => {
+  const { isConfirmedPayoutStatus } = await import('./gamification');
+  const { buildMemberContractSyncSummary } = await import('./clientProfiles');
+
+  assert.equal(isConfirmedPayoutStatus('Validé'), true);
+  assert.equal(isConfirmedPayoutStatus('Versé'), true);
+  assert.equal(isConfirmedPayoutStatus('En attente'), false);
+  assert.equal(isConfirmedPayoutStatus('Refusé'), false);
+
+  const now = new Date('2026-11-26T12:00:00.000Z');
+  const members: TeamStatRecord[] = [
+    {
+      uid: 'u1',
+      orgScope: 'orange_pro_team',
+      displayName: 'Youssef',
+      role: 'commercial',
+      zone: 'Meknès',
+      active: true,
+      totalProspects: 15,
+      totalQualified: 5,
+      totalContracts: 9, // stale value
+      totalPayoutMad: 12000, // stale value
+      xp: 900,
+      unlockedCount: 5,
+      manualBadges: [],
+      monthlyHistory: ['2026-11:9:12000'],
+    },
+  ];
+
+  const contracts: SignedContractRecord[] = [
+    {
+      id: 'c_valide',
+      orgScope: 'orange_pro_team',
+      ownerId: 'u1',
+      ownerName: 'Youssef',
+      ficheId: 'f1',
+      numeroFiche: 'OP-01',
+      societe: 'Clinique Nord',
+      ville: 'Meknès',
+      secteur: 'clinique',
+      produitOrangePro: 'Fibre 200M',
+      tier: 'Grand Compte',
+      effectif: '45',
+      payoutMad: 2000,
+      payoutStatus: 'Validé',
+      signedAt: '2026-11-10T10:00:00.000Z',
+    },
+    {
+      id: 'c_verse',
+      orgScope: 'orange_pro_team',
+      ownerId: 'u1',
+      ownerName: 'Youssef',
+      ficheId: 'f2',
+      numeroFiche: 'OP-02',
+      societe: 'Fiduciaire Sud',
+      ville: 'Meknès',
+      secteur: 'fiduciaire',
+      produitOrangePro: 'Pack PME',
+      tier: 'PME',
+      effectif: '14',
+      payoutMad: 1500,
+      payoutStatus: 'Versé',
+      referenceVirement: 'VIR-990',
+      signedAt: '2026-11-12T10:00:00.000Z',
+    },
+    {
+      id: 'c_attente',
+      orgScope: 'orange_pro_team',
+      ownerId: 'u1',
+      ownerName: 'Youssef',
+      ficheId: 'f3',
+      numeroFiche: 'OP-03',
+      societe: 'Société En Attente',
+      ville: 'Meknès',
+      secteur: 'pme',
+      produitOrangePro: 'Pack PME',
+      tier: 'PME',
+      effectif: '12',
+      payoutMad: 3000,
+      payoutStatus: 'En attente',
+      signedAt: '2026-11-15T10:00:00.000Z',
+    },
+    {
+      id: 'c_refuse',
+      orgScope: 'orange_pro_team',
+      ownerId: 'u1',
+      ownerName: 'Youssef',
+      ficheId: 'f4',
+      numeroFiche: 'OP-04',
+      societe: 'Société Refusée',
+      ville: 'Meknès',
+      secteur: 'commerce',
+      produitOrangePro: 'Box 5G',
+      tier: 'TPE / Libéral',
+      effectif: '4',
+      payoutMad: 800,
+      payoutStatus: 'Refusé',
+      refusMotif: 'Dossier rejeté',
+      signedAt: '2026-11-18T10:00:00.000Z',
+    },
+  ];
+
+  // Only Validé (2000) + Versé (1500) = 3500 MAD (2 contracts)
+  const summary = computeCurrentMonthPayoutSummary(contracts, members, 'all', now);
+  assert.equal(summary.totalSignedContractsCount, 2);
+  assert.equal(summary.totalSignedPayoutMad, 3500);
+  assert.equal(summary.currentMonthContractsCount, 2);
+  assert.equal(summary.currentMonthPayoutMad, 3500);
+  assert.equal(summary.valideMad, 2000);
+  assert.equal(summary.verseMad, 1500);
+  assert.equal(summary.enAttenteCount, 1);
+  assert.equal(summary.enAttenteMad, 3000);
+  assert.equal(summary.refusedContractsCount, 1);
+  assert.equal(summary.refusedPayoutMad, 800);
+
+  const lb = buildTeamLeaderboard(members, contracts);
+  assert.equal(lb[0].contractsCount, 2);
+  assert.equal(lb[0].payoutMad, 3500);
+  assert.equal(lb[0].enAttenteCount, 1);
+  assert.equal(lb[0].enAttenteMad, 3000);
+
+  const evo = buildTeamMonthlyEvolution(members, contracts, 'all', now);
+  const nov = evo.find((p) => p.ym === '2026-11');
+  assert.equal(nov?.contracts, 2);
+  assert.equal(nov?.payoutMad, 3500);
+
+  assert.deepEqual(buildMonthlyHistoryStrings(contracts), ['2026-11:2:3500']);
+
+  const syncSummary = buildMemberContractSyncSummary(contracts);
+  assert.equal(syncSummary.totalContracts, 2);
+  assert.equal(syncSummary.totalPayoutMad, 3500);
+});
+
+
 

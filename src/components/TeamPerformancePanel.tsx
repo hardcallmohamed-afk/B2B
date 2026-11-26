@@ -14,6 +14,7 @@ import {
   Check,
   X,
   Eye,
+  Briefcase,
 } from 'lucide-react';
 import {
   ROLE_BADGE_META,
@@ -39,6 +40,8 @@ import {
 } from '../utils/moroccoCities';
 import { BadgeChipWithDrawing } from './BadgeArtwork';
 import { RoleBadge } from './RoleBadge';
+import { TeamPortfoliosPanel, type PortfolioFicheItem } from './TeamPortfoliosPanel';
+import type { FicheEntreprise } from '../App';
 
 interface TeamPerformancePanelProps {
   currentUserUid: string;
@@ -46,6 +49,9 @@ interface TeamPerformancePanelProps {
   currentUserRole?: TeamRole;
   teamStats: TeamStatRecord[];
   signedContracts: SignedContractRecord[];
+  currentUserFiches?: FicheEntreprise[];
+  portfolioRefreshKey?: number;
+  initialSubView?: 'leaderboard' | 'portfolios';
   onAdminUpdateContract?: (
     contractId: string,
     updates: {
@@ -59,6 +65,10 @@ interface TeamPerformancePanelProps {
   ) => Promise<void>;
   onJumpToBadges?: (targetUid: string) => void;
   onOpenContractFiche?: (contract: SignedContractRecord) => void;
+  onInspectPortfolioFiche?: (item: PortfolioFicheItem) => void;
+  onOpenPortfolioQuote?: (fiche: FicheEntreprise, ownerUid: string) => void;
+  onOpenPortfolioAssign?: (item: PortfolioFicheItem) => void;
+  onOpenPortfolioRestore?: (item: PortfolioFicheItem) => void;
   accessibleFicheIds?: Set<string>;
 }
 
@@ -75,12 +85,21 @@ export const TeamPerformancePanel: React.FC<TeamPerformancePanelProps> = ({
   currentUserRole,
   teamStats,
   signedContracts,
+  currentUserFiches = [],
+  portfolioRefreshKey = 0,
+  initialSubView = 'leaderboard',
   onAdminUpdateContract,
   onJumpToBadges,
   onOpenContractFiche,
+  onInspectPortfolioFiche,
+  onOpenPortfolioQuote,
+  onOpenPortfolioAssign,
+  onOpenPortfolioRestore,
   accessibleFicheIds,
 }) => {
   const canManageContracts = isSuperAdmin || currentUserRole === 'manager' || currentUserRole === 'team_lead';
+  const [subView, setSubView] = useState<'leaderboard' | 'portfolios'>(initialSubView);
+  const [portfolioTargetUid, setPortfolioTargetUid] = useState<string>('all');
   const [selectedRole, setSelectedRole] = useState<'all' | TeamRole>('all');
   const [selectedRegion, setSelectedRegion] = useState<string>('all');
   const [selectedCity, setSelectedCity] = useState<string>('all');
@@ -218,13 +237,18 @@ export const TeamPerformancePanel: React.FC<TeamPerformancePanelProps> = ({
     let enAttente = 0;
     let valide = 0;
     let verse = 0;
+    let refused = 0;
     for (const c of visibleContracts) {
-      if (c.payoutStatus === 'Refusé') continue;
+      if (c.payoutStatus === 'Refusé') {
+        refused += c.payoutMad;
+        continue;
+      }
       if (c.payoutStatus === 'Versé') verse += c.payoutMad;
       else if (c.payoutStatus === 'Validé') valide += c.payoutMad;
       else enAttente += c.payoutMad;
     }
-    return { enAttente, valide, verse, total: enAttente + valide + verse };
+    // Seuls Validé + Versé comptent dans le cumul confirmé
+    return { enAttente, valide, verse, refused, total: valide + verse };
   }, [visibleContracts]);
 
   const startEditContract = (c: SignedContractRecord) => {
@@ -270,6 +294,56 @@ export const TeamPerformancePanel: React.FC<TeamPerformancePanelProps> = ({
 
   return (
     <div className="space-y-5">
+      {canManageContracts && (
+        <div className="flex flex-wrap items-center justify-between gap-2 rounded-2xl border border-stone-200 bg-white p-2 shadow-xs">
+          <div className="inline-flex items-center gap-1.5">
+            <button
+              type="button"
+              data-testid="team-subtab-leaderboard"
+              onClick={() => setSubView('leaderboard')}
+              className={`inline-flex items-center gap-1.5 rounded-xl px-3.5 py-2 text-xs font-bold transition-colors ${
+                subView === 'leaderboard'
+                  ? 'bg-orange-600 text-white shadow-xs'
+                  : 'text-stone-700 hover:bg-stone-100'
+              }`}
+            >
+              <Crown className="w-3.5 h-3.5" />
+              Classement &amp; Payouts
+            </button>
+            <button
+              type="button"
+              data-testid="team-subtab-portfolios"
+              onClick={() => setSubView('portfolios')}
+              className={`inline-flex items-center gap-1.5 rounded-xl px-3.5 py-2 text-xs font-bold transition-colors ${
+                subView === 'portfolios'
+                  ? 'bg-orange-600 text-white shadow-xs'
+                  : 'text-stone-700 hover:bg-stone-100'
+              }`}
+            >
+              <Briefcase className="w-3.5 h-3.5" />
+              Portefeuilles de l’Équipe ({teamStats.length})
+            </button>
+          </div>
+          <span className="px-2 text-[11px] text-stone-500">
+            Supervision : consulter tous les portefeuilles, attribuer et restituer des fiches
+          </span>
+        </div>
+      )}
+
+      {canManageContracts && subView === 'portfolios' ? (
+        <TeamPortfoliosPanel
+          teamStats={teamStats}
+          currentUserUid={currentUserUid}
+          currentUserFiches={currentUserFiches}
+          initialOwnerUid={portfolioTargetUid}
+          refreshKey={portfolioRefreshKey}
+          onInspectFiche={(item) => onInspectPortfolioFiche?.(item)}
+          onOpenQuote={(fiche, ownerUid) => onOpenPortfolioQuote?.(fiche, ownerUid)}
+          onOpenAssign={(item) => onOpenPortfolioAssign?.(item)}
+          onOpenRestore={(item) => onOpenPortfolioRestore?.(item)}
+        />
+      ) : (
+      <>
       {/* Header & Collaborator Scope Filter */}
       <div className="flex flex-col gap-3 rounded-2xl border border-stone-200 bg-white p-4 shadow-xs sm:flex-row sm:items-center sm:justify-between">
         <div>
@@ -421,7 +495,7 @@ export const TeamPerformancePanel: React.FC<TeamPerformancePanelProps> = ({
                     ? currentMonthSummary.currentMonthContractsCount
                     : currentMonthSummary.totalSignedContractsCount}
                 </strong>{' '}
-                contrat(s) signé(s)
+                contrat(s) validé(s) / versé(s)
               </span>
               {currentMonthSummary.growthPct !== null && (
                 <span
@@ -435,14 +509,18 @@ export const TeamPerformancePanel: React.FC<TeamPerformancePanelProps> = ({
               )}
             </div>
             <p className="text-xs text-stone-500">
-              Calculé en temps réel sur les contrats actifs (hors contrats refusés) —{' '}
+              Calculé uniquement sur les contrats <strong className="text-stone-700">Validés ou Versés</strong> (hors En attente et Refusés) —{' '}
               {selectedMember ? `par ${selectedMember.displayName}` : 'équipe commerciale DIVERSIFIA'}.
+              {currentMonthSummary.enAttenteCount > 0 && (
+                <span className="ml-1.5 font-semibold text-amber-700">
+                  ({currentMonthSummary.enAttenteCount} en attente : {formatMad(currentMonthSummary.enAttenteMad)} hors cumul)
+                </span>
+              )}
               {currentMonthSummary.refusedContractsCount > 0 && (
                 <span className="ml-1.5 font-semibold text-red-700">
-                  ({currentMonthSummary.refusedContractsCount} contrat
-                  {currentMonthSummary.refusedContractsCount > 1 ? 's' : ''} refusé
+                  ({currentMonthSummary.refusedContractsCount} refusé
                   {currentMonthSummary.refusedContractsCount > 1 ? 's' : ''} exclu
-                  {currentMonthSummary.refusedContractsCount > 1 ? 's' : ''} des totaux)
+                  {currentMonthSummary.refusedContractsCount > 1 ? 's' : ''})
                 </span>
               )}
             </p>
@@ -455,12 +533,12 @@ export const TeamPerformancePanel: React.FC<TeamPerformancePanelProps> = ({
                 {formatMad(currentMonthSummary.currentMonthPayoutMad)}
               </div>
               <div className="mt-0.5 text-[10px] text-stone-500 tabular-nums">
-                {currentMonthSummary.currentMonthContractsCount} contrat(s) ce mois
+                {currentMonthSummary.currentMonthContractsCount} validé(s) ce mois
               </div>
             </div>
 
             <div className="rounded-xl border border-orange-200 bg-orange-50/60 p-2.5">
-              <div className="text-[11px] font-medium text-orange-800">Cumul TotalPayoutMad</div>
+              <div className="text-[11px] font-medium text-orange-800">Cumul Confirmé</div>
               <div
                 data-testid="cumulative-total-payout-mad"
                 className="mt-1 text-sm font-bold text-orange-950 font-mono tabular-nums"
@@ -468,27 +546,27 @@ export const TeamPerformancePanel: React.FC<TeamPerformancePanelProps> = ({
                 {formatMad(currentMonthSummary.totalSignedPayoutMad)}
               </div>
               <div className="mt-0.5 text-[10px] text-orange-800 tabular-nums">
-                {currentMonthSummary.totalSignedContractsCount} contrat(s) au total
+                {currentMonthSummary.totalSignedContractsCount} contrat(s) validé(s)
+              </div>
+            </div>
+
+            <div className="rounded-xl border border-amber-200 bg-amber-50/60 p-2.5">
+              <div className="text-[11px] font-medium text-amber-900">En attente (hors cumul)</div>
+              <div className="mt-1 text-sm font-bold text-amber-950 font-mono tabular-nums">
+                {formatMad(currentMonthSummary.enAttenteMad)}
+              </div>
+              <div className="mt-0.5 text-[10px] text-amber-800 tabular-nums">
+                {currentMonthSummary.enAttenteCount} dossier(s) en attente
               </div>
             </div>
 
             <div className="rounded-xl border border-emerald-200 bg-emerald-50/60 p-2.5">
-              <div className="text-[11px] font-medium text-emerald-800">Versé / Validé</div>
+              <div className="text-[11px] font-medium text-emerald-800">Déjà Versé</div>
               <div className="mt-1 text-sm font-bold text-emerald-950 font-mono tabular-nums">
-                {formatMad(currentMonthSummary.verseMad + currentMonthSummary.valideMad)}
+                {formatMad(currentMonthSummary.verseMad)}
               </div>
               <div className="mt-0.5 text-[10px] text-emerald-800 tabular-nums">
-                En attente : {formatMad(currentMonthSummary.enAttenteMad)}
-              </div>
-            </div>
-
-            <div className="rounded-xl border border-stone-200 bg-stone-50/70 p-2.5">
-              <div className="text-[11px] text-stone-500">Moyenne / Contrat</div>
-              <div className="mt-1 text-sm font-bold text-stone-900 font-mono tabular-nums">
-                {formatMad(currentMonthSummary.avgPayoutPerContractMad)}
-              </div>
-              <div className="mt-0.5 text-[10px] text-stone-500">
-                Grille DIVERSIFIA
+                Validé : {formatMad(currentMonthSummary.valideMad)}
               </div>
             </div>
           </div>
@@ -724,11 +802,25 @@ export const TeamPerformancePanel: React.FC<TeamPerformancePanelProps> = ({
                           </div>
                         </div>
                       </td>
-                      <td className="px-4 py-3 text-right text-sm font-extrabold text-stone-900 tabular-nums">
-                        {row.contractsCount}
+                      <td className="px-4 py-3 text-right tabular-nums">
+                        <div className="text-sm font-extrabold text-stone-900">
+                          {row.contractsCount}
+                        </div>
+                        {row.enAttenteCount > 0 && (
+                          <div className="text-[10px] font-semibold text-amber-700">
+                            +{row.enAttenteCount} en attente
+                          </div>
+                        )}
                       </td>
-                      <td className="px-4 py-3 text-right font-bold text-emerald-700 tabular-nums">
-                        {formatMad(row.payoutMad)}
+                      <td className="px-4 py-3 text-right tabular-nums">
+                        <div className="font-bold text-emerald-700">
+                          {formatMad(row.payoutMad)}
+                        </div>
+                        {row.enAttenteMad > 0 && (
+                          <div className="text-[10px] text-amber-700">
+                            {formatMad(row.enAttenteMad)} en attente
+                          </div>
+                        )}
                       </td>
                       <td className="px-4 py-3 text-right font-semibold text-stone-700 tabular-nums">
                         {row.qualifiedCount}
@@ -776,6 +868,20 @@ export const TeamPerformancePanel: React.FC<TeamPerformancePanelProps> = ({
                           >
                             {isSelected ? 'Filtré' : 'Filtrer'}
                           </button>
+                          {canManageContracts && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setPortfolioTargetUid(row.uid);
+                                setSubView('portfolios');
+                              }}
+                              className="inline-flex items-center gap-1 rounded-lg border border-orange-200 bg-orange-50 px-2 py-1 text-[11px] font-semibold text-orange-800 hover:bg-orange-100"
+                              title={`Consulter le portefeuille complet de ${row.displayName}`}
+                            >
+                              <Briefcase className="h-3 w-3" />
+                              Portefeuille
+                            </button>
+                          )}
                           {isSuperAdmin && onJumpToBadges && (
                             <button
                               type="button"
@@ -895,6 +1001,15 @@ export const TeamPerformancePanel: React.FC<TeamPerformancePanelProps> = ({
                             </span>
                             <span className="text-[10px] font-bold text-red-700">0 MAD actif</span>
                           </div>
+                        ) : c.payoutStatus === 'En attente' ? (
+                          <div className="flex flex-col items-end">
+                            <span className="text-amber-700 font-semibold">
+                              {formatMad(c.payoutMad)}
+                            </span>
+                            <span className="text-[10px] font-semibold text-amber-600">
+                              Hors cumul (en attente)
+                            </span>
+                          </div>
                         ) : (
                           <span className="text-emerald-700">{formatMad(c.payoutMad)}</span>
                         )}
@@ -986,12 +1101,12 @@ export const TeamPerformancePanel: React.FC<TeamPerformancePanelProps> = ({
                             </div>
                           ) : (
                             <div className="inline-flex items-center gap-1.5">
-                              {onOpenContractFiche && accessibleFicheIds?.has(c.ficheId) && (
+                              {onOpenContractFiche && (canManageContracts || accessibleFicheIds?.has(c.ficheId)) && (
                                 <button
                                   type="button"
                                   onClick={() => onOpenContractFiche(c)}
                                   className="inline-flex items-center gap-1 rounded-lg border border-stone-200 bg-stone-50 px-2 py-1 text-[11px] font-semibold text-stone-700 hover:bg-orange-50 hover:text-orange-800 hover:border-orange-200"
-                                  title="Ouvrir les détails complets de la fiche client"
+                                  title="Ouvrir les détails complets, l'audit, restituer ou réattribuer la fiche"
                                 >
                                   <Eye className="h-3 w-3" />
                                   Fiche
@@ -1017,6 +1132,8 @@ export const TeamPerformancePanel: React.FC<TeamPerformancePanelProps> = ({
           </table>
         </div>
       </div>
+      </>
+      )}
     </div>
   );
 };

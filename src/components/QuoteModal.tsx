@@ -21,6 +21,9 @@ interface QuoteModalProps {
   fiche: FicheEntreprise | null;
   currentUserName: string;
   currentUserUid: string;
+  ficheOwnerUid?: string;
+  actorUid?: string;
+  actorRole?: string;
   commercialEmail?: string;
   commercialPhone?: string;
   workspaceLegal?: {
@@ -39,6 +42,9 @@ export const QuoteModal: React.FC<QuoteModalProps> = ({
   fiche,
   currentUserName,
   currentUserUid,
+  ficheOwnerUid,
+  actorUid,
+  actorRole,
   commercialEmail,
   commercialPhone,
   workspaceLegal,
@@ -108,14 +114,18 @@ export const QuoteModal: React.FC<QuoteModalProps> = ({
       const nowIso = new Date().toISOString();
       const auteur = currentUserName.trim().slice(0, 120) || 'Commercial';
 
-      await saveFicheActivite(currentUserUid, fiche.id, {
+      const effectiveOwnerUid = ficheOwnerUid || currentUserUid;
+      await saveFicheActivite(effectiveOwnerUid, fiche.id, {
         id: activiteId,
-        ownerId: currentUserUid,
+        ownerId: effectiveOwnerUid,
         ficheId: fiche.id,
         type: 'devis',
         resultat: 'autre',
         texte: `Devis client généré : ${selectedProduct} (${monthlyPrice.toLocaleString('fr-FR')} MAD/mois). Validité : ${validityDays} jours.`,
         auteurNom: auteur,
+        auteurUid: actorUid || currentUserUid,
+        auteurRole: actorRole,
+        createdAtIso: nowIso,
       });
 
       // 3. Mettre à jour éventuellement la fiche en 'Devis envoyé' si demandé (sans jamais rétrograder un contrat signé)

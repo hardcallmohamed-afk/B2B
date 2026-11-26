@@ -5,13 +5,18 @@ import {
   type PayoutStatus,
   type SignedContractRecord,
 } from './gamification';
+import type { SanitizedCloudNotificationDoc } from './firestoreSanitize';
 
 export type NotificationKind =
   | 'achievement_unlocked'
   | 'role_badge_awarded'
   | 'distinction_awarded'
   | 'contract_signed'
-  | 'contract_status_changed';
+  | 'contract_status_changed'
+  | 'fiche_assigned'
+  | 'fiche_accessed'
+  | 'fiche_restored'
+  | 'fiche_updated';
 
 export interface ContractNotificationMeta {
   contractId: string;
@@ -26,6 +31,16 @@ export interface ContractNotificationMeta {
   refusMotif?: string;
 }
 
+export interface FicheNotificationMeta {
+  ficheId: string;
+  ficheOwnerId: string;
+  numeroFiche?: string;
+  societe: string;
+  actorUid?: string;
+  actorName: string;
+  actorRole?: string;
+}
+
 export interface AppNotification {
   id: string;
   kind: NotificationKind;
@@ -36,8 +51,10 @@ export interface AppNotification {
   xpBoost: number;
   createdAt: string;
   read: boolean;
-  targetTab?: 'badges' | 'team';
+  targetTab?: 'badges' | 'team' | 'crm';
+  cloudDocId?: string;
   contractMeta?: ContractNotificationMeta;
+  ficheMeta?: FicheNotificationMeta;
 }
 
 export interface BadgeBaselineSnapshot {
@@ -55,7 +72,7 @@ export interface ContractBaselineSnapshot {
   byId: Record<string, ContractBaselineEntry>;
 }
 
-const MAX_NOTIFICATIONS = 40;
+const MAX_NOTIFICATIONS = 50;
 
 export function detectNewUnlockNotifications(
   baseline: BadgeBaselineSnapshot,
@@ -215,11 +232,11 @@ export function detectContractNotifications(
           rarity = 'legendaire';
         } else if (c.payoutStatus === 'Validé') {
           title = `Contrat validé : ${baseMeta.societe}`;
-          message = `${isOwner ? 'Votre contrat' : `Contrat de ${baseMeta.ownerName}`} est validé pour ${formatMad(amount)}.`;
+          message = `${isOwner ? 'Votre contrat' : `Contrat de ${baseMeta.ownerName}`} est validé pour ${formatMad(amount)} et ajouté au cumul.`;
           rarity = 'epique';
         } else if (c.payoutStatus === 'En attente') {
           title = `Contrat remis en attente : ${baseMeta.societe}`;
-          message = `${isOwner ? 'Votre contrat' : `Contrat de ${baseMeta.ownerName}`} est passé de « ${prev.payoutStatus} » à « En attente » (${formatMad(amount)}).`;
+          message = `${isOwner ? 'Votre contrat' : `Contrat de ${baseMeta.ownerName}`} est passé de « ${prev.payoutStatus} » à « En attente » (${formatMad(amount)} hors cumul).`;
           rarity = 'rare';
         }
 
@@ -271,6 +288,44 @@ export function detectContractNotifications(
   };
 }
 
+export function mapCloudNotificationDocToAppNotification(
+  doc: SanitizedCloudNotificationDoc
+): AppNotification {
+  const rarityByKind: Record<SanitizedCloudNotificationDoc['kind'], BadgeRarity> = {
+    fiche_assigned: 'epique',
+    fiche_accessed: 'peu_commun',
+    fiche_restored: 'rare',
+    fiche_updated: 'commun',
+    contract_signed: 'epique',
+    contract_status_changed: 'rare',
+  };
+
+  return {
+    id: `cloud_${doc.id}`,
+    cloudDocId: doc.id,
+    kind: doc.kind,
+    badgeId: doc.kind,
+    title: doc.title,
+    message: doc.message,
+    rarity: rarityByKind[doc.kind] || 'rare',
+    xpBoost: 0,
+    createdAt: doc.createdAtIso,
+    read: Boolean(doc.read),
+    targetTab: doc.targetTab || (doc.kind === 'fiche_accessed' ? 'team' : 'crm'),
+    ficheMeta: doc.ficheId
+      ? {
+          ficheId: doc.ficheId,
+          ficheOwnerId: doc.ficheOwnerId || doc.recipientUid,
+          numeroFiche: doc.numeroFiche,
+          societe: doc.societe || doc.title,
+          actorUid: doc.senderUid,
+          actorName: doc.senderName,
+          actorRole: doc.senderRole,
+        }
+      : undefined,
+  };
+}
+
 export function mergeNotificationsFeed(
   existing: AppNotification[],
   incoming: AppNotification[]
@@ -285,7 +340,8 @@ export function mergeNotificationsFeed(
     deduped.push(item);
     if (deduped.length >= MAX_NOTIFICATIONS) break;
   }
-  return deduped;
+  deduped.sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
+  return deduped.slice(0, MAX_NOTIFICATIONS);
 }
 
 export function countUnreadNotifications(list: AppNotification[]): number {
@@ -300,7 +356,154 @@ export function markAllNotificationsRead(list: AppNotification[]): AppNotificati
   return list.map((n) => (n.read ? n : { ...n, read: true }));
 }
 
-export function playCelebrationChime(): void {
+export interface NotificationSoundProfile {
+  profileKey: string;
+  label: string;
+  waveform: OscillatorType;
+  notesHz: number[];
+  stepSec: number;
+  noteDurationSec: number;
+  gainPeak: number;
+}
+
+export function getNotificationSoundProfile(
+  kind: NotificationKind,
+  payoutStatus?: PayoutStatus
+): NotificationSoundProfile {
+  if (kind === 'contract_status_changed') {
+    if (payoutStatus === 'Refusé') {
+      return {
+        profileKey: 'contract_refused',
+        label: 'Alerte contrat refusé',
+        waveform: 'sawtooth',
+        notesHz: [392.0, 329.63, 246.94], // G4 -> E4 -> B3 descending alert
+        stepSec: 0.11,
+        noteDurationSec: 0.24,
+        gainPeak: 0.045,
+      };
+    }
+    if (payoutStatus === 'Versé') {
+      return {
+        profileKey: 'contract_verse',
+        label: 'Carillon payout versé',
+        waveform: 'sine',
+        notesHz: [1046.5, 1318.51, 1567.98, 2093.0], // C6 -> E6 -> G6 -> C7 bright payout chime
+        stepSec: 0.065,
+        noteDurationSec: 0.28,
+        gainPeak: 0.065,
+      };
+    }
+    if (payoutStatus === 'Validé') {
+      return {
+        profileKey: 'contract_valide',
+        label: 'Accord contrat validé',
+        waveform: 'triangle',
+        notesHz: [587.33, 739.99, 880.0], // D5 -> F#5 -> A5 major confirmation
+        stepSec: 0.08,
+        noteDurationSec: 0.26,
+        gainPeak: 0.07,
+      };
+    }
+    return {
+      profileKey: 'contract_en_attente',
+      label: 'Signal contrat en attente',
+      waveform: 'sine',
+      notesHz: [440.0, 554.37], // A4 -> C#5 neutral two-tone
+      stepSec: 0.1,
+      noteDurationSec: 0.2,
+      gainPeak: 0.055,
+    };
+  }
+
+  switch (kind) {
+    case 'contract_signed':
+      return {
+        profileKey: 'contract_signed',
+        label: 'Fanfare signature contrat',
+        waveform: 'triangle',
+        notesHz: [659.25, 830.61, 987.77, 1318.51], // E5 -> G#5 -> B5 -> E6
+        stepSec: 0.07,
+        noteDurationSec: 0.3,
+        gainPeak: 0.075,
+      };
+    case 'fiche_assigned':
+      return {
+        profileKey: 'fiche_assigned',
+        label: 'Carillon nouvelle fiche attribuée',
+        waveform: 'triangle',
+        notesHz: [698.46, 880.0, 1046.5], // F5 -> A5 -> C6 energetic dispatch chime
+        stepSec: 0.075,
+        noteDurationSec: 0.24,
+        gainPeak: 0.07,
+      };
+    case 'fiche_accessed':
+      return {
+        profileKey: 'fiche_accessed',
+        label: 'Impulsion accès fiche collaborateur',
+        waveform: 'sine',
+        notesHz: [493.88, 622.25], // B4 -> D#5 crisp subtle radar ping
+        stepSec: 0.06,
+        noteDurationSec: 0.16,
+        gainPeak: 0.05,
+      };
+    case 'fiche_restored':
+      return {
+        profileKey: 'fiche_restored',
+        label: 'Déverrouillage fiche restituée',
+        waveform: 'sine',
+        notesHz: [587.33, 783.99, 987.77], // D5 -> G5 -> B5 warm unlock triad
+        stepSec: 0.09,
+        noteDurationSec: 0.26,
+        gainPeak: 0.065,
+      };
+    case 'fiche_updated':
+      return {
+        profileKey: 'fiche_updated',
+        label: 'Notification mise à jour fiche',
+        waveform: 'sine',
+        notesHz: [783.99, 659.25], // G5 -> E5 soft update
+        stepSec: 0.07,
+        noteDurationSec: 0.15,
+        gainPeak: 0.045,
+      };
+    case 'role_badge_awarded':
+      return {
+        profileKey: 'role_badge_awarded',
+        label: 'Fanfare badge de rôle',
+        waveform: 'triangle',
+        notesHz: [392.0, 493.88, 587.33, 783.99], // G4 -> B4 -> D5 -> G5 noble brassy triad
+        stepSec: 0.095,
+        noteDurationSec: 0.32,
+        gainPeak: 0.075,
+      };
+    case 'distinction_awarded':
+      return {
+        profileKey: 'distinction_awarded',
+        label: 'Carillon distinction officielle',
+        waveform: 'sine',
+        notesHz: [880.0, 1108.73, 1318.51, 1760.0], // A5 -> C#6 -> E6 -> A6 sparkling bell
+        stepSec: 0.065,
+        noteDurationSec: 0.3,
+        gainPeak: 0.065,
+      };
+    case 'achievement_unlocked':
+    default:
+      return {
+        profileKey: 'achievement_unlocked',
+        label: 'Mélodie succès débloqué',
+        waveform: 'sine',
+        notesHz: [523.25, 659.25, 783.99], // C5 -> E5 -> G5 major triad
+        stepSec: 0.08,
+        noteDurationSec: 0.25,
+        gainPeak: 0.07,
+      };
+  }
+}
+
+export function playNotificationSound(
+  kind: NotificationKind,
+  payoutStatus?: PayoutStatus
+): void {
   if (typeof window === 'undefined') return;
   try {
     const AudioCtx =
@@ -308,24 +511,29 @@ export function playCelebrationChime(): void {
       (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
     if (!AudioCtx) return;
     const ctx = new AudioCtx();
-    const notes = [523.25, 659.25, 783.99]; // C5 -> E5 -> G5 soft major triad
-    notes.forEach((freq, idx) => {
+    const profile = getNotificationSoundProfile(kind, payoutStatus);
+
+    profile.notesHz.forEach((freq, idx) => {
       const osc = ctx.createOscillator();
       const gain = ctx.createGain();
-      osc.type = 'sine';
+      osc.type = profile.waveform;
       osc.frequency.value = freq;
-      const start = ctx.currentTime + idx * 0.08;
+      const start = ctx.currentTime + idx * profile.stepSec;
       gain.gain.setValueAtTime(0.001, start);
-      gain.gain.exponentialRampToValueAtTime(0.07, start + 0.02);
-      gain.gain.exponentialRampToValueAtTime(0.0001, start + 0.25);
+      gain.gain.exponentialRampToValueAtTime(profile.gainPeak, start + 0.018);
+      gain.gain.exponentialRampToValueAtTime(0.0001, start + profile.noteDurationSec);
       osc.connect(gain);
       gain.connect(ctx.destination);
       osc.start(start);
-      osc.stop(start + 0.26);
+      osc.stop(start + profile.noteDurationSec + 0.02);
     });
   } catch {
     // Audio playback blocked or unsupported; ignore safely
   }
+}
+
+export function playCelebrationChime(): void {
+  playNotificationSound('achievement_unlocked');
 }
 
 export type PushNotificationStatus = NotificationPermission | 'unsupported';
@@ -370,4 +578,3 @@ export function triggerBrowserPushNotification(notification: AppNotification): v
     // Some browsers require service-worker registration for Notification; toast fallback handles it gracefully
   }
 }
-

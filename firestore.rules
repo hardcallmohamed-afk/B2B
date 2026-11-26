@@ -94,7 +94,8 @@ service cloud.firestore {
 
     function isValidActiviteType(val) {
       return val is string && val in [
-        'appel', 'whatsapp', 'email', 'visite', 'note', 'rdv', 'devis', 'statut'
+        'appel', 'whatsapp', 'email', 'visite', 'note', 'rdv', 'devis', 'statut',
+        'attribution', 'acces', 'modification', 'restitution', 'signature'
       ];
     }
 
@@ -102,6 +103,17 @@ service cloud.firestore {
       return val is string && val in [
         'joint', 'pas_de_reponse', 'rappeler', 'rdv_fixe', 'refus', 'autre', 'vide'
       ];
+    }
+
+    function isValidNotificationKind(val) {
+      return val is string && val in [
+        'fiche_assigned', 'fiche_accessed', 'fiche_restored', 'fiche_updated',
+        'contract_signed', 'contract_status_changed'
+      ];
+    }
+
+    function isValidNotificationTab(val) {
+      return val is string && val in ['crm', 'team', 'badges'];
     }
 
     function isValidStringList(arr, maxItems, maxItemLen) {
@@ -382,11 +394,13 @@ service cloud.firestore {
           'contact', 'role', 'source', 'effectif', 'statut', 'statutUpdatedAt',
           'siteWeb', 'verifieWeb', 'pistesEnrichissement',
           'prochaineRelanceAt', 'rdvAt', 'rdvLieu',
+          'assignedByUid', 'assignedByName', 'assignedAt',
+          'restoredByName', 'restoredAt', 'restoredReason',
           'dateAjout', 'createdAt', 'updatedAt'
         ])
         && data.ownerId is string
         && data.ownerId == userId
-        && data.ownerId == request.auth.uid
+        && isValidId(data.ownerId)
         && data.id is string
         && data.id == ficheId
         && isValidId(data.id)
@@ -410,6 +424,12 @@ service cloud.firestore {
         && (!('prochaineRelanceAt' in data) || (data.prochaineRelanceAt is string && data.prochaineRelanceAt.size() <= 64))
         && (!('rdvAt' in data) || (data.rdvAt is string && data.rdvAt.size() <= 64))
         && (!('rdvLieu' in data) || (data.rdvLieu is string && data.rdvLieu.size() <= 160))
+        && (!('assignedByUid' in data) || (data.assignedByUid is string && isValidId(data.assignedByUid)))
+        && (!('assignedByName' in data) || (data.assignedByName is string && data.assignedByName.size() <= 120))
+        && (!('assignedAt' in data) || (data.assignedAt is string && data.assignedAt.size() <= 64))
+        && (!('restoredByName' in data) || (data.restoredByName is string && data.restoredByName.size() <= 120))
+        && (!('restoredAt' in data) || (data.restoredAt is string && data.restoredAt.size() <= 64))
+        && (!('restoredReason' in data) || (data.restoredReason is string && data.restoredReason.size() <= 300))
         && data.dateAjout is string && data.dateAjout.size() <= 64
         && data.createdAt is timestamp
         && data.updatedAt is timestamp;
@@ -422,7 +442,8 @@ service cloud.firestore {
         ])
         && data.keys().hasOnly([
           'id', 'ownerId', 'ficheId', 'type', 'resultat', 'texte',
-          'auteurNom', 'rdvAt', 'rdvLieu', 'prochaineRelanceAt',
+          'auteurNom', 'auteurUid', 'auteurRole', 'createdAtIso',
+          'rdvAt', 'rdvLieu', 'prochaineRelanceAt',
           'createdAt', 'updatedAt'
         ])
         && data.id is string
@@ -430,7 +451,7 @@ service cloud.firestore {
         && isValidId(data.id)
         && data.ownerId is string
         && data.ownerId == userId
-        && data.ownerId == request.auth.uid
+        && isValidId(data.ownerId)
         && data.ficheId is string
         && data.ficheId == ficheId
         && isValidId(data.ficheId)
@@ -438,9 +459,46 @@ service cloud.firestore {
         && isValidActiviteResultat(data.resultat)
         && data.texte is string && data.texte.size() <= 1000
         && data.auteurNom is string && data.auteurNom.size() >= 1 && data.auteurNom.size() <= 120
+        && (!('auteurUid' in data) || (data.auteurUid is string && isValidId(data.auteurUid)))
+        && (!('auteurRole' in data) || (data.auteurRole is string && data.auteurRole.size() <= 40))
+        && (!('createdAtIso' in data) || (data.createdAtIso is string && data.createdAtIso.size() <= 64))
         && (!('rdvAt' in data) || (data.rdvAt is string && data.rdvAt.size() <= 64))
         && (!('rdvLieu' in data) || (data.rdvLieu is string && data.rdvLieu.size() <= 160))
         && (!('prochaineRelanceAt' in data) || (data.prochaineRelanceAt is string && data.prochaineRelanceAt.size() <= 64))
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidAppNotification(data, notifId) {
+      return data.keys().hasAll([
+          'id', 'orgScope', 'recipientUid', 'senderUid', 'senderName',
+          'kind', 'title', 'message', 'read', 'createdAtIso',
+          'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'id', 'orgScope', 'recipientUid', 'senderUid', 'senderName', 'senderRole',
+          'kind', 'title', 'message', 'ficheId', 'ficheOwnerId', 'numeroFiche',
+          'societe', 'targetTab', 'read', 'createdAtIso',
+          'createdAt', 'updatedAt'
+        ])
+        && data.id is string
+        && data.id == notifId
+        && isValidId(data.id)
+        && data.orgScope is string && data.orgScope == 'orange_pro_team'
+        && data.recipientUid is string && isValidId(data.recipientUid)
+        && data.senderUid is string && isValidId(data.senderUid)
+        && data.senderName is string && data.senderName.size() >= 1 && data.senderName.size() <= 120
+        && (!('senderRole' in data) || (data.senderRole is string && data.senderRole.size() <= 40))
+        && isValidNotificationKind(data.kind)
+        && data.title is string && data.title.size() >= 1 && data.title.size() <= 200
+        && data.message is string && data.message.size() <= 600
+        && (!('ficheId' in data) || (data.ficheId is string && data.ficheId.size() <= 128))
+        && (!('ficheOwnerId' in data) || (data.ficheOwnerId is string && data.ficheOwnerId.size() <= 128))
+        && (!('numeroFiche' in data) || (data.numeroFiche is string && data.numeroFiche.size() <= 32))
+        && (!('societe' in data) || (data.societe is string && data.societe.size() <= 200))
+        && (!('targetTab' in data) || isValidNotificationTab(data.targetTab))
+        && data.read is bool
+        && data.createdAtIso is string && data.createdAtIso.size() <= 64
         && data.createdAt is timestamp
         && data.updatedAt is timestamp;
     }
@@ -827,47 +885,68 @@ service cloud.firestore {
         allow create: if isValidId(userId)
           && isValidId(ficheId)
           && isValidFicheEntreprise(incoming(), userId, ficheId)
-          && isOwner(userId)
           && incoming().createdAt == request.time
           && incoming().updatedAt == request.time
-          && exists(/databases/$(database)/documents/users/$(userId));
+          && (
+            (isOwner(userId) && incoming().ownerId == request.auth.uid && exists(/databases/$(database)/documents/users/$(userId)))
+            || ((isSuperAdmin() || isTeamLeadOrManager()) && incoming().ownerId == userId
+              && (exists(/databases/$(database)/documents/users/$(userId)) || exists(/databases/$(database)/documents/app_users/$(userId))))
+          );
 
         allow update: if isValidId(userId)
           && isValidId(ficheId)
           && isValidFicheEntreprise(incoming(), userId, ficheId)
-          && isOwner(userId)
-          && existing().ownerId == request.auth.uid
           && incoming().ownerId == existing().ownerId
           && incoming().id == existing().id
           && incoming().createdAt == existing().createdAt
           && incoming().updatedAt == request.time
-          && (isSuperAdmin() || existing().statut != 'Signé Orange Pro')
-          && exists(/databases/$(database)/documents/users/$(userId))
+          && (
+            (
+              isOwner(userId)
+              && existing().ownerId == request.auth.uid
+              && (isSuperAdmin() || existing().statut != 'Signé Orange Pro')
+              && exists(/databases/$(database)/documents/users/$(userId))
+            )
+            || (
+              (isSuperAdmin() || isTeamLeadOrManager())
+              && existing().ownerId == userId
+            )
+          )
           && (
             // Action 1: Kanban pipeline status transition or reminder mirror update
             incoming().diff(existing()).affectedKeys().hasOnly([
               'statut', 'statutUpdatedAt', 'prochaineRelanceAt', 'rdvAt', 'rdvLieu', 'updatedAt'
             ])
             ||
-            // Action 2: Full CRM edit, multi-contact addition, web/AI enrichment, or MDM merge
+            // Action 2: Full CRM edit, multi-contact addition, web/AI enrichment, attribution, or signed fiche restoration
             incoming().diff(existing()).affectedKeys().hasOnly([
               'numeroFiche', 'societe', 'secteur', 'ville', 'telephone',
               'telephonesSupplementaires', 'email', 'emailsSupplementaires',
               'contact', 'role', 'source', 'effectif', 'statut', 'statutUpdatedAt',
               'siteWeb', 'verifieWeb', 'pistesEnrichissement',
               'prochaineRelanceAt', 'rdvAt', 'rdvLieu',
+              'assignedByUid', 'assignedByName', 'assignedAt',
+              'restoredByName', 'restoredAt', 'restoredReason',
               'dateAjout', 'updatedAt'
             ])
           );
 
         allow delete: if isValidId(userId)
           && isValidId(ficheId)
-          && isOwner(userId)
-          && existing().ownerId == request.auth.uid
-          && (isSuperAdmin() || existing().statut != 'Signé Orange Pro')
-          && exists(/databases/$(database)/documents/users/$(userId));
+          && (
+            (
+              isOwner(userId)
+              && existing().ownerId == request.auth.uid
+              && (isSuperAdmin() || existing().statut != 'Signé Orange Pro')
+              && exists(/databases/$(database)/documents/users/$(userId))
+            )
+            || (
+              (isSuperAdmin() || isTeamLeadOrManager())
+              && existing().ownerId == userId
+            )
+          );
 
-        // 10b. Subcollection: /users/{userId}/fiches/{ficheId}/activites/{activiteId} (Activity Journal, RDV & Relance)
+        // 10b. Subcollection: /users/{userId}/fiches/{ficheId}/activites/{activiteId} (Activity Journal, Audit Trail, RDV & Relance)
         match /activites/{activiteId} {
           allow get: if isValidId(userId) && isValidId(ficheId) && isValidId(activiteId) && (
             (isOwner(userId) && (resource == null || existing().ownerId == request.auth.uid))
@@ -883,19 +962,19 @@ service cloud.firestore {
             && isValidId(ficheId)
             && isValidId(activiteId)
             && isValidFicheActivite(incoming(), userId, ficheId, activiteId)
-            && isOwner(userId)
-            && incoming().ownerId == request.auth.uid
             && incoming().ficheId == ficheId
             && incoming().createdAt == request.time
             && incoming().updatedAt == request.time
-            && exists(/databases/$(database)/documents/users/$(userId)/fiches/$(ficheId));
+            && exists(/databases/$(database)/documents/users/$(userId)/fiches/$(ficheId))
+            && (
+              (isOwner(userId) && incoming().ownerId == request.auth.uid)
+              || ((isSuperAdmin() || isTeamLeadOrManager()) && incoming().ownerId == userId)
+            );
 
           allow update: if isValidId(userId)
             && isValidId(ficheId)
             && isValidId(activiteId)
             && isValidFicheActivite(incoming(), userId, ficheId, activiteId)
-            && isOwner(userId)
-            && existing().ownerId == request.auth.uid
             && incoming().ownerId == existing().ownerId
             && incoming().ficheId == existing().ficheId
             && incoming().id == existing().id
@@ -903,15 +982,20 @@ service cloud.firestore {
             && incoming().updatedAt == request.time
             && exists(/databases/$(database)/documents/users/$(userId)/fiches/$(ficheId))
             && (
+              (isOwner(userId) && existing().ownerId == request.auth.uid)
+              || ((isSuperAdmin() || isTeamLeadOrManager()) && existing().ownerId == userId)
+            )
+            && (
               incoming().diff(existing()).affectedKeys().hasOnly([
-                'type', 'resultat', 'texte', 'auteurNom', 'rdvAt', 'rdvLieu', 'prochaineRelanceAt', 'updatedAt'
+                'type', 'resultat', 'texte', 'auteurNom', 'auteurUid', 'auteurRole',
+                'createdAtIso', 'rdvAt', 'rdvLieu', 'prochaineRelanceAt', 'updatedAt'
               ])
             );
 
           allow delete: if isValidId(userId)
             && isValidId(ficheId)
             && isValidId(activiteId)
-            && (isSuperAdmin() || (isOwner(userId) && existing().ownerId == request.auth.uid))
+            && (isSuperAdmin() || isTeamLeadOrManager() || (isOwner(userId) && existing().ownerId == request.auth.uid))
             && exists(/databases/$(database)/documents/users/$(userId)/fiches/$(ficheId));
         }
       }
@@ -956,6 +1040,38 @@ service cloud.firestore {
           && existing().ownerId == request.auth.uid
           && exists(/databases/$(database)/documents/users/$(userId));
       }
+    }
+
+    // 12. Collection: /notifications/{notifId} (Real-time Cross-User Notifications: Fiche Assignment, Access, Restoration)
+    match /notifications/{notifId} {
+      allow get: if isValidId(notifId)
+        && isVerifiedUser()
+        && (resource == null || existing().recipientUid == request.auth.uid || isSuperAdmin());
+
+      allow list: if isVerifiedUser()
+        && resource.data.recipientUid == request.auth.uid;
+
+      allow create: if isValidId(notifId)
+        && isValidAppNotification(incoming(), notifId)
+        && (isSuperAdmin() || isApprovedMember(request.auth.uid))
+        && incoming().senderUid == request.auth.uid
+        && incoming().read == false
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+
+      allow update: if isValidId(notifId)
+        && isValidAppNotification(incoming(), notifId)
+        && isVerifiedUser()
+        && existing().recipientUid == request.auth.uid
+        && incoming().id == existing().id
+        && incoming().recipientUid == existing().recipientUid
+        && incoming().senderUid == existing().senderUid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly(['read', 'updatedAt']);
+
+      allow delete: if isValidId(notifId)
+        && (isSuperAdmin() || (isVerifiedUser() && existing().recipientUid == request.auth.uid));
     }
   }
 }

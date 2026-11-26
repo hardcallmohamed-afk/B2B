@@ -404,6 +404,78 @@ test('sanitizeUserPresencePayload and sanitizeAttendanceSessionPayload enforce b
   assert.equal(session.disconnectedDuringWorkHours, true);
 });
 
+test('sanitizeFichePayload, sanitizeActivitePayload, and sanitizeCloudNotificationPayload handle attribution, restoration, audit types, and cloud notifications', async () => {
+  const { sanitizeActivitePayload, sanitizeCloudNotificationPayload } = await import(
+    './firestoreSanitize'
+  );
+
+  const fiche = sanitizeFichePayload('collab_2', {
+    id: 'f_99',
+    societe: 'Clinique Royale',
+    secteur: 'clinique',
+    ville: 'Rabat',
+    telephone: '0537001122',
+    email: 'contact@clinique-royale.ma',
+    contact: 'Dr. Amine',
+    role: 'Directeur',
+    source: 'Manuel',
+    effectif: '40',
+    statut: 'Appel en cours',
+    dateAjout: '2026-11-26T09:00:00.000Z',
+    assignedByUid: 'sup_1',
+    assignedByName: 'Mohamed Admin',
+    assignedAt: '2026-11-26T09:30:00.000Z',
+    restoredByName: 'Mohamed Admin',
+    restoredAt: '2026-11-26T10:00:00.000Z',
+    restoredReason: 'Modification de l’offre demandée par le client',
+  });
+  assert.equal(fiche.assignedByUid, 'sup_1');
+  assert.equal(fiche.assignedByName, 'Mohamed Admin');
+  assert.equal(fiche.restoredByName, 'Mohamed Admin');
+  assert.equal(fiche.restoredReason, 'Modification de l’offre demandée par le client');
+
+  for (const auditType of ['attribution', 'acces', 'modification', 'restitution', 'signature'] as const) {
+    const act = sanitizeActivitePayload('collab_2', 'f_99', {
+      id: `act_${auditType}`,
+      type: auditType,
+      resultat: 'autre',
+      texte: `Action ${auditType}`,
+      auteurNom: 'Mohamed Admin',
+      auteurUid: 'sup_1',
+      auteurRole: 'super_admin',
+      createdAtIso: '2026-11-26T10:05:12.000Z',
+    });
+    assert.equal(act.type, auditType);
+    assert.equal(act.auteurUid, 'sup_1');
+    assert.equal(act.auteurRole, 'super_admin');
+    assert.equal(act.createdAtIso, '2026-11-26T10:05:12.000Z');
+  }
+
+  const notif = sanitizeCloudNotificationPayload({
+    id: 'ntf/bad id!',
+    recipientUid: 'collab_2',
+    senderUid: 'sup_1',
+    senderName: 'Mohamed Admin',
+    senderRole: 'super_admin',
+    kind: 'fiche_assigned',
+    title: 'Nouvelle fiche attribuée',
+    message: 'Détails de la fiche attribuée',
+    ficheId: 'f_99',
+    ficheOwnerId: 'collab_2',
+    numeroFiche: 'OP-0099',
+    societe: 'Clinique Royale',
+    targetTab: 'crm',
+    read: false,
+    createdAtIso: '2026-11-26T10:10:00.000Z',
+  });
+  assert.equal(notif.id, 'ntf_bad_id_');
+  assert.equal(notif.kind, 'fiche_assigned');
+  assert.equal(notif.numeroFiche, 'OP-0099');
+  assert.equal(notif.targetTab, 'crm');
+  assert.equal(notif.read, false);
+});
+
+
 
 
 
