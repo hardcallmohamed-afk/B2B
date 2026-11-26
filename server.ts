@@ -12,6 +12,7 @@ import {
 import { getAuth as getAdminAuth } from 'firebase-admin/auth';
 import { getFirestore as getAdminFirestore } from 'firebase-admin/firestore';
 import nodemailer from 'nodemailer';
+import dns from 'dns';
 import {
   checkAndIncrementAiUsage,
   AI_DAILY_LIMIT_PER_UID,
@@ -1234,7 +1235,7 @@ Produis un audit structuré, actionnable immédiatement sur le terrain (Meknès 
     }
   });
 
-  // 12. LOT 7: Crawl serveur souverain et anti-SSRF (pas de fuite vers un tiers, timeout 12s, max 1 Mo)
+  // 12. LOT 7: Crawl serveur souverain et anti-SSRF (DNS resolution check, redirect: error, timeout 12s, max 1 Mo)
   app.post('/api/crawl', async (req, res) => {
     const caller = await authenticateAndRateLimitCrawlCaller(req, res);
     if (!caller) return;
@@ -1249,6 +1250,20 @@ Produis un audit structuré, actionnable immédiatement sur le terrain (Meknès 
     }
 
     const targetUrl = urlValidation.normalizedUrl;
+    const parsedUrl = new URL(targetUrl);
+
+    try {
+      const lookup = await dns.promises.lookup(parsedUrl.hostname);
+      const ip = lookup.address;
+      const ipValidation = validatePublicHttpUrl(`${parsedUrl.protocol}//${ip}${parsedUrl.pathname}${parsedUrl.search}`);
+      if (!ipValidation.valid) {
+        res.status(400).json({ error: 'Accès interdit : résolution DNS sur une adresse IP privée ou interne (anti-SSRF).' });
+        return;
+      }
+    } catch {
+      res.status(400).json({ error: 'Impossible de résoudre le nom de domaine de l’URL cible.' });
+      return;
+    }
 
     try {
       const controller = new AbortController();
@@ -1261,6 +1276,7 @@ Produis un audit structuré, actionnable immédiatement sur le terrain (Meknès 
           Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
           'Accept-Language': 'fr-FR,fr;q=0.9,ar-MA;q=0.8,en;q=0.7',
         },
+        redirect: 'error',
         signal: controller.signal,
       });
 
@@ -1273,7 +1289,6 @@ Produis un audit structuré, actionnable immédiatement sur le terrain (Meknès 
         return;
       }
 
-      // Vérification de la taille (max 1 Mo)
       const contentLength = upstream.headers.get('content-length');
       if (contentLength && Number(contentLength) > 1048576) {
         res.status(413).json({
@@ -1313,6 +1328,134 @@ Produis un audit structuré, actionnable immédiatement sur le terrain (Meknès 
       res.status(502).json({
         error: 'Impossible de joindre le site distant depuis le serveur.',
       });
+    }
+  });
+
+  // 13. API Keys Vault Server-Side Management (Super-Admin Only via Firebase Admin SDK)
+  app.get('/api/admin/api-keys', async (req, res) => {
+    const caller = await authenticateAndRateLimitAiCaller(req, res);
+    if (!caller || !caller.isSuperAdmin) {
+      res.status(403).json({ error: 'Accès réservé au Super-Admin.' });
+      return;
+    }
+    const services = getFirebaseAdminServices()!;
+    try {
+      const snap = await services.adminDb.collection('api_keys').get();
+      const keys = snap.docs.map((docSnap) => {
+        const d = docSnap.data();
+        const fullKey = typeof d.key === 'string' ? d.key : '';
+        const last4 = fullKey.length > 4 ? fullKey.slice(-4) : '****';
+        return {
+          provider: d.provider || docSnap.id,
+          label: d.label || docSnap.id,
+          key: fullKey ? `••••••••${last4}` : '',
+          active: d.active !== false,
+          updatedBy: d.updatedBy || '',
+          updatedAt: d.updatedAt?.toDate ? d.updatedAt.toDate().toISOString() : new Date().toISOString(),
+        };
+      });
+      res.json({ keys });
+    } catch {
+      res.status(500).json({ error: 'Impossible de lire le coffre des clés API.' });
+    }
+  });
+
+  app.post('/api/admin/api-keys', async (req, res) => {
+    const caller = await authenticateAndRateLimitAiCaller(req, res);
+    if (!caller || !caller.isSuperAdmin) {
+      res.status(403).json({ error: 'Accès réservé au Super-Admin.' });
+      return;
+    }
+    const services = getFirebaseAdminServices()!;
+    const provider = clampString(req.body?.provider, 40).toLowerCase();
+    const label = clampString(req.body?.label, 120);
+    const key = clampString(req.body?.key, 512);
+    const active = Boolean(req.body?.active);
+
+    if (!provider || !key) {
+      res.status(400).json({ error: 'Fournisseur et clé API requis.' });
+      return;
+    }
+
+    try {
+      const ref = services.adminDb.doc(`api_keys/${provider}`);
+      await ref.set({
+        provider,
+        label: label || provider,
+        key,
+        active,
+        updatedBy: caller.uid,
+        createdAt: getAdminFirestore.FieldValue?.serverTimestamp?.() || new Date(),
+        updatedAt: getAdminFirestore.FieldValue?.serverTimestamp?.() || new Date(),
+      }, { merge: true });
+
+      res.json({ success: true, provider });
+    } catch {
+      res.status(500).json({ error: 'Échec de l’enregistrement de la clé API.' });
+    }
+  });
+
+  app.delete('/api/admin/api-keys/:provider', async (req, res) => {
+    const caller = await authenticateAndRateLimitAiCaller(req, res);
+    if (!caller || !caller.isSuperAdmin) {
+      res.status(403).json({ error: 'Accès réservé au Super-Admin.' });
+      return;
+    }
+    const services = getFirebaseAdminServices()!;
+    const provider = clampString(req.params.provider, 40).toLowerCase();
+    if (!provider) {
+      res.status(400).json({ error: 'Fournisseur requis.' });
+      return;
+    }
+
+    try {
+      await services.adminDb.doc(`api_keys/${provider}`).delete();
+      res.json({ success: true, provider });
+    } catch {
+      res.status(500).json({ error: 'Échec de la suppression de la clé API.' });
+    }
+  });
+
+  // 14. Tavily Search Proxy (Server-side)
+  app.post('/api/ai/tavily-search', async (req, res) => {
+    const caller = await authenticateAndRateLimitAiCaller(req, res);
+    if (!caller) return;
+    const services = getFirebaseAdminServices()!;
+
+    const queryStr = clampString(req.body?.query, 400);
+    if (!queryStr) {
+      res.status(400).json({ error: 'Requête de recherche requise.' });
+      return;
+    }
+
+    try {
+      const keySnap = await services.adminDb.doc('api_keys/tavily').get();
+      if (!keySnap.exists || keySnap.data()?.active === false) {
+        res.status(404).json({ error: 'Clé Tavily non configurée ou inactive dans le coffre Cloud.' });
+        return;
+      }
+      const apiKey = typeof keySnap.data()?.key === 'string' ? keySnap.data()!.key.trim() : '';
+      if (!apiKey) {
+        res.status(404).json({ error: 'Clé Tavily vide.' });
+        return;
+      }
+
+      const upstream = await fetch('https://api.tavily.com/search', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ api_key: apiKey, query: queryStr, max_results: 5, search_depth: 'advanced' }),
+        signal: AbortSignal.timeout(20000),
+      });
+
+      const payload = await upstream.json().catch(() => ({}));
+      if (!upstream.ok) {
+        res.status(502).json({ error: 'Erreur lors de la recherche Tavily.' });
+        return;
+      }
+
+      res.json(payload);
+    } catch {
+      res.status(503).json({ error: 'Impossible de joindre Tavily depuis le serveur.' });
     }
   });
 

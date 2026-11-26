@@ -524,6 +524,12 @@ service cloud.firestore {
         && isValidTeamStat(incoming(), userId)
         && incoming().createdAt == request.time
         && incoming().updatedAt == request.time
+        && incoming().xp == 0
+        && incoming().totalContracts == 0
+        && incoming().totalPayoutMad == 0
+        && incoming().unlockedCount == 0
+        && incoming().totalProspects == 0
+        && incoming().totalQualified == 0
         && (
           isSuperAdmin()
           || (
@@ -681,6 +687,11 @@ service cloud.firestore {
             isOwner(userId)
             && incoming().uid == request.auth.uid
             && incoming().role == existing().role
+            && incoming().todayWorkedSeconds >= existing().todayWorkedSeconds
+            && incoming().todayWorkedSeconds <= existing().todayWorkedSeconds + 120
+            && incoming().todayWorkedSeconds <= 86400
+            && incoming().totalWorkedSeconds >= existing().totalWorkedSeconds
+            && incoming().totalWorkedSeconds <= existing().totalWorkedSeconds + 120
             && incoming().diff(existing()).affectedKeys().hasOnly([
               'displayName', 'firstName', 'lastName', 'phonePro', 'avatarDataUrl',
               'zone', 'isOnline', 'currentDevice', 'devicesUsed',
