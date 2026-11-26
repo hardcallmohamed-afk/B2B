@@ -45,17 +45,20 @@ import {
   sanitizeUserPresencePayload,
   sanitizeAttendanceSessionPayload,
   sanitizeProviderId,
+  sanitizeActivitePayload,
   type FicheLike,
   type EmailSkillLike,
   type WorkspaceLike,
   type TeamStatLike,
   type SignedContractLike,
   type ApiKeyConfigLike,
+  type ActiviteLike,
   type SanitizedFicheDoc,
   type SanitizedEmailSkillDoc,
   type SanitizedSignedContractDoc,
   type SanitizedUserPresenceDoc,
   type SanitizedAttendanceSessionDoc,
+  type SanitizedActiviteDoc,
   type SyncDiff,
 } from './utils/firestoreSanitize';
 import { normalizeManagedRole, type ManagedAppUser, type ManagedUserRole } from './utils/authAccess';
@@ -750,6 +753,9 @@ function buildMutableFicheUpdate(docData: SanitizedFicheDoc): DocumentData {
     verifieWeb,
     pistesEnrichissement,
     statutUpdatedAt,
+    prochaineRelanceAt,
+    rdvAt,
+    rdvLieu,
     ...requiredMutable
   } = docData;
 
@@ -765,6 +771,9 @@ function buildMutableFicheUpdate(docData: SanitizedFicheDoc): DocumentData {
     pistesEnrichissement:
       pistesEnrichissement !== undefined ? pistesEnrichissement : deleteField(),
     statutUpdatedAt: statutUpdatedAt !== undefined ? statutUpdatedAt : deleteField(),
+    prochaineRelanceAt: prochaineRelanceAt !== undefined ? prochaineRelanceAt : deleteField(),
+    rdvAt: rdvAt !== undefined ? rdvAt : deleteField(),
+    rdvLieu: rdvLieu !== undefined ? rdvLieu : deleteField(),
   };
 }
 
@@ -906,6 +915,11 @@ async function upsertFicheResilient(
         ...(ficheDoc.statutUpdatedAt !== undefined
           ? { statutUpdatedAt: ficheDoc.statutUpdatedAt }
           : {}),
+        ...(ficheDoc.prochaineRelanceAt !== undefined
+          ? { prochaineRelanceAt: ficheDoc.prochaineRelanceAt }
+          : {}),
+        ...(ficheDoc.rdvAt !== undefined ? { rdvAt: ficheDoc.rdvAt } : {}),
+        ...(ficheDoc.rdvLieu !== undefined ? { rdvLieu: ficheDoc.rdvLieu } : {}),
         updatedAt: serverTimestamp(),
       });
     } else {
@@ -986,6 +1000,11 @@ export async function syncFichesDiffToFirestore(
           ...(upd.next.statutUpdatedAt !== undefined
             ? { statutUpdatedAt: upd.next.statutUpdatedAt }
             : {}),
+          ...(upd.next.prochaineRelanceAt !== undefined
+            ? { prochaineRelanceAt: upd.next.prochaineRelanceAt }
+            : {}),
+          ...(upd.next.rdvAt !== undefined ? { rdvAt: upd.next.rdvAt } : {}),
+          ...(upd.next.rdvLieu !== undefined ? { rdvLieu: upd.next.rdvLieu } : {}),
           updatedAt: serverTimestamp(),
         })
       );
@@ -1575,3 +1594,156 @@ export async function fetchUserAttendanceSessions(
     handleFirestoreError(error, OperationType.LIST, path);
   }
 }
+
+/**
+ * LOT 2: Enregistrer une entrée dans le journal d'activité de la fiche prospect
+ * et mettre à jour de manière miroir les rappels (prochaineRelanceAt, rdvAt, rdvLieu) sur la fiche.
+ */
+export async function saveFicheActivite(
+  uid: string,
+  ficheId: string,
+  activite: ActiviteLike
+): Promise<SanitizedActiviteDoc> {
+  const sanitized = sanitizeActivitePayload(uid, ficheId, activite);
+  const actPath = `users/${uid}/fiches/${ficheId}/activites/${sanitized.id}`;
+  const actRef = doc(db, 'users', uid, 'fiches', ficheId, 'activites', sanitized.id);
+
+  try {
+    await setDoc(actRef, {
+      ...sanitized,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.CREATE, actPath);
+  }
+
+  // Synchronisation miroir optionnelle sur la fiche parent si une relance ou un RDV est spécifié
+  if (sanitized.prochaineRelanceAt !== undefined || sanitized.rdvAt !== undefined || sanitized.rdvLieu !== undefined) {
+    try {
+      const parentRef = doc(db, 'users', uid, 'fiches', ficheId);
+      const updates: DocumentData = { updatedAt: serverTimestamp() };
+      if (sanitized.prochaineRelanceAt !== undefined) {
+        updates.prochaineRelanceAt = sanitized.prochaineRelanceAt;
+      }
+      if (sanitized.rdvAt !== undefined) {
+        updates.rdvAt = sanitized.rdvAt;
+      }
+      if (sanitized.rdvLieu !== undefined) {
+        updates.rdvLieu = sanitized.rdvLieu;
+      }
+      await updateDoc(parentRef, updates);
+    } catch {
+      // Non bloquant : l'activité reste enregistrée dans la sous-collection
+    }
+  }
+
+  return sanitized;
+}
+
+/**
+ * LOT 2: Récupérer le journal d'activité d'une fiche
+ */
+export async function fetchFicheActivites(
+  uid: string,
+  ficheId: string
+): Promise<SanitizedActiviteDoc[]> {
+  const actPath = `users/${uid}/fiches/${ficheId}/activites`;
+  try {
+    const snap = await getDocs(collection(db, 'users', uid, 'fiches', ficheId, 'activites'));
+    const list: SanitizedActiviteDoc[] = [];
+    snap.forEach((docSnap) => {
+      const d = docSnap.data();
+      list.push(
+        sanitizeActivitePayload(uid, ficheId, {
+          id: docSnap.id,
+          type: d.type,
+          resultat: d.resultat,
+          texte: typeof d.texte === 'string' ? d.texte : '',
+          auteurNom: typeof d.auteurNom === 'string' ? d.auteurNom : '',
+          rdvAt: typeof d.rdvAt === 'string' ? d.rdvAt : undefined,
+          rdvLieu: typeof d.rdvLieu === 'string' ? d.rdvLieu : undefined,
+          prochaineRelanceAt: typeof d.prochaineRelanceAt === 'string' ? d.prochaineRelanceAt : undefined,
+        })
+      );
+    });
+    // Tri par date de création ou id décroissant (les plus récentes en haut)
+    list.sort((a, b) => b.id.localeCompare(a.id));
+    return list;
+  } catch (error) {
+    handleFirestoreError(error, OperationType.LIST, actPath);
+  }
+}
+
+/**
+ * LOT 6: Consultation en lecture seule des fiches d'un collaborateur actif
+ * par le Super-Admin, le Manager ou le Team Lead.
+ */
+export async function fetchTeamMemberFiches(
+  memberUid: string
+): Promise<SanitizedFicheDoc[]> {
+  const path = `users/${memberUid}/fiches`;
+  try {
+    const q = query(
+      collection(db, 'users', memberUid, 'fiches'),
+      where('ownerId', '==', memberUid)
+    );
+    const snap = await getDocs(q);
+    const list: SanitizedFicheDoc[] = [];
+    snap.forEach((docSnap) => {
+      const d = docSnap.data();
+      list.push(
+        sanitizeFichePayload(memberUid, {
+          ...d,
+          id: docSnap.id,
+        } as FicheLike)
+      );
+    });
+    return list;
+  } catch (error) {
+    handleFirestoreError(error, OperationType.LIST, path);
+  }
+}
+
+/**
+ * LOT 5: Mise à jour et validation d'un contrat signé par un Manager ou Super-Admin.
+ * Si le statut passe à 'Versé', une référence de virement (max 80 car.) est obligatoire.
+ */
+export async function managerUpdateSignedContract(
+  contractId: string,
+  updates: {
+    produitOrangePro: string;
+    tier: 'Grand Compte' | 'PME' | 'TPE / Libéral';
+    payoutMad: number;
+    payoutStatus: 'En attente' | 'Validé' | 'Versé';
+    referenceVirement?: string;
+  }
+): Promise<void> {
+  const path = `signed_contracts/${contractId}`;
+  const cleanProduit = updates.produitOrangePro.trim().slice(0, 200) || 'Pack Orange Pro';
+  const cleanPayout = Math.min(10000000, Math.max(0, Math.round(Number(updates.payoutMad) || 0)));
+  const cleanRef = typeof updates.referenceVirement === 'string' ? updates.referenceVirement.trim().slice(0, 80) : '';
+
+  if (updates.payoutStatus === 'Versé' && !cleanRef) {
+    throw new Error('Une référence de virement bancaire est obligatoire pour passer le contrat au statut « Versé ».');
+  }
+
+  const payload: DocumentData = {
+    produitOrangePro: cleanProduit,
+    tier: updates.tier,
+    payoutMad: cleanPayout,
+    payoutStatus: updates.payoutStatus,
+    updatedAt: serverTimestamp(),
+  };
+
+  if (cleanRef) {
+    payload.referenceVirement = cleanRef;
+  }
+
+  try {
+    await updateDoc(doc(db, 'signed_contracts', contractId), payload);
+  } catch (error) {
+    handleFirestoreError(error, OperationType.UPDATE, path);
+  }
+}
+

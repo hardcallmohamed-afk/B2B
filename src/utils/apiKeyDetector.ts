@@ -1,4 +1,4 @@
-import { isStaticHostingEnvironment } from './aiCopilotClient';
+import { isStaticHostingEnvironment, getAiAuthToken } from './aiCopilotClient';
 
 export type DetectedApiProviderId =
   | 'groq'
@@ -247,9 +247,23 @@ export async function probeApiKeyProviderViaServer(
 
   if (!isStaticHostingEnvironment()) {
     try {
+      const idToken = await getAiAuthToken();
+      if (!idToken) {
+        return syncGuess
+          ? {
+              provider: syncGuess.provider,
+              label: PROVIDER_DISPLAY_LABELS[syncGuess.provider],
+              verified: false,
+            }
+          : { provider: null, label: '', verified: false };
+      }
+
       const res = await fetch('/api/ai/detect-provider', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${idToken}`,
+        },
         body: JSON.stringify({
           apiKey: key,
           allowedProviders: allowedProviders ? Array.from(allowedProviders) : undefined,

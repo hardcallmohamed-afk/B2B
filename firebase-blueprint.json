@@ -76,6 +76,26 @@
         "includePhoneOnlyDedup": {
           "type": "boolean"
         },
+        "legalRaisonSociale": {
+          "type": "string",
+          "maxLength": 200,
+          "description": "Raison sociale officielle DIVERSIFIA à compléter dans Mon Compte pour les devis clients."
+        },
+        "legalIce": {
+          "type": "string",
+          "maxLength": 30,
+          "description": "Identifiant Commun de l'Entreprise (ICE) légal pour les devis."
+        },
+        "legalAdresse": {
+          "type": "string",
+          "maxLength": 300,
+          "description": "Adresse du siège DIVERSIFIA pour les devis."
+        },
+        "legalTelephone": {
+          "type": "string",
+          "maxLength": 30,
+          "description": "Numéro de téléphone officiel du siège pour les devis."
+        },
         "createdAt": {
           "type": "string",
           "format": "date-time"
@@ -208,6 +228,21 @@
           "type": "string",
           "maxLength": 64,
           "description": "Horodatage ISO de la dernière transition de statut CRM pour le suivi de vélocité."
+        },
+        "prochaineRelanceAt": {
+          "type": "string",
+          "maxLength": 64,
+          "description": "Horodatage ISO de la prochaine relance planifiée pour cette fiche."
+        },
+        "rdvAt": {
+          "type": "string",
+          "maxLength": 64,
+          "description": "Horodatage ISO du rendez-vous commercial Orange Pro planifié."
+        },
+        "rdvLieu": {
+          "type": "string",
+          "maxLength": 160,
+          "description": "Lieu ou adresse du rendez-vous commercial Orange Pro."
         },
         "createdAt": {
           "type": "string",
@@ -532,6 +567,11 @@
           "type": "string",
           "maxLength": 64
         },
+        "referenceVirement": {
+          "type": "string",
+          "maxLength": 80,
+          "description": "Référence bancaire de virement obligatoire pour marquer un payout comme Versé."
+        },
         "createdAt": {
           "type": "string",
           "format": "date-time"
@@ -834,6 +874,78 @@
         "createdAt",
         "updatedAt"
       ]
+    },
+    "FicheActivite": {
+      "title": "FicheActivite",
+      "description": "Journal d'activité d'une fiche prospect (appels, emails, relances, RDV, devis).",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "ownerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "ficheId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "type": {
+          "type": "string",
+          "enum": ["appel", "whatsapp", "email", "visite", "note", "rdv", "devis", "statut"]
+        },
+        "resultat": {
+          "type": "string",
+          "enum": ["joint", "pas_de_reponse", "rappeler", "rdv_fixe", "refus", "autre", "vide"]
+        },
+        "texte": {
+          "type": "string",
+          "maxLength": 1000
+        },
+        "auteurNom": {
+          "type": "string",
+          "maxLength": 120
+        },
+        "rdvAt": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "rdvLieu": {
+          "type": "string",
+          "maxLength": 160
+        },
+        "prochaineRelanceAt": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "ownerId",
+        "ficheId",
+        "type",
+        "resultat",
+        "texte",
+        "auteurNom",
+        "createdAt",
+        "updatedAt"
+      ]
     }
   },
   "firestore": {
@@ -884,6 +996,12 @@
         "$ref": "#/entities/FicheEntreprise"
       },
       "description": "Fiches prospects CRM B2B appartenant exclusivement à l'utilisateur."
+    },
+    "/users/{userId}/fiches/{ficheId}/activites/{activiteId}": {
+      "schema": {
+        "$ref": "#/entities/FicheActivite"
+      },
+      "description": "Journal d'activité d'une fiche prospect (appels, emails, relances, RDV, devis)."
     },
     "/users/{userId}/skills/{skillId}": {
       "schema": {

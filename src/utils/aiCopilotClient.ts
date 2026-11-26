@@ -59,6 +59,21 @@ export function isStaticHostingEnvironment(): boolean {
   return false;
 }
 
+let globalAiAuthTokenGetter: (() => Promise<string | null>) | null = null;
+
+export function setAiAuthTokenGetter(getter: (() => Promise<string | null>) | null): void {
+  globalAiAuthTokenGetter = getter;
+}
+
+export async function getAiAuthToken(): Promise<string | null> {
+  if (!globalAiAuthTokenGetter) return null;
+  try {
+    return await globalAiAuthTokenGetter();
+  } catch {
+    return null;
+  }
+}
+
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -150,6 +165,23 @@ export async function fetchJsonWithRetry<T = Record<string, unknown>>(
       const mergedHeaders = new Headers(init.headers);
       if (!mergedHeaders.has('Accept')) {
         mergedHeaders.set('Accept', 'application/json');
+      }
+
+      if (url.startsWith('/api/ai/') && url !== '/api/ai/status' && !mergedHeaders.has('Authorization')) {
+        const token = await getAiAuthToken();
+        if (!token) {
+          clearTimeout(timer);
+          return {
+            ok: false,
+            status: 401,
+            data: null,
+            error: 'Session requise pour utiliser l’IA serveur. Veuillez vous connecter.',
+            isNetworkFailure: false,
+            isStaticOrHtml: false,
+            shouldFallback: true,
+          };
+        }
+        mergedHeaders.set('Authorization', `Bearer ${token}`);
       }
 
       const res = await fetch(url, {

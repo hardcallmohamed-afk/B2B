@@ -11,6 +11,15 @@ import {
 } from 'firebase-admin/app';
 import { getAuth as getAdminAuth } from 'firebase-admin/auth';
 import { getFirestore as getAdminFirestore } from 'firebase-admin/firestore';
+import nodemailer from 'nodemailer';
+import {
+  checkAndIncrementAiUsage,
+  AI_DAILY_LIMIT_PER_UID,
+  checkAndIncrementCrawlUsage,
+  CRAWL_HOURLY_LIMIT_PER_UID,
+  validatePublicHttpUrl,
+  extractVisibleTextFromHtml,
+} from './src/utils/aiRateLimiter.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -202,6 +211,167 @@ function formatAiError(err: unknown): { status: number; message: string } {
   };
 }
 
+interface AuthenticatedCaller {
+  uid: string;
+  email: string;
+  isSuperAdmin: boolean;
+}
+
+async function authenticateAndRateLimitAiCaller(
+  req: express.Request,
+  res: express.Response
+): Promise<AuthenticatedCaller | null> {
+  const services = getFirebaseAdminServices();
+  if (!services) {
+    res.status(503).json({
+      error: 'Configuration Firebase Admin introuvable sur le serveur.',
+    });
+    return null;
+  }
+
+  const authHeader = typeof req.headers.authorization === 'string' ? req.headers.authorization : '';
+  if (!authHeader.startsWith('Bearer ')) {
+    res.status(401).json({ error: 'Authentification requise (jeton Bearer manquant). Reconnectez-vous.' });
+    return null;
+  }
+  const idToken = authHeader.slice('Bearer '.length).trim();
+  if (!idToken || idToken.length > 8192) {
+    res.status(401).json({ error: 'Jeton d’authentification invalide.' });
+    return null;
+  }
+
+  let decoded: Awaited<ReturnType<typeof services.adminAuth.verifyIdToken>>;
+  try {
+    decoded = await services.adminAuth.verifyIdToken(idToken);
+  } catch {
+    res.status(401).json({ error: 'Session Firebase invalide ou expirée. Reconnectez-vous.' });
+    return null;
+  }
+
+  const callerEmail = (decoded.email || '').toLowerCase();
+  const isSuperAdmin = decoded.email_verified === true && callerEmail === SUPER_ADMIN_EMAIL;
+
+  if (!decoded.email_verified) {
+    res.status(403).json({ error: 'Veuillez vérifier votre adresse e-mail avant d’utiliser le service IA.' });
+    return null;
+  }
+
+  if (!isSuperAdmin) {
+    try {
+      const memberSnap = await services.adminDb.doc(`app_users/${decoded.uid}`).get();
+      if (!memberSnap.exists || memberSnap.data()?.active !== true) {
+        res.status(403).json({ error: 'Accès refusé : compte non autorisé ou désactivé.' });
+        return null;
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (/PERMISSION_DENIED|7 PERMISSION_DENIED|Could not load the default credentials/i.test(msg)) {
+        res.status(503).json({
+          error:
+            'Droits IAM Firestore manquants sur le serveur. Accordez le rôle roles/datastore.viewer au compte de service d’aperçu dans Google Cloud IAM.',
+        });
+        return null;
+      }
+      res.status(500).json({ error: 'Impossible de vérifier les autorisations utilisateur côté serveur.' });
+      return null;
+    }
+  }
+
+  const rateLimit = checkAndIncrementAiUsage(decoded.uid, AI_DAILY_LIMIT_PER_UID);
+  if (!rateLimit.allowed) {
+    res.status(429).json({
+      error: `Plafond d'appels IA atteint : 40 requêtes autorisées par jour calendaire (fuseau Afrique/Casablanca, date du jour : ${rateLimit.dateKey}). Veuillez réessayer demain.`,
+      limit: rateLimit.limit,
+      remaining: 0,
+      dateKey: rateLimit.dateKey,
+    });
+    return null;
+  }
+
+  return {
+    uid: decoded.uid,
+    email: callerEmail,
+    isSuperAdmin,
+  };
+}
+
+async function authenticateAndRateLimitCrawlCaller(
+  req: express.Request,
+  res: express.Response
+): Promise<AuthenticatedCaller | null> {
+  const services = getFirebaseAdminServices();
+  if (!services) {
+    res.status(503).json({
+      error: 'Configuration Firebase Admin introuvable sur le serveur.',
+    });
+    return null;
+  }
+
+  const authHeader = typeof req.headers.authorization === 'string' ? req.headers.authorization : '';
+  if (!authHeader.startsWith('Bearer ')) {
+    res.status(401).json({ error: 'Authentification requise (jeton Bearer manquant). Reconnectez-vous.' });
+    return null;
+  }
+  const idToken = authHeader.slice('Bearer '.length).trim();
+  if (!idToken || idToken.length > 8192) {
+    res.status(401).json({ error: 'Jeton d’authentification invalide.' });
+    return null;
+  }
+
+  let decoded: Awaited<ReturnType<typeof services.adminAuth.verifyIdToken>>;
+  try {
+    decoded = await services.adminAuth.verifyIdToken(idToken);
+  } catch {
+    res.status(401).json({ error: 'Session Firebase invalide ou expirée. Reconnectez-vous.' });
+    return null;
+  }
+
+  const callerEmail = (decoded.email || '').toLowerCase();
+  const isSuperAdmin = decoded.email_verified === true && callerEmail === SUPER_ADMIN_EMAIL;
+
+  if (!decoded.email_verified) {
+    res.status(403).json({ error: 'Veuillez vérifier votre adresse e-mail avant d’utiliser le service de crawl.' });
+    return null;
+  }
+
+  if (!isSuperAdmin) {
+    try {
+      const memberSnap = await services.adminDb.doc(`app_users/${decoded.uid}`).get();
+      if (!memberSnap.exists || memberSnap.data()?.active !== true) {
+        res.status(403).json({ error: 'Accès refusé : compte non autorisé ou désactivé.' });
+        return null;
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (/PERMISSION_DENIED|7 PERMISSION_DENIED|Could not load the default credentials/i.test(msg)) {
+        res.status(503).json({
+          error:
+            'Droits IAM Firestore manquants sur le serveur. Accordez le rôle roles/datastore.viewer au compte de service d’aperçu dans Google Cloud IAM.',
+        });
+        return null;
+      }
+      res.status(500).json({ error: 'Impossible de vérifier les autorisations utilisateur côté serveur.' });
+      return null;
+    }
+  }
+
+  const rateLimit = checkAndIncrementCrawlUsage(decoded.uid, CRAWL_HOURLY_LIMIT_PER_UID);
+  if (!rateLimit.allowed) {
+    res.status(429).json({
+      error: `Plafond de crawl atteint : 30 pages autorisées par heure et par utilisateur. Veuillez patienter avant la prochaine session d'extraction.`,
+      limit: rateLimit.limit,
+      remaining: 0,
+    });
+    return null;
+  }
+
+  return {
+    uid: decoded.uid,
+    email: callerEmail,
+    isSuperAdmin,
+  };
+}
+
 async function startServer() {
   const app = express();
   app.use(express.json({ limit: '2mb' }));
@@ -214,6 +384,9 @@ async function startServer() {
 
   // 2. Copilote Commercial IA Orange Pro (Chat multi-tours contextualisé sur le portefeuille)
   app.post('/api/ai/chat', async (req, res) => {
+    const caller = await authenticateAndRateLimitAiCaller(req, res);
+    if (!caller) return;
+
     const ai = getGeminiClient();
     if (!ai) {
       res.status(503).json({
@@ -281,6 +454,9 @@ ${focusedFiche ? `\n=== FICHE CIBLÉE ===\n${focusedFiche}` : ''}`;
 
   // 3. Génération d'email B2B Orange Pro avec Skill (JSON structuré garanti)
   app.post('/api/ai/generate-email', async (req, res) => {
+    const caller = await authenticateAndRateLimitAiCaller(req, res);
+    if (!caller) return;
+
     const ai = getGeminiClient();
     if (!ai) {
       res.status(503).json({
@@ -335,6 +511,9 @@ ${focusedFiche ? `\n=== FICHE CIBLÉE ===\n${focusedFiche}` : ''}`;
 
   // 4. Brief Commercial IA (Battlecard structurée sur une fiche prospect)
   app.post('/api/ai/next-action', async (req, res) => {
+    const caller = await authenticateAndRateLimitAiCaller(req, res);
+    if (!caller) return;
+
     const ai = getGeminiClient();
     if (!ai) {
       res.status(503).json({
@@ -417,6 +596,9 @@ ${focusedFiche ? `\n=== FICHE CIBLÉE ===\n${focusedFiche}` : ''}`;
 
   // 5. Enrichissement Web IA via Google Search Grounding (serveur) — multi-téléphones & multi-emails
   app.post('/api/ai/enrich-web', async (req, res) => {
+    const caller = await authenticateAndRateLimitAiCaller(req, res);
+    if (!caller) return;
+
     const ai = getGeminiClient();
     if (!ai) {
       res.status(503).json({
@@ -483,6 +665,9 @@ Réponds UNIQUEMENT par un objet JSON valide :
 
   // 6. Extraction structurée IA de texte collé (Aperçu IA Google, Google Maps, LinkedIn, sites web, annuaires)
   app.post('/api/ai/parse-paste', async (req, res) => {
+    const caller = await authenticateAndRateLimitAiCaller(req, res);
+    if (!caller) return;
+
     const ai = getGeminiClient();
     if (!ai) {
       res.status(503).json({
@@ -562,6 +747,9 @@ ${rawText}`;
 
   // 7. Diagnostic Exécutif IA du Portefeuille (Score santé, goulots pipeline & comptes cibles)
   app.post('/api/ai/portfolio-insights', async (req, res) => {
+    const caller = await authenticateAndRateLimitAiCaller(req, res);
+    if (!caller) return;
+
     const ai = getGeminiClient();
     if (!ai) {
       res.status(503).json({
@@ -649,61 +837,10 @@ Produis un audit structuré, actionnable immédiatement sur le terrain (Meknès 
   // 8. Proxy IA sécurisé via Firebase Admin SDK (/api_keys/{provider} dans Firestore)
   // Vérifie le token Firebase ID + contrôle d'accès (Super-Admin ou collaborateur actif dans /app_users)
   app.post('/api/ai/groq-secure', async (req, res) => {
-    const services = getFirebaseAdminServices();
-    if (!services) {
-      res.status(503).json({
-        error: 'Configuration Firebase Admin introuvable sur le serveur.',
-      });
-      return;
-    }
+    const caller = await authenticateAndRateLimitAiCaller(req, res);
+    if (!caller) return;
 
-    const authHeader = typeof req.headers.authorization === 'string' ? req.headers.authorization : '';
-    if (!authHeader.startsWith('Bearer ')) {
-      res.status(401).json({ error: 'Authentification requise (jeton Bearer manquant).' });
-      return;
-    }
-    const idToken = authHeader.slice('Bearer '.length).trim();
-    if (!idToken || idToken.length > 8192) {
-      res.status(401).json({ error: 'Jeton d’authentification invalide.' });
-      return;
-    }
-
-    let decoded: Awaited<ReturnType<typeof services.adminAuth.verifyIdToken>>;
-    try {
-      decoded = await services.adminAuth.verifyIdToken(idToken);
-    } catch {
-      res.status(401).json({ error: 'Session Firebase invalide ou expirée. Reconnectez-vous.' });
-      return;
-    }
-
-    const callerEmail = (decoded.email || '').toLowerCase();
-    const isSuperAdmin = decoded.email_verified === true && callerEmail === SUPER_ADMIN_EMAIL;
-
-    if (!decoded.email_verified) {
-      res.status(403).json({ error: 'Veuillez vérifier votre adresse e-mail avant d’utiliser le proxy IA.' });
-      return;
-    }
-
-    if (!isSuperAdmin) {
-      try {
-        const memberSnap = await services.adminDb.doc(`app_users/${decoded.uid}`).get();
-        if (!memberSnap.exists || memberSnap.data()?.active !== true) {
-          res.status(403).json({ error: 'Accès refusé : compte non autorisé ou désactivé.' });
-          return;
-        }
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        if (/PERMISSION_DENIED|7 PERMISSION_DENIED|Could not load the default credentials/i.test(msg)) {
-          res.status(503).json({
-            error:
-              'Droits IAM Firestore manquants sur le serveur. Accordez le rôle roles/datastore.viewer au compte de service d’aperçu dans Google Cloud IAM.',
-          });
-          return;
-        }
-        res.status(500).json({ error: 'Impossible de vérifier les autorisations utilisateur côté serveur.' });
-        return;
-      }
-    }
+    const services = getFirebaseAdminServices()!;
 
     const rawProvider = clampString(req.body?.provider, 40).toLowerCase() || 'groq';
     const providerConfig = SECURE_LLM_PROVIDERS[rawProvider];
@@ -851,6 +988,9 @@ Produis un audit structuré, actionnable immédiatement sur le terrain (Meknès 
   // 9. Détection automatique du distributeur d'une clé API (sans jamais logger ni renvoyer la clé)
   // Utilise uniquement des URL officielles codées en dur (aucune URL client acceptée)
   app.post('/api/ai/detect-provider', async (req, res) => {
+    const caller = await authenticateAndRateLimitAiCaller(req, res);
+    if (!caller) return;
+
     const rawKey = clampString(req.body?.apiKey, 512);
     if (!rawKey || rawKey.length < 8) {
       res.status(400).json({ error: 'Clé API trop courte pour détecter le distributeur.' });
@@ -1017,6 +1157,163 @@ Produis un audit structuré, actionnable immédiatement sur le terrain (Meknès 
       verified: false,
       confidence: fallbackPattern ? 'pattern' : 'unknown',
     });
+  });
+
+  // 10. LOT 3: Statut de la configuration SMTP serveur (sans exposer de secrets)
+  app.get('/api/email/status', (_req, res) => {
+    const required = ['SMTP_HOST', 'SMTP_PORT', 'SMTP_USER', 'SMTP_PASS', 'SMTP_FROM'] as const;
+    const missing = required.filter((key) => !process.env[key] || !process.env[key]!.trim());
+    const available = missing.length === 0;
+
+    res.json({
+      available,
+      missing,
+      fromAddress: available ? process.env.SMTP_FROM!.trim() : null,
+    });
+  });
+
+  // 11. LOT 3: Envoi d'email serveur sécurisé (uniquement si les 5 variables SMTP sont présentes)
+  app.post('/api/email/send', async (req, res) => {
+    const caller = await authenticateAndRateLimitAiCaller(req, res);
+    if (!caller) return;
+
+    const required = ['SMTP_HOST', 'SMTP_PORT', 'SMTP_USER', 'SMTP_PASS', 'SMTP_FROM'] as const;
+    const missing = required.filter((key) => !process.env[key] || !process.env[key]!.trim());
+    if (missing.length > 0) {
+      res.status(503).json({
+        error: `Envoi d'email direct non disponible : variables SMTP serveur manquantes (${missing.join(', ')}). Utilisez le bouton « Ouvrir dans la messagerie » pour envoyer depuis votre client de messagerie.`,
+        missing,
+      });
+      return;
+    }
+
+    const to = clampString(req.body?.to, 160);
+    const subject = clampString(req.body?.subject, 200);
+    const body = clampString(req.body?.body, 10000);
+
+    if (!to || !to.includes('@') || !to.includes('.')) {
+      res.status(400).json({ error: 'Adresse email destinataire invalide.' });
+      return;
+    }
+    if (!subject) {
+      res.status(400).json({ error: 'Objet de l’email requis.' });
+      return;
+    }
+    if (!body) {
+      res.status(400).json({ error: 'Corps du message requis.' });
+      return;
+    }
+
+    try {
+      const transporter = nodemailer.createTransport({
+        host: process.env.SMTP_HOST!.trim(),
+        port: Number(process.env.SMTP_PORT) || 587,
+        secure: Number(process.env.SMTP_PORT) === 465,
+        auth: {
+          user: process.env.SMTP_USER!.trim(),
+          pass: process.env.SMTP_PASS!.trim(),
+        },
+      });
+
+      await transporter.sendMail({
+        from: process.env.SMTP_FROM!.trim(),
+        to,
+        subject,
+        text: body,
+      });
+
+      res.json({
+        success: true,
+        to,
+        subject,
+        sentAt: new Date().toISOString(),
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Erreur SMTP lors de l’envoi.';
+      res.status(502).json({ error: `Échec de l'envoi SMTP : ${msg}` });
+    }
+  });
+
+  // 12. LOT 7: Crawl serveur souverain et anti-SSRF (pas de fuite vers un tiers, timeout 12s, max 1 Mo)
+  app.post('/api/crawl', async (req, res) => {
+    const caller = await authenticateAndRateLimitCrawlCaller(req, res);
+    if (!caller) return;
+
+    const rawUrl = req.body?.url;
+    const urlValidation = validatePublicHttpUrl(rawUrl);
+    if (!urlValidation.valid || !urlValidation.normalizedUrl) {
+      res.status(400).json({
+        error: urlValidation.error || 'URL invalide ou interdite (anti-SSRF).',
+      });
+      return;
+    }
+
+    const targetUrl = urlValidation.normalizedUrl;
+
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 12000);
+
+      const upstream = await fetch(targetUrl, {
+        method: 'GET',
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36 (DIVERSIFIA-B2B-Crawler/1.0)',
+          Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+          'Accept-Language': 'fr-FR,fr;q=0.9,ar-MA;q=0.8,en;q=0.7',
+        },
+        signal: controller.signal,
+      });
+
+      clearTimeout(timer);
+
+      if (!upstream.ok) {
+        res.status(502).json({
+          error: `Le site distant a répondu avec le statut HTTP ${upstream.status} (${upstream.statusText || 'Erreur'}).`,
+        });
+        return;
+      }
+
+      // Vérification de la taille (max 1 Mo)
+      const contentLength = upstream.headers.get('content-length');
+      if (contentLength && Number(contentLength) > 1048576) {
+        res.status(413).json({
+          error: 'Page trop volumineuse : la taille dépasse la limite autorisée de 1 Mo.',
+        });
+        return;
+      }
+
+      const buffer = await upstream.arrayBuffer();
+      if (buffer.byteLength > 1048576) {
+        res.status(413).json({
+          error: 'Page trop volumineuse : la taille dépasse la limite autorisée de 1 Mo.',
+        });
+        return;
+      }
+
+      const decoder = new TextDecoder('utf-8');
+      const html = decoder.decode(buffer);
+      const text = extractVisibleTextFromHtml(html, 300000);
+
+      res.json({
+        url: targetUrl,
+        text,
+        bytes: text.length,
+        fetchedAt: new Date().toISOString(),
+      });
+    } catch (err) {
+      const isTimeout =
+        (err as { name?: string })?.name === 'AbortError' ||
+        (err as { name?: string })?.name === 'TimeoutError';
+      if (isTimeout) {
+        res.status(504).json({
+          error: 'Délai d’attente dépassé (timeout 12s) lors de la récupération de la page distante.',
+        });
+        return;
+      }
+      res.status(502).json({
+        error: 'Impossible de joindre le site distant depuis le serveur.',
+      });
+    }
   });
 
   // Garantir que toute route /api/* inconnue ou erreur de parsing JSON renvoie du JSON (jamais du HTML)

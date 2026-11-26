@@ -92,6 +92,7 @@ import {
   isStaticHostingEnvironment,
   parseGeneratedEmailFromLlmText,
   parseJsonObjectFromLlmText,
+  setAiAuthTokenGetter,
 } from './utils/aiCopilotClient';
 import {
   detectApiKeyProviderSync,
@@ -174,6 +175,8 @@ import {
   adminUpdateUserManualBadges,
   createSignedContract,
   adminUpdateSignedContract,
+  managerUpdateSignedContract,
+  fetchTeamMemberFiches,
   getCurrentUserIdToken,
   handleFirestoreError,
   OperationType,
@@ -240,6 +243,9 @@ export interface FicheEntreprise {
   pistesEnrichissement?: string[];
   dateAjout: string;
   statutUpdatedAt?: string;
+  prochaineRelanceAt?: string;
+  rdvAt?: string;
+  rdvLieu?: string;
 }
 
 export interface CrawlLog {
@@ -3253,6 +3259,7 @@ export default function App() {
       setCloudUser(u);
       setAuthReady(true);
       setProfileMenuOpen(false);
+      setAiAuthTokenGetter(async () => (u ? await u.getIdToken() : null));
       // Toujours réinitialiser le portefeuille et le profil lors d'un changement/déconnexion de compte
       hydratedUidRef.current = '';
       setFiches([]);
@@ -5667,13 +5674,18 @@ Réponds UNIQUEMENT en JSON strict : {"telephone":"","email":"","contact":"","ro
         // Piste 1 intégrée : Google Search Grounding via Gemini côté serveur (sans clé client requise)
         tasks.push(
           (async () => {
+            const idToken = auth.currentUser ? await auth.currentUser.getIdToken().catch(() => null) : null;
+            if (!idToken) return;
             const res = await fetchTimed(
               '/api/ai/enrich-web',
               localController.signal,
               8500,
               {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                headers: {
+                  'Content-Type': 'application/json',
+                  Authorization: `Bearer ${idToken}`,
+                },
                 body: JSON.stringify({
                   societe: f.societe,
                   ville: villeCible,
@@ -7088,13 +7100,31 @@ ${assistPasteText.slice(0, 6000)}`;
       tier: OrangeProTier;
       payoutMad: number;
       payoutStatus: PayoutStatus;
+      referenceVirement?: string;
     }
   ) => {
+    let refVirement = updates.referenceVirement;
+    if (updates.payoutStatus === 'Versé' && !refVirement) {
+      const inputRef = window.prompt(
+        'Veuillez saisir la référence de virement bancaire (ex: VIR-2026-98124) pour valider le versement :',
+        ''
+      );
+      if (!inputRef || !inputRef.trim()) {
+        notify('Mise à jour annulée : la référence de virement est obligatoire pour le statut « Versé ».', 'warn');
+        return;
+      }
+      refVirement = inputRef.trim().slice(0, 80);
+    }
+
     try {
-      await adminUpdateSignedContract(contractId, updates);
-      notify('Payout et statut de paiement mis à jour.');
-    } catch {
-      notify('Impossible de mettre à jour le payout.', 'err');
+      await managerUpdateSignedContract(contractId, {
+        ...updates,
+        referenceVirement: refVirement,
+      });
+      notify('Payout, statut de paiement et référence de virement mis à jour avec succès.');
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Impossible de mettre à jour le payout.';
+      notify(msg, 'err');
     }
   };
 

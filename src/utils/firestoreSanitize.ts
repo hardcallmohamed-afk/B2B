@@ -45,6 +45,9 @@ export interface FicheLike {
   pistesEnrichissement?: string[];
   dateAjout: string;
   statutUpdatedAt?: string;
+  prochaineRelanceAt?: string;
+  rdvAt?: string;
+  rdvLieu?: string;
 }
 
 export interface EmailSkillLike {
@@ -75,6 +78,10 @@ export interface WorkspaceLike {
   compactUi?: boolean;
   dismissedDedupKeys?: string[];
   includePhoneOnlyDedup?: boolean;
+  legalRaisonSociale?: string;
+  legalIce?: string;
+  legalAdresse?: string;
+  legalTelephone?: string;
 }
 
 export interface SanitizedWorkspaceDoc {
@@ -96,6 +103,10 @@ export interface SanitizedWorkspaceDoc {
   compactUi?: boolean;
   dismissedDedupKeys?: string[];
   includePhoneOnlyDedup?: boolean;
+  legalRaisonSociale?: string;
+  legalIce?: string;
+  legalAdresse?: string;
+  legalTelephone?: string;
 }
 
 export interface SanitizedFicheDoc {
@@ -119,6 +130,9 @@ export interface SanitizedFicheDoc {
   pistesEnrichissement?: string[];
   dateAjout: string;
   statutUpdatedAt?: string;
+  prochaineRelanceAt?: string;
+  rdvAt?: string;
+  rdvLieu?: string;
 }
 
 export interface SanitizedEmailSkillDoc {
@@ -130,6 +144,74 @@ export interface SanitizedEmailSkillDoc {
   regles: string;
   ctaStyle: string;
   isBuiltin?: boolean;
+}
+
+export const VALID_ACTIVITE_TYPES = new Set([
+  'appel',
+  'whatsapp',
+  'email',
+  'visite',
+  'note',
+  'rdv',
+  'devis',
+  'statut',
+] as const);
+
+export type ActiviteType =
+  | 'appel'
+  | 'whatsapp'
+  | 'email'
+  | 'visite'
+  | 'note'
+  | 'rdv'
+  | 'devis'
+  | 'statut';
+
+export const VALID_ACTIVITE_RESULTATS = new Set([
+  'joint',
+  'pas_de_reponse',
+  'rappeler',
+  'rdv_fixe',
+  'refus',
+  'autre',
+  'vide',
+] as const);
+
+export type ActiviteResultat =
+  | 'joint'
+  | 'pas_de_reponse'
+  | 'rappeler'
+  | 'rdv_fixe'
+  | 'refus'
+  | 'autre'
+  | 'vide';
+
+export interface ActiviteLike {
+  id: string;
+  ownerId?: string;
+  ficheId?: string;
+  type: string;
+  resultat: string;
+  texte: string;
+  auteurNom: string;
+  rdvAt?: string;
+  rdvLieu?: string;
+  prochaineRelanceAt?: string;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface SanitizedActiviteDoc {
+  id: string;
+  ownerId: string;
+  ficheId: string;
+  type: ActiviteType;
+  resultat: ActiviteResultat;
+  texte: string;
+  auteurNom: string;
+  rdvAt?: string;
+  rdvLieu?: string;
+  prochaineRelanceAt?: string;
 }
 
 export const VALID_MANAGED_ROLES = new Set([
@@ -256,6 +338,18 @@ export function sanitizeWorkspacePayload(ownerId: string, input: WorkspaceLike):
   if (typeof input.includePhoneOnlyDedup === 'boolean') {
     doc.includePhoneOnlyDedup = input.includePhoneOnlyDedup;
   }
+  if (typeof input.legalRaisonSociale === 'string' && input.legalRaisonSociale.trim().length > 0) {
+    doc.legalRaisonSociale = clampString(input.legalRaisonSociale.trim(), 200);
+  }
+  if (typeof input.legalIce === 'string' && input.legalIce.trim().length > 0) {
+    doc.legalIce = clampString(input.legalIce.trim(), 30);
+  }
+  if (typeof input.legalAdresse === 'string' && input.legalAdresse.trim().length > 0) {
+    doc.legalAdresse = clampString(input.legalAdresse.trim(), 300);
+  }
+  if (typeof input.legalTelephone === 'string' && input.legalTelephone.trim().length > 0) {
+    doc.legalTelephone = clampString(input.legalTelephone.trim(), 30);
+  }
 
   return doc;
 }
@@ -306,6 +400,61 @@ export function sanitizeFichePayload(ownerId: string, fiche: FicheLike): Sanitiz
   }
   if (typeof fiche.statutUpdatedAt === 'string' && fiche.statutUpdatedAt.trim().length > 0) {
     doc.statutUpdatedAt = clampString(fiche.statutUpdatedAt.trim(), 64);
+  }
+  if (typeof fiche.prochaineRelanceAt === 'string' && fiche.prochaineRelanceAt.trim().length > 0) {
+    doc.prochaineRelanceAt = clampString(fiche.prochaineRelanceAt.trim(), 64);
+  }
+  if (typeof fiche.rdvAt === 'string' && fiche.rdvAt.trim().length > 0) {
+    doc.rdvAt = clampString(fiche.rdvAt.trim(), 64);
+  }
+  if (typeof fiche.rdvLieu === 'string' && fiche.rdvLieu.trim().length > 0) {
+    doc.rdvLieu = clampString(fiche.rdvLieu.trim(), 160);
+  }
+
+  return doc;
+}
+
+export function sanitizeActivitePayload(
+  ownerId: string,
+  ficheId: string,
+  input: ActiviteLike
+): SanitizedActiviteDoc {
+  const cleanOwnerId = sanitizeDocId(ownerId, 'user');
+  const cleanFicheId = sanitizeDocId(ficheId, 'op');
+  const cleanId = sanitizeDocId(input.id, 'act');
+
+  const rawType = clampString(input.type, 32).toLowerCase();
+  const type: ActiviteType = VALID_ACTIVITE_TYPES.has(rawType as never)
+    ? (rawType as ActiviteType)
+    : 'note';
+
+  const rawResultat = clampString(input.resultat, 32).toLowerCase();
+  const resultat: ActiviteResultat = VALID_ACTIVITE_RESULTATS.has(rawResultat as never)
+    ? (rawResultat as ActiviteResultat)
+    : 'vide';
+
+  const rawTexte = clampString(input.texte?.trim?.() ?? '', 1000);
+  const rawAuteur = clampString(input.auteurNom?.trim?.() ?? '', 120);
+  const auteurNom = rawAuteur.length >= 1 ? rawAuteur : 'Collaborateur';
+
+  const doc: SanitizedActiviteDoc = {
+    id: cleanId,
+    ownerId: cleanOwnerId,
+    ficheId: cleanFicheId,
+    type,
+    resultat,
+    texte: rawTexte,
+    auteurNom,
+  };
+
+  if (typeof input.rdvAt === 'string' && input.rdvAt.trim().length > 0) {
+    doc.rdvAt = clampString(input.rdvAt.trim(), 64);
+  }
+  if (typeof input.rdvLieu === 'string' && input.rdvLieu.trim().length > 0) {
+    doc.rdvLieu = clampString(input.rdvLieu.trim(), 160);
+  }
+  if (typeof input.prochaineRelanceAt === 'string' && input.prochaineRelanceAt.trim().length > 0) {
+    doc.prochaineRelanceAt = clampString(input.prochaineRelanceAt.trim(), 64);
   }
 
   return doc;
@@ -451,6 +600,7 @@ export interface SignedContractLike {
   payoutMad: number;
   payoutStatus: string;
   signedAt: string;
+  referenceVirement?: string;
 }
 
 export interface SanitizedSignedContractDoc {
@@ -469,6 +619,7 @@ export interface SanitizedSignedContractDoc {
   payoutMad: number;
   payoutStatus: 'En attente' | 'Validé' | 'Versé';
   signedAt: string;
+  referenceVirement?: string;
 }
 
 export function sanitizeSignedContractPayload(
@@ -490,7 +641,7 @@ export function sanitizeSignedContractPayload(
     ? (input.payoutStatus as 'En attente' | 'Validé' | 'Versé')
     : 'En attente';
 
-  return {
+  const doc: SanitizedSignedContractDoc = {
     id: cleanId,
     orgScope: 'orange_pro_team',
     ownerId: cleanOwnerId,
@@ -507,6 +658,12 @@ export function sanitizeSignedContractPayload(
     payoutStatus,
     signedAt: clampString(input.signedAt, 64) || new Date().toISOString(),
   };
+
+  if (typeof input.referenceVirement === 'string' && input.referenceVirement.trim().length > 0) {
+    doc.referenceVirement = clampString(input.referenceVirement.trim(), 80);
+  }
+
+  return doc;
 }
 
 export interface ApiKeyConfigLike {

@@ -13,6 +13,7 @@ import {
   normalizePortfolioInsights,
   parseGeneratedEmailFromLlmText,
   parseJsonObjectFromLlmText,
+  setAiAuthTokenGetter,
   type CopilotFicheInput,
 } from './aiCopilotClient';
 
@@ -83,6 +84,7 @@ test('fetchJsonWithRetry gracefully handles non-JSON HTML responses and retries 
   }) as typeof fetch;
 
   try {
+    setAiAuthTokenGetter(async () => 'mock_test_token_123');
     const res = await fetchJsonWithRetry<{ ok: boolean; reply: string }>(
       '/api/ai/chat',
       { method: 'POST', body: '{}' },
@@ -91,6 +93,27 @@ test('fetchJsonWithRetry gracefully handles non-JSON HTML responses and retries 
     assert.equal(calls, 2);
     assert.equal(res.ok, true);
     assert.equal(res.data?.reply, 'Bonjour!');
+  } finally {
+    setAiAuthTokenGetter(null);
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('fetchJsonWithRetry rejects /api/ai/ requests when user is not authenticated', async () => {
+  setAiAuthTokenGetter(null);
+  let fetchWasCalled = false;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () => {
+    fetchWasCalled = true;
+    return new Response('{}', { status: 200 });
+  }) as typeof fetch;
+
+  try {
+    const res = await fetchJsonWithRetry('/api/ai/chat', { method: 'POST', body: '{}' });
+    assert.equal(fetchWasCalled, false, 'Fetch should never be called without session');
+    assert.equal(res.ok, false);
+    assert.equal(res.status, 401);
+    assert.match(res.error, /Session requise/i);
   } finally {
     globalThis.fetch = originalFetch;
   }

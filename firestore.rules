@@ -78,6 +78,32 @@ service cloud.firestore {
       return val is string && val in ['active', 'closed', 'disconnected_work_hours'];
     }
 
+    function isManager() {
+      return isVerifiedUser()
+        && exists(/databases/$(database)/documents/app_users/$(request.auth.uid))
+        && get(/databases/$(database)/documents/app_users/$(request.auth.uid)).data.active == true
+        && get(/databases/$(database)/documents/app_users/$(request.auth.uid)).data.role == 'manager';
+    }
+
+    function isTeamLeadOrManager() {
+      return isVerifiedUser()
+        && exists(/databases/$(database)/documents/app_users/$(request.auth.uid))
+        && get(/databases/$(database)/documents/app_users/$(request.auth.uid)).data.active == true
+        && get(/databases/$(database)/documents/app_users/$(request.auth.uid)).data.role in ['manager', 'team_lead'];
+    }
+
+    function isValidActiviteType(val) {
+      return val is string && val in [
+        'appel', 'whatsapp', 'email', 'visite', 'note', 'rdv', 'devis', 'statut'
+      ];
+    }
+
+    function isValidActiviteResultat(val) {
+      return val is string && val in [
+        'joint', 'pas_de_reponse', 'rappeler', 'rdv_fixe', 'refus', 'autre', 'vide'
+      ];
+    }
+
     function isValidStringList(arr, maxItems, maxItemLen) {
       return arr is list
         && arr.size() <= maxItems
@@ -177,7 +203,7 @@ service cloud.firestore {
         && data.keys().hasOnly([
           'id', 'orgScope', 'ownerId', 'ownerName', 'ficheId', 'numeroFiche',
           'societe', 'ville', 'secteur', 'produitOrangePro', 'tier', 'effectif',
-          'payoutMad', 'payoutStatus', 'signedAt', 'createdAt', 'updatedAt'
+          'payoutMad', 'payoutStatus', 'signedAt', 'referenceVirement', 'createdAt', 'updatedAt'
         ])
         && data.id is string
         && data.id == contractId
@@ -196,6 +222,7 @@ service cloud.firestore {
         && data.payoutMad is number && data.payoutMad >= 0 && data.payoutMad <= 10000000
         && isValidPayoutStatus(data.payoutStatus)
         && data.signedAt is string && data.signedAt.size() <= 64
+        && (!('referenceVirement' in data) || (data.referenceVirement is string && data.referenceVirement.size() <= 80))
         && data.createdAt is timestamp
         && data.updatedAt is timestamp;
     }
@@ -289,6 +316,7 @@ service cloud.firestore {
           'displayName', 'avatarDataUrl', 'phonePro', 'zone', 'bio',
           'monthlyGoalContracts', 'notifyBadges', 'notifySound', 'compactUi',
           'dismissedDedupKeys', 'includePhoneOnlyDedup',
+          'legalRaisonSociale', 'legalIce', 'legalAdresse', 'legalTelephone',
           'createdAt', 'updatedAt'
         ])
         && data.ownerId is string
@@ -314,6 +342,10 @@ service cloud.firestore {
         && (!('compactUi' in data) || data.compactUi is bool)
         && (!('dismissedDedupKeys' in data) || isValidStringList(data.dismissedDedupKeys, 100, 200))
         && (!('includePhoneOnlyDedup' in data) || data.includePhoneOnlyDedup is bool)
+        && (!('legalRaisonSociale' in data) || (data.legalRaisonSociale is string && data.legalRaisonSociale.size() <= 200))
+        && (!('legalIce' in data) || (data.legalIce is string && data.legalIce.size() <= 30))
+        && (!('legalAdresse' in data) || (data.legalAdresse is string && data.legalAdresse.size() <= 300))
+        && (!('legalTelephone' in data) || (data.legalTelephone is string && data.legalTelephone.size() <= 30))
         && data.createdAt is timestamp
         && data.updatedAt is timestamp;
     }
@@ -329,6 +361,7 @@ service cloud.firestore {
           'telephone', 'telephonesSupplementaires', 'email', 'emailsSupplementaires',
           'contact', 'role', 'source', 'effectif', 'statut', 'statutUpdatedAt',
           'siteWeb', 'verifieWeb', 'pistesEnrichissement',
+          'prochaineRelanceAt', 'rdvAt', 'rdvLieu',
           'dateAjout', 'createdAt', 'updatedAt'
         ])
         && data.ownerId is string
@@ -354,7 +387,40 @@ service cloud.firestore {
         && (!('siteWeb' in data) || (data.siteWeb is string && data.siteWeb.size() <= 500))
         && (!('verifieWeb' in data) || (data.verifieWeb is bool))
         && (!('pistesEnrichissement' in data) || isValidStringList(data.pistesEnrichissement, 15, 250))
+        && (!('prochaineRelanceAt' in data) || (data.prochaineRelanceAt is string && data.prochaineRelanceAt.size() <= 64))
+        && (!('rdvAt' in data) || (data.rdvAt is string && data.rdvAt.size() <= 64))
+        && (!('rdvLieu' in data) || (data.rdvLieu is string && data.rdvLieu.size() <= 160))
         && data.dateAjout is string && data.dateAjout.size() <= 64
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidFicheActivite(data, userId, ficheId, activiteId) {
+      return data.keys().hasAll([
+          'id', 'ownerId', 'ficheId', 'type', 'resultat', 'texte',
+          'auteurNom', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'id', 'ownerId', 'ficheId', 'type', 'resultat', 'texte',
+          'auteurNom', 'rdvAt', 'rdvLieu', 'prochaineRelanceAt',
+          'createdAt', 'updatedAt'
+        ])
+        && data.id is string
+        && data.id == activiteId
+        && isValidId(data.id)
+        && data.ownerId is string
+        && data.ownerId == userId
+        && data.ownerId == request.auth.uid
+        && data.ficheId is string
+        && data.ficheId == ficheId
+        && isValidId(data.ficheId)
+        && isValidActiviteType(data.type)
+        && isValidActiviteResultat(data.resultat)
+        && data.texte is string && data.texte.size() <= 1000
+        && data.auteurNom is string && data.auteurNom.size() >= 1 && data.auteurNom.size() <= 120
+        && (!('rdvAt' in data) || (data.rdvAt is string && data.rdvAt.size() <= 64))
+        && (!('rdvLieu' in data) || (data.rdvLieu is string && data.rdvLieu.size() <= 160))
+        && (!('prochaineRelanceAt' in data) || (data.prochaineRelanceAt is string && data.prochaineRelanceAt.size() <= 64))
         && data.createdAt is timestamp
         && data.updatedAt is timestamp;
     }
@@ -514,11 +580,13 @@ service cloud.firestore {
     match /signed_contracts/{contractId} {
       allow get: if isValidId(contractId) && (
         isSuperAdmin()
+        || (isTeamLeadOrManager() && (resource == null || existing().orgScope == 'orange_pro_team'))
         || (isApprovedMember(request.auth.uid) && (resource == null || existing().ownerId == request.auth.uid))
       );
 
-      // Super-Admin lists all via orgScope == 'orange_pro_team'; collaborators list ONLY their own via ownerId == uid.
+      // Super-Admin and Manager/Team-Lead list team contracts; collaborators list ONLY their own.
       allow list: if (isSuperAdmin() && resource.data.orgScope == 'orange_pro_team')
+        || (isTeamLeadOrManager() && resource.data.orgScope == 'orange_pro_team')
         || (isVerifiedUser() && resource.data.ownerId == request.auth.uid);
 
       allow create: if isValidId(contractId)
@@ -535,10 +603,11 @@ service cloud.firestore {
           )
         );
 
-      // Payout amounts, products, and payment statuses are strictly controlled by Super-Admin.
+      // Payout amounts, products, and statuses are controlled by Super-Admin and Managers.
+      // Transition to 'Versé' strictly requires a non-empty referenceVirement (max 80).
       allow update: if isValidId(contractId)
         && isValidSignedContract(incoming(), contractId)
-        && isSuperAdmin()
+        && (isSuperAdmin() || isManager())
         && incoming().id == existing().id
         && incoming().orgScope == existing().orgScope
         && incoming().ownerId == existing().ownerId
@@ -546,8 +615,17 @@ service cloud.firestore {
         && incoming().createdAt == existing().createdAt
         && incoming().updatedAt == request.time
         && (
+          incoming().payoutStatus != 'Versé'
+          || (
+            'referenceVirement' in incoming()
+            && incoming().referenceVirement is string
+            && incoming().referenceVirement.size() >= 1
+            && incoming().referenceVirement.size() <= 80
+          )
+        )
+        && (
           incoming().diff(existing()).affectedKeys().hasOnly([
-            'produitOrangePro', 'tier', 'payoutMad', 'payoutStatus', 'updatedAt'
+            'produitOrangePro', 'tier', 'payoutMad', 'payoutStatus', 'referenceVirement', 'updatedAt'
           ])
         );
 
@@ -678,13 +756,15 @@ service cloud.firestore {
         && incoming().createdAt == existing().createdAt
         && incoming().updatedAt == request.time
         && (
-          // Action: Update workspace & personal profile settings (cities, signature, photo, preferences, dedup choices)
+          // Action: Update workspace & personal profile settings (cities, signature, photo, preferences, dedup choices, legal info)
           incoming().diff(existing()).affectedKeys().hasOnly([
             'villesAll', 'villesActive', 'modeVille', 'defaultVille',
             'emailSignature', 'seeded', 'displayName', 'avatarDataUrl',
             'phonePro', 'zone', 'bio', 'monthlyGoalContracts',
             'notifyBadges', 'notifySound', 'compactUi',
-            'dismissedDedupKeys', 'includePhoneOnlyDedup', 'updatedAt'
+            'dismissedDedupKeys', 'includePhoneOnlyDedup',
+            'legalRaisonSociale', 'legalIce', 'legalAdresse', 'legalTelephone',
+            'updatedAt'
           ])
         );
 
@@ -692,13 +772,15 @@ service cloud.firestore {
 
       // 10. Subcollection: /users/{userId}/fiches/{ficheId} (B2B CRM Prospects — Locked after Signing for Collaborators)
       match /fiches/{ficheId} {
-        allow get: if isValidId(userId) && isValidId(ficheId) && isOwner(userId)
-          && (resource == null || existing().ownerId == request.auth.uid)
-          && (isSuperAdmin() || resource == null || existing().statut != 'Signé Orange Pro');
+        allow get: if isValidId(userId) && isValidId(ficheId) && (
+          (isOwner(userId) && (resource == null || existing().ownerId == request.auth.uid) && (isSuperAdmin() || resource == null || existing().statut != 'Signé Orange Pro'))
+          || ((isSuperAdmin() || isTeamLeadOrManager()) && (resource == null || existing().ownerId == userId))
+        );
 
-        allow list: if isVerifiedUser()
-          && request.auth.uid == userId
-          && resource.data.ownerId == request.auth.uid;
+        allow list: if isVerifiedUser() && (
+          (request.auth.uid == userId && resource.data.ownerId == request.auth.uid)
+          || ((isSuperAdmin() || isTeamLeadOrManager()) && resource.data.ownerId == userId)
+        );
 
         allow create: if isValidId(userId)
           && isValidId(ficheId)
@@ -720,15 +802,19 @@ service cloud.firestore {
           && (isSuperAdmin() || existing().statut != 'Signé Orange Pro')
           && exists(/databases/$(database)/documents/users/$(userId))
           && (
-            // Action 1: Kanban pipeline status transition
-            incoming().diff(existing()).affectedKeys().hasOnly(['statut', 'statutUpdatedAt', 'updatedAt'])
+            // Action 1: Kanban pipeline status transition or reminder mirror update
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'statut', 'statutUpdatedAt', 'prochaineRelanceAt', 'rdvAt', 'rdvLieu', 'updatedAt'
+            ])
             ||
             // Action 2: Full CRM edit, multi-contact addition, web/AI enrichment, or MDM merge
             incoming().diff(existing()).affectedKeys().hasOnly([
               'numeroFiche', 'societe', 'secteur', 'ville', 'telephone',
               'telephonesSupplementaires', 'email', 'emailsSupplementaires',
               'contact', 'role', 'source', 'effectif', 'statut', 'statutUpdatedAt',
-              'siteWeb', 'verifieWeb', 'pistesEnrichissement', 'dateAjout', 'updatedAt'
+              'siteWeb', 'verifieWeb', 'pistesEnrichissement',
+              'prochaineRelanceAt', 'rdvAt', 'rdvLieu',
+              'dateAjout', 'updatedAt'
             ])
           );
 
@@ -738,6 +824,54 @@ service cloud.firestore {
           && existing().ownerId == request.auth.uid
           && (isSuperAdmin() || existing().statut != 'Signé Orange Pro')
           && exists(/databases/$(database)/documents/users/$(userId));
+
+        // 10b. Subcollection: /users/{userId}/fiches/{ficheId}/activites/{activiteId} (Activity Journal, RDV & Relance)
+        match /activites/{activiteId} {
+          allow get: if isValidId(userId) && isValidId(ficheId) && isValidId(activiteId) && (
+            (isOwner(userId) && (resource == null || existing().ownerId == request.auth.uid))
+            || ((isSuperAdmin() || isTeamLeadOrManager()) && (resource == null || existing().ownerId == userId))
+          );
+
+          allow list: if isVerifiedUser() && (
+            (request.auth.uid == userId && resource.data.ownerId == request.auth.uid)
+            || ((isSuperAdmin() || isTeamLeadOrManager()) && resource.data.ownerId == userId)
+          );
+
+          allow create: if isValidId(userId)
+            && isValidId(ficheId)
+            && isValidId(activiteId)
+            && isValidFicheActivite(incoming(), userId, ficheId, activiteId)
+            && isOwner(userId)
+            && incoming().ownerId == request.auth.uid
+            && incoming().ficheId == ficheId
+            && incoming().createdAt == request.time
+            && incoming().updatedAt == request.time
+            && exists(/databases/$(database)/documents/users/$(userId)/fiches/$(ficheId));
+
+          allow update: if isValidId(userId)
+            && isValidId(ficheId)
+            && isValidId(activiteId)
+            && isValidFicheActivite(incoming(), userId, ficheId, activiteId)
+            && isOwner(userId)
+            && existing().ownerId == request.auth.uid
+            && incoming().ownerId == existing().ownerId
+            && incoming().ficheId == existing().ficheId
+            && incoming().id == existing().id
+            && incoming().createdAt == existing().createdAt
+            && incoming().updatedAt == request.time
+            && exists(/databases/$(database)/documents/users/$(userId)/fiches/$(ficheId))
+            && (
+              incoming().diff(existing()).affectedKeys().hasOnly([
+                'type', 'resultat', 'texte', 'auteurNom', 'rdvAt', 'rdvLieu', 'prochaineRelanceAt', 'updatedAt'
+              ])
+            );
+
+          allow delete: if isValidId(userId)
+            && isValidId(ficheId)
+            && isValidId(activiteId)
+            && (isSuperAdmin() || (isOwner(userId) && existing().ownerId == request.auth.uid))
+            && exists(/databases/$(database)/documents/users/$(userId)/fiches/$(ficheId));
+        }
       }
 
       // 11. Subcollection: /users/{userId}/skills/{skillId} (Email Studio Skills)
