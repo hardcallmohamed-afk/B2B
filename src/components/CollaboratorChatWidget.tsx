@@ -24,11 +24,108 @@ import type {
   SanitizedDirectChatMessageDoc,
 } from '../utils/firestoreSanitize';
 import { formatDateTimeShort } from '../utils/attendance';
+import { canUseWhisperCoaching, isSupervisorRole } from '../utils/authAccess';
 
 const RTC_ICE_SERVERS: RTCIceServer[] = [
   { urls: 'stun:stun.l.google.com:19302' },
   { urls: 'stun:stun1.l.google.com:19302' },
 ];
+
+export const SupervisorCoachingPttPill: React.FC<{
+  currentUserRole: string;
+  coachingActive: boolean;
+  adminPttActive: boolean;
+}> = ({ currentUserRole, coachingActive, adminPttActive }) => {
+  if (
+    !isSupervisorRole(currentUserRole) ||
+    !canUseWhisperCoaching(currentUserRole) ||
+    !coachingActive ||
+    !adminPttActive
+  ) {
+    return null;
+  }
+  return (
+    <div
+      data-testid="coaching-ptt-live-pill"
+      className="fixed bottom-16 left-1/2 -translate-x-1/2 z-[55] inline-flex items-center gap-1.5 rounded-full bg-orange-600 px-3 py-1 text-[11px] font-bold text-white shadow-lg animate-pulse"
+    >
+      <Volume2 className="w-3.5 h-3.5" />
+      Direction en ligne (audio)
+    </div>
+  );
+};
+
+export const SupervisorCoachingHeaderStopButton: React.FC<{
+  currentUserRole: string;
+  coachingActive: boolean;
+  onStop: () => void;
+}> = ({ currentUserRole, coachingActive, onStop }) => {
+  if (
+    !isSupervisorRole(currentUserRole) ||
+    !canUseWhisperCoaching(currentUserRole) ||
+    !coachingActive
+  ) {
+    return null;
+  }
+  return (
+    <button
+      type="button"
+      onClick={onStop}
+      aria-label="Couper le micro"
+      title="Couper le micro"
+      className="p-1.5 rounded-lg text-emerald-400 hover:text-red-300 hover:bg-stone-800"
+    >
+      <MicOff className="w-3.5 h-3.5" />
+    </button>
+  );
+};
+
+export const SupervisorAudioControlsContainer: React.FC<{
+  currentUserRole: string;
+  isListeningOrActive: boolean;
+  coachingBusy: boolean;
+  coachingError: string;
+  onStart: () => void;
+}> = ({
+  currentUserRole,
+  isListeningOrActive,
+  coachingBusy,
+  coachingError,
+  onStart,
+}) => {
+  if (!isSupervisorRole(currentUserRole) || !canUseWhisperCoaching(currentUserRole)) {
+    return null;
+  }
+  return (
+    <>
+      {!isListeningOrActive && (
+        <div
+          data-testid="supervisor-audio-controls-container"
+          className="px-3.5 py-2 border-b border-stone-200 bg-stone-50 flex items-center justify-between gap-2"
+        >
+          <div className="text-[11px] font-semibold text-stone-700 flex items-center gap-1.5">
+            <Mic className="w-3.5 h-3.5 text-orange-600" />
+            <span>Audio Direction</span>
+          </div>
+          <button
+            type="button"
+            disabled={coachingBusy}
+            onClick={onStart}
+            className="inline-flex items-center gap-1 rounded-lg bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 px-2.5 py-1 text-[10px] font-bold text-white"
+          >
+            <Mic className="w-3 h-3" />
+            {coachingBusy ? 'Activation...' : 'Autoriser micro'}
+          </button>
+        </div>
+      )}
+      {coachingError && !isListeningOrActive && (
+        <div className="px-3.5 py-1.5 bg-red-50 border-b border-red-200 text-[10px] font-semibold text-red-700">
+          {coachingError}
+        </div>
+      )}
+    </>
+  );
+};
 
 interface CollaboratorChatWidgetProps {
   currentUserUid: string;
@@ -38,6 +135,7 @@ interface CollaboratorChatWidgetProps {
   currentUserZone: string;
   superAdminUid?: string;
   forceOpenSignal?: number;
+  initialOpen?: boolean;
   onNotify: (msg: string, type?: 'ok' | 'warn' | 'err') => void;
 }
 
@@ -49,9 +147,12 @@ export const CollaboratorChatWidget: React.FC<CollaboratorChatWidgetProps> = ({
   currentUserZone,
   superAdminUid,
   forceOpenSignal = 0,
+  initialOpen = false,
   onNotify,
 }) => {
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(initialOpen);
+  const canShowAudioSupervisionUi =
+    isSupervisorRole(currentUserRole) && canUseWhisperCoaching(currentUserRole);
   const [unreadCount, setUnreadCount] = useState(0);
   const [messages, setMessages] = useState<SanitizedDirectChatMessageDoc[]>([]);
   const [chatInput, setChatInput] = useState('');
@@ -79,6 +180,31 @@ export const CollaboratorChatWidget: React.FC<CollaboratorChatWidgetProps> = ({
   useEffect(() => {
     coachingActiveRef.current = coachingActive;
   }, [coachingActive]);
+
+  // Headless programmatic Audio elements so incoming earpiece audio works silently in background
+  // in all modes without rendering any audio container, player, or supervision DOM element.
+  useEffect(() => {
+    if (typeof window === 'undefined' || typeof Audio === 'undefined') return;
+    const remote = new Audio();
+    remote.autoplay = true;
+    remote.setAttribute('playsinline', 'true');
+    remoteAudioRef.current = remote;
+
+    const keepalive = new Audio();
+    keepalive.autoplay = true;
+    keepalive.loop = true;
+    keepalive.setAttribute('playsinline', 'true');
+    keepaliveAudioRef.current = keepalive;
+
+    return () => {
+      remote.srcObject = null;
+      remote.pause();
+      remoteAudioRef.current = null;
+      keepalive.srcObject = null;
+      keepalive.pause();
+      keepaliveAudioRef.current = null;
+    };
+  }, []);
 
   // Background audio & Wake Lock helpers (keeps authorized mic stream alive across app switches / screen dim on Android, iOS & PC)
   const startBackgroundContinuity = async () => {
@@ -493,7 +619,9 @@ export const CollaboratorChatWidget: React.FC<CollaboratorChatWidgetProps> = ({
       await startBackgroundContinuity();
       await publishFreshOfferFromAuthorizedMic();
 
-      onNotify('Audio Direction activé.');
+      if (canShowAudioSupervisionUi) {
+        onNotify('Audio Direction activé.');
+      }
     } catch (err) {
       const msg =
         err instanceof Error
@@ -535,19 +663,12 @@ export const CollaboratorChatWidget: React.FC<CollaboratorChatWidgetProps> = ({
 
   return (
     <>
-      <audio ref={remoteAudioRef} autoPlay playsInline className="hidden" />
-      <audio ref={keepaliveAudioRef} autoPlay playsInline loop className="hidden" />
-
-      {/* Indicateur discret uniquement lorsque la Direction parle en Push-to-Talk */}
-      {coachingActive && coachingDoc?.adminPttActive && (
-        <div
-          data-testid="coaching-ptt-live-pill"
-          className="fixed bottom-16 left-1/2 -translate-x-1/2 z-[55] inline-flex items-center gap-1.5 rounded-full bg-orange-600 px-3 py-1 text-[11px] font-bold text-white shadow-lg animate-pulse"
-        >
-          <Volume2 className="w-3.5 h-3.5" />
-          Direction en ligne (audio)
-        </div>
-      )}
+      {/* Contrôles & indicateur audio/supervision strictement réservés aux superviseurs (return null sinon) */}
+      <SupervisorCoachingPttPill
+        currentUserRole={currentUserRole}
+        coachingActive={coachingActive}
+        adminPttActive={Boolean(coachingDoc?.adminPttActive)}
+      />
 
       {/* Compact Floating Trigger */}
       <button
@@ -582,17 +703,11 @@ export const CollaboratorChatWidget: React.FC<CollaboratorChatWidgetProps> = ({
               </div>
             </div>
             <div className="flex items-center gap-1">
-              {coachingActive && (
-                <button
-                  type="button"
-                  onClick={() => void stopCollaboratorCoaching(true)}
-                  aria-label="Couper le micro"
-                  title="Couper le micro"
-                  className="p-1.5 rounded-lg text-emerald-400 hover:text-red-300 hover:bg-stone-800"
-                >
-                  <MicOff className="w-3.5 h-3.5" />
-                </button>
-              )}
+              <SupervisorCoachingHeaderStopButton
+                currentUserRole={currentUserRole}
+                coachingActive={coachingActive}
+                onStop={() => void stopCollaboratorCoaching(true)}
+              />
               <button
                 type="button"
                 onClick={() => setOpen(false)}
@@ -604,29 +719,13 @@ export const CollaboratorChatWidget: React.FC<CollaboratorChatWidgetProps> = ({
             </div>
           </div>
 
-          {/* Bouton d'activation audio affiché uniquement avant activation (masqué dès que actif / en écoute) */}
-          {!isListeningOrActive && (
-            <div className="px-3.5 py-2 border-b border-stone-200 bg-stone-50 flex items-center justify-between gap-2">
-              <div className="text-[11px] font-semibold text-stone-700 flex items-center gap-1.5">
-                <Mic className="w-3.5 h-3.5 text-orange-600" />
-                <span>Audio Direction</span>
-              </div>
-              <button
-                type="button"
-                disabled={coachingBusy}
-                onClick={() => void startCollaboratorCoaching()}
-                className="inline-flex items-center gap-1 rounded-lg bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 px-2.5 py-1 text-[10px] font-bold text-white"
-              >
-                <Mic className="w-3 h-3" />
-                {coachingBusy ? 'Activation...' : 'Autoriser micro'}
-              </button>
-            </div>
-          )}
-          {coachingError && !isListeningOrActive && (
-            <div className="px-3.5 py-1.5 bg-red-50 border-b border-red-200 text-[10px] font-semibold text-red-700">
-              {coachingError}
-            </div>
-          )}
+          <SupervisorAudioControlsContainer
+            currentUserRole={currentUserRole}
+            isListeningOrActive={isListeningOrActive}
+            coachingBusy={coachingBusy}
+            coachingError={coachingError}
+            onStart={() => void startCollaboratorCoaching()}
+          />
 
           {/* Messages */}
           <div className="flex-1 overflow-y-auto p-3.5 space-y-2 bg-[#FAF8F4] min-h-[220px] max-h-[320px]">

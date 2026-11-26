@@ -17,13 +17,16 @@ import {
 import { RARITY_META, formatMad } from '../utils/gamification';
 import {
   countUnreadNotifications,
+  filterNotificationsForRole,
   getNotificationSoundProfile,
   type AppNotification,
 } from '../utils/notifications';
+import { isSupervisorRole } from '../utils/authAccess';
 import { BadgeArtwork } from './BadgeArtwork';
 
 interface NotificationBellProps {
   notifications: AppNotification[];
+  currentUserRole?: string;
   onMarkAllRead: () => void;
   onOpenBadges: () => void;
   onOpenTeam?: () => void;
@@ -115,6 +118,7 @@ function renderNotificationIcon(n: AppNotification) {
 
 export const NotificationBell: React.FC<NotificationBellProps> = ({
   notifications,
+  currentUserRole,
   onMarkAllRead,
   onOpenBadges,
   onOpenTeam,
@@ -123,7 +127,9 @@ export const NotificationBell: React.FC<NotificationBellProps> = ({
 }) => {
   const [open, setOpen] = useState(false);
   const containerRef = useRef<HTMLDivElement | null>(null);
-  const unread = countUnreadNotifications(notifications);
+  const canViewSupervision = isSupervisorRole(currentUserRole);
+  const visibleNotifications = filterNotificationsForRole(notifications, currentUserRole);
+  const unread = countUnreadNotifications(visibleNotifications);
 
   useEffect(() => {
     if (!open) return;
@@ -212,12 +218,12 @@ export const NotificationBell: React.FC<NotificationBellProps> = ({
           </div>
 
           <div className="max-h-[58vh] sm:max-h-80 overflow-y-auto divide-y divide-stone-100">
-            {notifications.length === 0 ? (
+            {visibleNotifications.length === 0 ? (
               <div className="px-3.5 py-6 sm:px-4 sm:py-8 text-center text-xs text-stone-500">
                 Aucune notification pour le moment. Vous serez alerté dès qu’une fiche est attribuée, consultée ou restituée, qu’un contrat change de statut ou qu’un succès se débloque.
               </div>
             ) : (
-              notifications.map((n) => {
+              visibleNotifications.map((n) => {
                 const isContractNotif =
                   n.kind === 'contract_signed' || n.kind === 'contract_status_changed';
                 const isFicheNotif =
@@ -255,7 +261,8 @@ export const NotificationBell: React.FC<NotificationBellProps> = ({
                         : 'text-amber-700';
 
                 const isDirectComm =
-                  n.kind === 'direct_message' || n.kind === 'coaching_invite';
+                  n.kind === 'direct_message' ||
+                  (canViewSupervision && n.kind === 'coaching_invite');
                 const soundProfile = getNotificationSoundProfile(n.kind, status);
 
                 return (
@@ -296,7 +303,7 @@ export const NotificationBell: React.FC<NotificationBellProps> = ({
                           </span>
                         ) : isDirectComm ? (
                           <span className="text-[10px] font-bold shrink-0 text-sky-700">
-                            {n.kind === 'coaching_invite' ? 'Coaching Live' : 'Message'}
+                            {canViewSupervision && n.kind === 'coaching_invite' ? 'Coaching Live' : 'Message'}
                           </span>
                         ) : (
                           <span className="text-[10px] font-bold text-orange-700 shrink-0 tabular-nums">

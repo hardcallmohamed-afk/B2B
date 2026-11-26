@@ -15,10 +15,12 @@ import {
 } from 'lucide-react';
 import { RARITY_META, formatMad } from '../utils/gamification';
 import type { AppNotification } from '../utils/notifications';
+import { isSupervisorRole } from '../utils/authAccess';
 import { BadgeArtwork, resolveBadgeMeta } from './BadgeArtwork';
 
 interface AchievementToastProps {
   notification: AppNotification | null;
+  currentUserRole?: string;
   queueCount?: number;
   onDismiss: () => void;
   onOpenBadges: () => void;
@@ -29,6 +31,7 @@ interface AchievementToastProps {
 
 export const AchievementToast: React.FC<AchievementToastProps> = ({
   notification,
+  currentUserRole,
   queueCount = 1,
   onDismiss,
   onOpenBadges,
@@ -36,7 +39,9 @@ export const AchievementToast: React.FC<AchievementToastProps> = ({
   onOpenCrm,
   onSelectNotification,
 }) => {
+  const canViewSupervision = isSupervisorRole(currentUserRole);
   if (!notification) return null;
+  if (notification.kind === 'coaching_invite' && !canViewSupervision) return null;
 
   const isContractNotif =
     notification.kind === 'contract_signed' || notification.kind === 'contract_status_changed';
@@ -282,7 +287,9 @@ export const AchievementToast: React.FC<AchievementToastProps> = ({
               className="text-[10px] sm:text-[11px] font-bold text-orange-700 hover:underline"
             >
               {isDirectComm
-                ? 'Ouvrir Discussion / Coaching →'
+                ? canViewSupervision
+                  ? 'Ouvrir Discussion / Coaching →'
+                  : 'Ouvrir la discussion →'
                 : isFicheNotif
                   ? 'Ouvrir la fiche →'
                   : isContractNotif

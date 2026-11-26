@@ -96,6 +96,7 @@ import { getUserInitials } from './utils/avatarResize';
 import {
   detectNewUnlockNotifications,
   detectContractNotifications,
+  filterNotificationsForRole,
   mapCloudNotificationDocToAppNotification,
   mergeNotificationsFeed,
   markAllNotificationsRead,
@@ -128,6 +129,7 @@ import {
   evaluateUserAccess,
   getRoleCapabilities,
   isSuperAdminEmail,
+  isSupervisorRole,
   normalizeManagedRole,
   type ManagedAppUser,
 } from './utils/authAccess';
@@ -227,6 +229,7 @@ import {
   sanitizeSkillPayload,
   sanitizeWorkspacePayload,
   sanitizeCloudNotificationPayload,
+  sanitizeUserPresencePayload,
   serializeDocCanonical,
   computeCollectionSyncDiff,
   parseFriendlyCloudError,
@@ -3755,95 +3758,212 @@ export default function App() {
   }, [authReady, cloudUser, isSuperAdmin]);
 
   // Listener temps réel sur sa PROPRE fiche /user_presence/{uid} (autorisé pour tous les rôles : affichage "En ligne" + auto-réparation si un autre onglet a fermé)
+  const cloudUserUid = cloudUser?.uid || '';
   useEffect(() => {
-    if (!authReady || !cloudUser || !canAccessWorkspace) {
+    if (!authReady || !cloudUserUid || !canAccessWorkspace) {
       setMyPresenceRecord(null);
       return;
     }
-    const uid = cloudUser.uid;
+    const uid = cloudUserUid;
+    const ownPresenceRef = getOwnUserPresenceDocRef(uid);
+    setMyPresenceRecord(null);
+    console.debug('[PresenceDebug] Montage listener présence', {
+      uid,
+      path: ownPresenceRef.path,
+    });
+
     const unsub = onSnapshot(
-      getOwnUserPresenceDocRef(uid),
+      ownPresenceRef,
+      { includeMetadataChanges: true },
       (snap) => {
-        if (!snap.exists()) {
+        const rawData = snap.exists() ? (snap.data() as Record<string, unknown>) : null;
+        console.debug('[PresenceDebug] Snapshot reçu', {
+          uid,
+          path: ownPresenceRef.path,
+          exists: snap.exists(),
+          fromCache: snap.metadata.fromCache,
+          hasPendingWrites: snap.metadata.hasPendingWrites,
+          rawData,
+        });
+
+        const triggerPresenceSelfHeal = (
+          todaySeedSeconds = 0,
+          totalSeedSeconds = 0,
+          reason = 'presence_mismatch'
+        ) => {
+          const cur = activeAttendanceRef.current;
+          const now = Date.now();
+          if (
+            cur &&
+            cur.uid === uid &&
+            !cur.closed &&
+            document.visibilityState !== 'hidden' &&
+            navigator.onLine !== false &&
+            now - lastSelfHealPresenceMsRef.current >= 6000
+          ) {
+            lastSelfHealPresenceMsRef.current = now;
+            lastNetworkHeartbeatMsRef.current = now;
+            const snapNow = latestLocalStateRef.current;
+            console.debug('[PresenceDebug] Auto-réparation présence déclenchée', {
+              uid,
+              path: ownPresenceRef.path,
+              reason,
+              sessionId: cur.sessionId,
+            });
+            void heartbeatAttendanceSession({
+              uid: cur.uid,
+              sessionId: cur.sessionId,
+              nowIso: new Date(now).toISOString(),
+              dateKey: cur.dateKey,
+              todayWorkedSeconds: Math.max(cur.todayBaseSeconds, todaySeedSeconds),
+              totalWorkedSeconds: Math.max(cur.totalBaseSeconds, totalSeedSeconds),
+              sessionWorkedSeconds: cur.sessionSeconds,
+              deviceLabel: cur.deviceLabel,
+              fallbackProfile: {
+                email: cur.email,
+                displayName: snapNow.userProfile.displayName.trim() || cur.displayName,
+                phonePro: snapNow.userProfile.phonePro || '',
+                avatarDataUrl: snapNow.userProfile.avatarDataUrl || '',
+                role: cur.role,
+                zone: snapNow.userProfile.zone || cur.zone,
+              },
+            }).catch((healErr) => {
+              const fbHealErr = healErr as { code?: string; message?: string };
+              console.warn('[PresenceDebug] Échec auto-réparation présence', {
+                uid,
+                reason,
+                code: fbHealErr?.code || 'unknown',
+                message: fbHealErr?.message || (healErr instanceof Error ? healErr.message : String(healErr)),
+              });
+            });
+          }
+        };
+
+        if (!snap.exists() || !rawData) {
+          console.warn('[PresenceDebug] Document présence absent (snap.exists() === false)', {
+            uid,
+            path: ownPresenceRef.path,
+            fromCache: snap.metadata.fromCache,
+            hasPendingWrites: snap.metadata.hasPendingWrites,
+          });
           setMyPresenceRecord(null);
+          if (!snap.metadata.fromCache) {
+            triggerPresenceSelfHeal(0, 0, 'doc_missing');
+          }
           return;
         }
-        const d = snap.data();
+
+        const rawKeys = Object.keys(rawData);
+        const missingCoreFields: string[] = [];
+        if (typeof rawData.uid !== 'string' || !rawData.uid.trim()) missingCoreFields.push('uid');
+        if (typeof rawData.email !== 'string' || !rawData.email.trim()) missingCoreFields.push('email');
+        if (typeof rawData.lastSeenAt !== 'string' && !rawData.updatedAt) {
+          missingCoreFields.push('lastSeenAt/updatedAt');
+        }
+        if (rawKeys.length === 0 || missingCoreFields.length > 0) {
+          console.warn('[PresenceDebug] Données présence vides ou incomplètes', {
+            uid,
+            path: ownPresenceRef.path,
+            keyCount: rawKeys.length,
+            missingCoreFields,
+            rawData,
+          });
+        }
+
+        const rawUpdatedAt = rawData.updatedAt as { toDate?: () => Date } | undefined;
         const serverUpdatedAtIso =
-          d.updatedAt && typeof d.updatedAt.toDate === 'function'
-            ? d.updatedAt.toDate().toISOString()
+          rawUpdatedAt && typeof rawUpdatedAt.toDate === 'function'
+            ? rawUpdatedAt.toDate().toISOString()
             : '';
-        const rawLastSeenAt = typeof d.lastSeenAt === 'string' ? d.lastSeenAt : '';
-        const record: UserPresenceRecord = {
+        const rawLastSeenAt = typeof rawData.lastSeenAt === 'string' ? rawData.lastSeenAt : '';
+        const normalizedRole =
+          rawData.role === 'super_admin' ? 'super_admin' : normalizeManagedRole(rawData.role);
+        const sanitized = sanitizeUserPresencePayload({
           uid: snap.id,
-          orgScope: 'orange_pro_team',
-          email: typeof d.email === 'string' ? d.email : '',
-          displayName: typeof d.displayName === 'string' ? d.displayName : 'Collaborateur',
-          firstName: typeof d.firstName === 'string' ? d.firstName : '',
-          lastName: typeof d.lastName === 'string' ? d.lastName : '',
-          phonePro: typeof d.phonePro === 'string' ? d.phonePro : '',
-          avatarDataUrl: typeof d.avatarDataUrl === 'string' ? d.avatarDataUrl : '',
-          role: d.role === 'super_admin' ? 'super_admin' : normalizeManagedRole(d.role),
-          zone: typeof d.zone === 'string' ? d.zone : 'Meknès',
-          isOnline: Boolean(d.isOnline),
-          currentDevice: typeof d.currentDevice === 'string' ? d.currentDevice : '',
-          devicesUsed: Array.isArray(d.devicesUsed) ? (d.devicesUsed as string[]) : [],
-          lastLoginAt: typeof d.lastLoginAt === 'string' ? d.lastLoginAt : '',
-          lastLogoutAt: typeof d.lastLogoutAt === 'string' ? d.lastLogoutAt : '',
+          email: typeof rawData.email === 'string' ? rawData.email : '',
+          displayName: typeof rawData.displayName === 'string' ? rawData.displayName : 'Collaborateur',
+          firstName: typeof rawData.firstName === 'string' ? rawData.firstName : '',
+          lastName: typeof rawData.lastName === 'string' ? rawData.lastName : '',
+          phonePro: typeof rawData.phonePro === 'string' ? rawData.phonePro : '',
+          avatarDataUrl: typeof rawData.avatarDataUrl === 'string' ? rawData.avatarDataUrl : '',
+          role: normalizedRole,
+          zone: typeof rawData.zone === 'string' ? rawData.zone : 'Meknès',
+          isOnline: Boolean(rawData.isOnline),
+          currentDevice: typeof rawData.currentDevice === 'string' ? rawData.currentDevice : '',
+          devicesUsed: Array.isArray(rawData.devicesUsed) ? (rawData.devicesUsed as string[]) : [],
+          lastLoginAt: typeof rawData.lastLoginAt === 'string' ? rawData.lastLoginAt : '',
+          lastLogoutAt: typeof rawData.lastLogoutAt === 'string' ? rawData.lastLogoutAt : '',
+          lastSeenAt: rawLastSeenAt || serverUpdatedAtIso,
+          lastWorkDisconnectAt:
+            typeof rawData.lastWorkDisconnectAt === 'string' ? rawData.lastWorkDisconnectAt : '',
+          workHoursDisconnectCount: Number(rawData.workHoursDisconnectCount) || 0,
+          workHoursDisconnectTimes: Array.isArray(rawData.workHoursDisconnectTimes)
+            ? (rawData.workHoursDisconnectTimes as string[])
+            : [],
+          activeDateKey: typeof rawData.activeDateKey === 'string' ? rawData.activeDateKey : '',
+          todayWorkedSeconds: Number(rawData.todayWorkedSeconds) || 0,
+          totalWorkedSeconds: Number(rawData.totalWorkedSeconds) || 0,
+          currentSessionId:
+            typeof rawData.currentSessionId === 'string' ? rawData.currentSessionId : '',
+        });
+
+        const record: UserPresenceRecord = {
+          ...sanitized,
+          uid: snap.id,
+          role: normalizedRole,
           lastSeenAt: rawLastSeenAt || serverUpdatedAtIso,
           updatedAtIso: serverUpdatedAtIso || undefined,
-          lastWorkDisconnectAt:
-            typeof d.lastWorkDisconnectAt === 'string' ? d.lastWorkDisconnectAt : '',
-          workHoursDisconnectCount: Number(d.workHoursDisconnectCount) || 0,
-          workHoursDisconnectTimes: Array.isArray(d.workHoursDisconnectTimes)
-            ? (d.workHoursDisconnectTimes as string[])
-            : [],
-          activeDateKey: typeof d.activeDateKey === 'string' ? d.activeDateKey : '',
-          todayWorkedSeconds: Number(d.todayWorkedSeconds) || 0,
-          totalWorkedSeconds: Number(d.totalWorkedSeconds) || 0,
-          currentSessionId: typeof d.currentSessionId === 'string' ? d.currentSessionId : '',
         };
+
+        console.debug('[PresenceDebug] Mise à jour myPresenceRecord (avant/après normalisation)', {
+          uid,
+          path: ownPresenceRef.path,
+          beforeRaw: rawData,
+          afterNormalized: record,
+        });
         setMyPresenceRecord(record);
 
         // Auto-réparation immédiate : si l'utilisateur est actif au premier plan mais que Firestore indique hors ligne / ancienne session
         const cur = activeAttendanceRef.current;
-        const now = Date.now();
         if (
           cur &&
           cur.uid === uid &&
-          !cur.closed &&
-          document.visibilityState !== 'hidden' &&
-          navigator.onLine !== false &&
           (!record.isOnline || (cur.sessionId && record.currentSessionId !== cur.sessionId)) &&
-          now - lastSelfHealPresenceMsRef.current >= 6000
+          (!snap.metadata.hasPendingWrites || !record.isOnline)
         ) {
-          lastSelfHealPresenceMsRef.current = now;
-          lastNetworkHeartbeatMsRef.current = now;
-          const snapNow = latestLocalStateRef.current;
-          void heartbeatAttendanceSession({
-            uid: cur.uid,
-            sessionId: cur.sessionId,
-            nowIso: new Date(now).toISOString(),
-            dateKey: cur.dateKey,
-            todayWorkedSeconds: Math.max(cur.todayBaseSeconds, record.todayWorkedSeconds),
-            totalWorkedSeconds: Math.max(cur.totalBaseSeconds, record.totalWorkedSeconds),
-            sessionWorkedSeconds: cur.sessionSeconds,
-            deviceLabel: cur.deviceLabel,
-            fallbackProfile: {
-              email: cur.email,
-              displayName: snapNow.userProfile.displayName.trim() || cur.displayName,
-              phonePro: snapNow.userProfile.phonePro || '',
-              avatarDataUrl: snapNow.userProfile.avatarDataUrl || '',
-              role: cur.role,
-              zone: snapNow.userProfile.zone || cur.zone,
-            },
-          }).catch(() => {});
+          triggerPresenceSelfHeal(
+            record.todayWorkedSeconds,
+            record.totalWorkedSeconds,
+            !record.isOnline ? 'offline_in_firestore' : 'session_mismatch'
+          );
         }
       },
-      () => {}
+      (err) => {
+        const fbErr = err as { code?: string; message?: string };
+        console.error('[PresenceDebug] Erreur onSnapshot présence', {
+          uid,
+          path: ownPresenceRef.path,
+          code: fbErr?.code || 'unknown',
+          message: fbErr?.message || (err instanceof Error ? err.message : String(err)),
+          error: err,
+        });
+        try {
+          handleFirestoreError(err, OperationType.GET, ownPresenceRef.path);
+        } catch {
+          // Non-fatal fallback : éviter un crash UI si les règles rejettent temporairement
+        }
+      }
     );
-    return () => unsub();
-  }, [authReady, cloudUser, canAccessWorkspace]);
+
+    return () => {
+      console.debug('[PresenceDebug] Démontage listener présence', {
+        uid,
+        path: ownPresenceRef.path,
+      });
+      unsub();
+      setMyPresenceRecord(null);
+    };
+  }, [authReady, cloudUserUid, canAccessWorkspace]);
 
   // Pointage automatique : connexion, appareil utilisé, heures travaillées et déconnexions pendant les heures de travail
   useEffect(() => {
@@ -4614,12 +4734,14 @@ export default function App() {
 
         mapped.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
 
+        const visibleMapped = filterNotificationsForRole(mapped, currentUserRole);
+
         const newlyArrivedUnread: AppNotification[] = [];
         if (!cloudNotifsHydratedRef.current) {
           cloudNotifsHydratedRef.current = true;
-          mapped.forEach((item) => seenCloudNotifIdsRef.current.add(item.id));
+          visibleMapped.forEach((item) => seenCloudNotifIdsRef.current.add(item.id));
         } else {
-          for (const item of mapped) {
+          for (const item of visibleMapped) {
             if (!seenCloudNotifIdsRef.current.has(item.id)) {
               seenCloudNotifIdsRef.current.add(item.id);
               if (!item.read) {
@@ -4629,16 +4751,19 @@ export default function App() {
           }
         }
 
-        if (mapped.length > 0) {
+        if (visibleMapped.length > 0) {
           setNotifications((prev) => {
             const byCloudId = new Map<string, AppNotification>();
-            for (const item of mapped) {
+            for (const item of visibleMapped) {
               byCloudId.set(item.id, item);
             }
             const nonCloudOrUpdated = prev.map((existing) =>
               byCloudId.has(existing.id) ? byCloudId.get(existing.id)! : existing
             );
-            const merged = mergeNotificationsFeed(nonCloudOrUpdated, mapped);
+            const merged = filterNotificationsForRole(
+              mergeNotificationsFeed(nonCloudOrUpdated, visibleMapped),
+              currentUserRole
+            );
             try {
               window.localStorage.setItem(`op_notifications_${uid}`, JSON.stringify(merged));
             } catch {
@@ -4668,7 +4793,7 @@ export default function App() {
       }
     );
     return () => unsub();
-  }, [authReady, cloudUser, canAccessWorkspace]);
+  }, [authReady, cloudUser, canAccessWorkspace, currentUserRole]);
 
   // Super-Admin : suivi temps réel des messages non lus (Chat Direct 0 API) et sessions Coaching Terrain prêtes
   useEffect(() => {
@@ -7943,6 +8068,9 @@ ${assistPasteText.slice(0, 6000)}`;
   );
 
   const handleSelectNotification = async (n: AppNotification) => {
+    if (n.kind === 'coaching_invite' && !isSupervisorRole(currentUserRole)) {
+      return;
+    }
     if (n.kind === 'direct_message' || n.kind === 'coaching_invite') {
       if (isSuperAdmin && n.ficheMeta?.ficheOwnerId) {
         openCollaboratorProfileByUid(
@@ -8692,6 +8820,7 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
       {/* Notification célébration lors d'un déblocage de succès ou d'attribution de badge */}
       <AchievementToast
         notification={activeAchievementToast}
+        currentUserRole={currentUserRole}
         queueCount={achievementToastQueue.length}
         onDismiss={() => setAchievementToastQueue((prev) => prev.slice(1))}
         onOpenBadges={() => navigateCrm('badges')}
@@ -8852,7 +8981,8 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
                 </button>
 
                 <NotificationBell
-                  notifications={notifications}
+                  notifications={filterNotificationsForRole(notifications, currentUserRole)}
+                  currentUserRole={currentUserRole}
                   onMarkAllRead={handleMarkAllNotificationsRead}
                   onOpenBadges={() => navigateCrm('badges')}
                   onOpenTeam={() => navigateCrm('team')}

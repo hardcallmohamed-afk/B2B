@@ -6,6 +6,7 @@ import {
   type SignedContractRecord,
 } from './gamification';
 import type { SanitizedCloudNotificationDoc } from './firestoreSanitize';
+import { isSupervisorRole } from './authAccess';
 
 export type NotificationKind =
   | 'achievement_unlocked'
@@ -376,6 +377,14 @@ export function countUnreadNotifications(list: AppNotification[]): number {
     if (!n.read) count++;
   }
   return count;
+}
+
+export function filterNotificationsForRole(
+  list: AppNotification[],
+  role: string | null | undefined
+): AppNotification[] {
+  if (isSupervisorRole(role)) return list;
+  return list.filter((n) => n.kind !== 'coaching_invite');
 }
 
 export function markAllNotificationsRead(list: AppNotification[]): AppNotification[] {

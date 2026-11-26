@@ -1,5 +1,16 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import React from 'react';
+import { renderToStaticMarkup } from 'react-dom/server';
+import {
+  CollaboratorChatWidget,
+  SupervisorAudioControlsContainer,
+  SupervisorCoachingHeaderStopButton,
+  SupervisorCoachingPttPill,
+} from './components/CollaboratorChatWidget';
+import { NotificationBell } from './components/NotificationBell';
+import { AchievementToast } from './components/AchievementToast';
+import { filterNotificationsForRole, type AppNotification } from './utils/notifications';
 import {
   normalizeMoroccanPhone,
   normalizeProEmail,
@@ -222,3 +233,160 @@ test('getAnyAvailableLlmKeys and mergeHubAndCloudKeys let any available AI handl
   // First: cloud_vault_mistral (P100); next: groq ('extract'-scoped non-quota) or anthropic (P101); last: openai (quota retry)
   assert.deepEqual(emailOrder, ['cloud_vault_mistral', 'cloud_vault_anthropic', '2', '3']);
 });
+
+test('CollaboratorChatWidget and audio supervision subcomponents return null in DOM for non-supervisors', () => {
+  for (const role of ['commercial', 'grand_compte', 'team_lead', 'unknown']) {
+    const widgetHtml = renderToStaticMarkup(
+      React.createElement(CollaboratorChatWidget, {
+        currentUserUid: 'collab_1',
+        currentUserName: 'Youssef Benali',
+        currentUserEmail: 'youssef@orangepro.ma',
+        currentUserRole: role,
+        currentUserZone: 'Meknès',
+        initialOpen: true,
+        onNotify: () => {},
+      })
+    );
+    assert.ok(widgetHtml.includes('Discussion Direction'), `Chat drawer should render for ${role}`);
+    assert.equal(widgetHtml.includes('Audio Direction'), false, `Audio Direction must not be in DOM for ${role}`);
+    assert.equal(widgetHtml.includes('Autoriser micro'), false, `Autoriser micro must not be in DOM for ${role}`);
+    assert.equal(widgetHtml.includes('supervisor-audio-controls-container'), false);
+    assert.equal(widgetHtml.includes('coaching-ptt-live-pill'), false);
+    assert.equal(widgetHtml.includes('<audio'), false, `No <audio> element in DOM for ${role}`);
+
+    assert.equal(
+      renderToStaticMarkup(
+        React.createElement(SupervisorAudioControlsContainer, {
+          currentUserRole: role,
+          isListeningOrActive: false,
+          coachingBusy: false,
+          coachingError: 'Err',
+          onStart: () => {},
+        })
+      ),
+      ''
+    );
+    assert.equal(
+      renderToStaticMarkup(
+        React.createElement(SupervisorCoachingPttPill, {
+          currentUserRole: role,
+          coachingActive: true,
+          adminPttActive: true,
+        })
+      ),
+      ''
+    );
+    assert.equal(
+      renderToStaticMarkup(
+        React.createElement(SupervisorCoachingHeaderStopButton, {
+          currentUserRole: role,
+          coachingActive: true,
+          onStop: () => {},
+        })
+      ),
+      ''
+    );
+  }
+
+  for (const supervisorRole of ['manager', 'super_admin', 'admin', 'superviseur']) {
+    const supervisorWidgetHtml = renderToStaticMarkup(
+      React.createElement(CollaboratorChatWidget, {
+        currentUserUid: 'sup_1',
+        currentUserName: 'Superviseur Meknès',
+        currentUserEmail: 'sup@orangepro.ma',
+        currentUserRole: supervisorRole,
+        currentUserZone: 'Meknès',
+        initialOpen: true,
+        onNotify: () => {},
+      })
+    );
+    assert.ok(supervisorWidgetHtml.includes('supervisor-audio-controls-container'));
+    assert.ok(supervisorWidgetHtml.includes('Audio Direction'));
+    assert.ok(
+      renderToStaticMarkup(
+        React.createElement(SupervisorCoachingPttPill, {
+          currentUserRole: supervisorRole,
+          coachingActive: true,
+          adminPttActive: true,
+        })
+      ).includes('coaching-ptt-live-pill')
+    );
+  }
+});
+
+test('NotificationBell and AchievementToast hide coaching_invite and supervision labels from non-supervisors', () => {
+  const coachingNotif: AppNotification = {
+    id: 'cloud_ntf_coach_1',
+    kind: 'coaching_invite',
+    badgeId: 'coaching_invite',
+    title: 'Invitation Coaching Terrain',
+    message: 'Activez votre audio supervision.',
+    rarity: 'legendaire',
+    xpBoost: 0,
+    createdAt: '2026-11-26T10:00:00.000Z',
+    read: false,
+    targetTab: 'crm',
+  };
+  const directMsgNotif: AppNotification = {
+    id: 'cloud_ntf_msg_1',
+    kind: 'direct_message',
+    badgeId: 'direct_message',
+    title: 'Nouveau message Direction',
+    message: 'Bonjour, point sur le RDV de 14h.',
+    rarity: 'rare',
+    xpBoost: 0,
+    createdAt: '2026-11-26T10:05:00.000Z',
+    read: false,
+    targetTab: 'crm',
+  };
+
+  assert.equal(filterNotificationsForRole([coachingNotif, directMsgNotif], 'commercial').length, 1);
+  assert.equal(filterNotificationsForRole([coachingNotif, directMsgNotif], 'manager').length, 2);
+
+  // Non-supervisor NotificationBell unread count excludes coaching_invite
+  const bellCollabHtml = renderToStaticMarkup(
+    React.createElement(NotificationBell, {
+      notifications: [coachingNotif, directMsgNotif],
+      currentUserRole: 'commercial',
+      onMarkAllRead: () => {},
+      onOpenBadges: () => {},
+    })
+  );
+  assert.ok(bellCollabHtml.includes('Notifications (1 non lues)'));
+
+  // Non-supervisor AchievementToast returns null on coaching_invite and avoids "Coaching" copy on direct_message
+  assert.equal(
+    renderToStaticMarkup(
+      React.createElement(AchievementToast, {
+        notification: coachingNotif,
+        currentUserRole: 'commercial',
+        onDismiss: () => {},
+        onOpenBadges: () => {},
+      })
+    ),
+    ''
+  );
+  const toastDirectCollabHtml = renderToStaticMarkup(
+    React.createElement(AchievementToast, {
+      notification: directMsgNotif,
+      currentUserRole: 'commercial',
+      onDismiss: () => {},
+      onOpenBadges: () => {},
+    })
+  );
+  assert.equal(toastDirectCollabHtml.includes('Coaching'), false);
+  assert.ok(toastDirectCollabHtml.includes('Ouvrir la discussion'));
+
+  // Supervisor sees coaching toast normally
+  assert.ok(
+    renderToStaticMarkup(
+      React.createElement(AchievementToast, {
+        notification: coachingNotif,
+        currentUserRole: 'manager',
+        onDismiss: () => {},
+        onOpenBadges: () => {},
+      })
+    ).includes('Coaching Terrain Live')
+  );
+});
+

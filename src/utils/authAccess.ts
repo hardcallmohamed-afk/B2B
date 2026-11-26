@@ -171,6 +171,50 @@ export function getManagedRoleLabel(role: ManagedUserRole): string {
   return found ? found.label : 'Commercial B2B';
 }
 
+export const AUTHORIZED_SUPERVISOR_ROLES = new Set([
+  'super_admin',
+  'admin',
+  'manager',
+  'superviseur',
+] as const);
+
+/**
+ * Retourne true uniquement pour les rôles superviseurs autorisés
+ * (`super_admin`, `admin`, `manager`, `superviseur`).
+ */
+export function isSupervisorRole(role: string | null | undefined): boolean {
+  if (typeof role !== 'string') return false;
+  const normalized = role.trim().toLowerCase();
+  return AUTHORIZED_SUPERVISOR_ROLES.has(normalized as never);
+}
+
+/**
+ * Indique si le rôle est autorisé à voir et manipuler les contrôles
+ * de supervision audio / écoute & soufflage (Whisper Coaching).
+ */
+export function canUseWhisperCoaching(role: string | null | undefined): boolean {
+  return isSupervisorRole(role);
+}
+
+export interface CollaboratorAudioUiVisibility {
+  isSupervisor: boolean;
+  showAudioSupervisionContainer: boolean;
+  showListenAndWhisperControls: boolean;
+  allowSilentBackgroundEarpiece: boolean;
+}
+
+export function getCollaboratorAudioUiVisibility(
+  role: string | null | undefined
+): CollaboratorAudioUiVisibility {
+  const supervisor = isSupervisorRole(role);
+  return {
+    isSupervisor: supervisor,
+    showAudioSupervisionContainer: supervisor,
+    showListenAndWhisperControls: supervisor,
+    allowSilentBackgroundEarpiece: true,
+  };
+}
+
 export interface ManagedAppUser {
   uid: string;
   email: string;

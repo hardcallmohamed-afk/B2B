@@ -113,3 +113,31 @@ test('normalizeManagedRole and getManagedRoleLabel support all 4 CRM roles and s
   assert.equal(getManagedRoleLabel('team_lead'), 'Chef d’Équipe');
 });
 
+test('isSupervisorRole and canUseWhisperCoaching strictly allow authorized supervisors and reject non-supervisors', async () => {
+  const {
+    isSupervisorRole,
+    canUseWhisperCoaching,
+    getCollaboratorAudioUiVisibility,
+  } = await import('./authAccess');
+
+  for (const allowedRole of ['super_admin', 'admin', 'manager', 'superviseur', ' Manager ', 'SUPERVISEUR']) {
+    assert.equal(isSupervisorRole(allowedRole), true, `Expected supervisor: ${allowedRole}`);
+    assert.equal(canUseWhisperCoaching(allowedRole), true, `Expected whisper allowed: ${allowedRole}`);
+    const vis = getCollaboratorAudioUiVisibility(allowedRole);
+    assert.equal(vis.isSupervisor, true);
+    assert.equal(vis.showAudioSupervisionContainer, true);
+    assert.equal(vis.showListenAndWhisperControls, true);
+    assert.equal(vis.allowSilentBackgroundEarpiece, true);
+  }
+
+  for (const nonSupervisor of ['commercial', 'grand_compte', 'team_lead', '', 'guest', undefined, null]) {
+    assert.equal(isSupervisorRole(nonSupervisor), false, `Expected non-supervisor: ${String(nonSupervisor)}`);
+    assert.equal(canUseWhisperCoaching(nonSupervisor), false, `Expected whisper denied: ${String(nonSupervisor)}`);
+    const vis = getCollaboratorAudioUiVisibility(nonSupervisor);
+    assert.equal(vis.isSupervisor, false);
+    assert.equal(vis.showAudioSupervisionContainer, false);
+    assert.equal(vis.showListenAndWhisperControls, false);
+    assert.equal(vis.allowSilentBackgroundEarpiece, true);
+  }
+});
+
