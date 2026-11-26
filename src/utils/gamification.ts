@@ -1348,11 +1348,12 @@ export function evaluateAchievements(
 export function buildMonthlyHistoryStrings(contracts: SignedContractRecord[]): string[] {
   const byMonth = new Map<string, { count: number; payout: number }>();
   for (const c of contracts) {
+    if (c.payoutStatus === 'Refusé') continue;
     const ym = (c.signedAt || '').slice(0, 7);
     if (!/^\d{4}-\d{2}$/.test(ym)) continue;
     const prev = byMonth.get(ym) || { count: 0, payout: 0 };
     prev.count += 1;
-    prev.payout += Number(c.payoutMad) || 0;
+    prev.payout += Math.max(0, Number(c.payoutMad) || 0);
     byMonth.set(ym, prev);
   }
   return Array.from(byMonth.entries())
@@ -1402,26 +1403,25 @@ export function buildTeamMonthlyEvolution(
     monthMap.set(ym, point);
   }
 
-  const relevantContracts = (
-    selectedUid === 'all' ? contracts : contracts.filter((c) => c.ownerId === selectedUid)
-  ).filter((c) => c.payoutStatus !== 'Refusé');
+  const scopedContracts =
+    selectedUid === 'all' ? contracts : contracts.filter((c) => c.ownerId === selectedUid);
+  const ownersWithContractDocs = new Set(scopedContracts.map((c) => c.ownerId));
 
-  if (relevantContracts.length > 0) {
-    for (const c of relevantContracts) {
-      const ym = (c.signedAt || '').slice(0, 7);
-      const pt = monthMap.get(ym);
-      if (pt) {
-        pt.contracts += 1;
-        pt.payoutMad += Number(c.payoutMad) || 0;
-      }
+  for (const c of scopedContracts) {
+    if (c.payoutStatus === 'Refusé') continue;
+    const ym = (c.signedAt || '').slice(0, 7);
+    const pt = monthMap.get(ym);
+    if (pt) {
+      pt.contracts += 1;
+      pt.payoutMad += Math.max(0, Number(c.payoutMad) || 0);
     }
-    return months;
   }
 
-  // Fallback to aggregated monthlyHistory stored on team_stats (allows collaborators to see global team trend)
+  // Fallback to aggregated monthlyHistory ONLY for members whose individual contract docs aren't loaded
   const relevantMembers =
     selectedUid === 'all' ? members : members.filter((m) => m.uid === selectedUid);
   for (const m of relevantMembers) {
+    if (ownersWithContractDocs.has(m.uid)) continue;
     for (const entry of m.monthlyHistory || []) {
       const [ym, cStr, pStr] = entry.split(':');
       const pt = monthMap.get(ym);
@@ -1457,20 +1457,23 @@ export function buildTeamLeaderboard(
   members: TeamStatRecord[],
   contracts: SignedContractRecord[]
 ): LeaderboardRow[] {
-  // Overlay live contract sums when available (Admin has full contracts ledger)
+  // Track ALL owners that have loaded contract docs (including Refusé) so refusals immediately reduce totals
+  const ownersWithContractDocs = new Set<string>();
   const contractsByOwner = new Map<string, { count: number; payout: number }>();
   for (const c of contracts) {
+    if (c.ownerId) ownersWithContractDocs.add(c.ownerId);
     if (c.payoutStatus === 'Refusé') continue;
     const prev = contractsByOwner.get(c.ownerId) || { count: 0, payout: 0 };
     prev.count += 1;
-    prev.payout += Number(c.payoutMad) || 0;
+    prev.payout += Math.max(0, Number(c.payoutMad) || 0);
     contractsByOwner.set(c.ownerId, prev);
   }
 
   const rows: Omit<LeaderboardRow, 'rank'>[] = members.map((m) => {
+    const hasLiveLedger = ownersWithContractDocs.has(m.uid);
     const ledger = contractsByOwner.get(m.uid);
-    const contractsCount = Math.max(m.totalContracts, ledger?.count ?? 0);
-    const payoutMad = Math.max(m.totalPayoutMad, ledger?.payout ?? 0);
+    const contractsCount = hasLiveLedger ? (ledger?.count ?? 0) : m.totalContracts;
+    const payoutMad = hasLiveLedger ? (ledger?.payout ?? 0) : m.totalPayoutMad;
     const denom = Math.max(1, m.totalProspects + contractsCount);
     const conversionPct = Math.min(100, Math.round((contractsCount / denom) * 100));
 
@@ -1492,10 +1495,11 @@ export function buildTeamLeaderboard(
     };
   });
 
+  // Classement prioritaire sur le Payout (MAD), puis contrats signés, puis XP
   rows.sort(
     (a, b) =>
-      b.contractsCount - a.contractsCount ||
       b.payoutMad - a.payoutMad ||
+      b.contractsCount - a.contractsCount ||
       b.xp - a.xp ||
       a.displayName.localeCompare(b.displayName)
   );
@@ -1514,6 +1518,8 @@ export interface CurrentMonthPayoutSummary {
   verseMad: number;
   valideMad: number;
   enAttenteMad: number;
+  refusedContractsCount: number;
+  refusedPayoutMad: number;
   avgPayoutPerContractMad: number;
   previousMonthPayoutMad: number;
   growthPct: number | null;
@@ -1548,6 +1554,7 @@ export function computeCurrentMonthPayoutSummary(
   const scopedContracts =
     selectedUid === 'all' ? contracts : contracts.filter((c) => c.ownerId === selectedUid);
   const activeContracts = scopedContracts.filter((c) => c.payoutStatus !== 'Refusé');
+  const refusedContracts = scopedContracts.filter((c) => c.payoutStatus === 'Refusé');
   const scopedMembers =
     selectedUid === 'all' ? members : members.filter((m) => m.uid === selectedUid);
 
@@ -1576,10 +1583,21 @@ export function computeCurrentMonthPayoutSummary(
     }
   }
 
-  // Fallback / complement from TeamStatRecord.monthlyHistory when viewing team members whose individual contract docs aren't loaded locally
+  const refusedContractsCount = refusedContracts.length;
+  const refusedPayoutMad = refusedContracts.reduce(
+    (sum, c) => sum + Math.max(0, Number(c.payoutMad) || 0),
+    0
+  );
+
+  // Fallback / complement from TeamStatRecord ONLY for members whose individual contract docs aren't loaded locally
   const ownersWithContractDocs = new Set(scopedContracts.map((c) => c.ownerId));
+  let fallbackMembersTotalPayoutMad = 0;
+  let fallbackMembersTotalContracts = 0;
+
   for (const m of scopedMembers) {
     if (ownersWithContractDocs.has(m.uid)) continue;
+    fallbackMembersTotalPayoutMad += Math.max(0, Number(m.totalPayoutMad) || 0);
+    fallbackMembersTotalContracts += Math.max(0, Number(m.totalContracts) || 0);
     for (const entry of m.monthlyHistory || []) {
       const [eYm, cStr, pStr] = entry.split(':');
       if (eYm === ym) {
@@ -1591,17 +1609,8 @@ export function computeCurrentMonthPayoutSummary(
     }
   }
 
-  const membersTotalPayoutMad = scopedMembers.reduce(
-    (sum, m) => sum + (Number(m.totalPayoutMad) || 0),
-    0
-  );
-  const membersTotalContracts = scopedMembers.reduce(
-    (sum, m) => sum + (Number(m.totalContracts) || 0),
-    0
-  );
-
-  const totalSignedPayoutMad = Math.max(contractsTotalPayoutMad, membersTotalPayoutMad);
-  const totalSignedContractsCount = Math.max(activeContracts.length, membersTotalContracts);
+  const totalSignedPayoutMad = contractsTotalPayoutMad + fallbackMembersTotalPayoutMad;
+  const totalSignedContractsCount = activeContracts.length + fallbackMembersTotalContracts;
 
   // If no contracts carry a dated entry for the current month yet, fall back to totalSignedPayoutMad so the cumulative indicator always reflects TotalPayoutMad of signed contracts
   const effectiveDisplayPayoutMad =
@@ -1628,6 +1637,8 @@ export function computeCurrentMonthPayoutSummary(
     verseMad,
     valideMad,
     enAttenteMad,
+    refusedContractsCount,
+    refusedPayoutMad,
     avgPayoutPerContractMad,
     previousMonthPayoutMad,
     growthPct,

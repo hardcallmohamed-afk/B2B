@@ -13,6 +13,7 @@ import {
   Pencil,
   Check,
   X,
+  Eye,
 } from 'lucide-react';
 import {
   ROLE_BADGE_META,
@@ -57,6 +58,8 @@ interface TeamPerformancePanelProps {
     }
   ) => Promise<void>;
   onJumpToBadges?: (targetUid: string) => void;
+  onOpenContractFiche?: (contract: SignedContractRecord) => void;
+  accessibleFicheIds?: Set<string>;
 }
 
 const PAYOUT_STATUS_STYLES: Record<PayoutStatus, string> = {
@@ -74,6 +77,8 @@ export const TeamPerformancePanel: React.FC<TeamPerformancePanelProps> = ({
   signedContracts,
   onAdminUpdateContract,
   onJumpToBadges,
+  onOpenContractFiche,
+  accessibleFicheIds,
 }) => {
   const canManageContracts = isSuperAdmin || currentUserRole === 'manager' || currentUserRole === 'team_lead';
   const [selectedRole, setSelectedRole] = useState<'all' | TeamRole>('all');
@@ -430,8 +435,16 @@ export const TeamPerformancePanel: React.FC<TeamPerformancePanelProps> = ({
               )}
             </div>
             <p className="text-xs text-stone-500">
-              Calculé automatiquement à partir du <strong className="text-stone-700">TotalPayoutMad</strong> de tous les contrats signés{' '}
-              {selectedMember ? `par ${selectedMember.displayName}` : 'par l’équipe commerciale DIVERSIFIA'}.
+              Calculé en temps réel sur les contrats actifs (hors contrats refusés) —{' '}
+              {selectedMember ? `par ${selectedMember.displayName}` : 'équipe commerciale DIVERSIFIA'}.
+              {currentMonthSummary.refusedContractsCount > 0 && (
+                <span className="ml-1.5 font-semibold text-red-700">
+                  ({currentMonthSummary.refusedContractsCount} contrat
+                  {currentMonthSummary.refusedContractsCount > 1 ? 's' : ''} refusé
+                  {currentMonthSummary.refusedContractsCount > 1 ? 's' : ''} exclu
+                  {currentMonthSummary.refusedContractsCount > 1 ? 's' : ''} des totaux)
+                </span>
+              )}
             </p>
           </div>
 
@@ -612,10 +625,12 @@ export const TeamPerformancePanel: React.FC<TeamPerformancePanelProps> = ({
         <div className="flex flex-wrap items-center justify-between gap-2 border-b border-stone-200 px-5 py-3.5">
           <div className="flex items-center gap-2">
             <Crown className="h-4 w-4 text-amber-500" />
-            <h3 className="text-sm font-bold text-stone-900">Classement Commercial de l’Équipe</h3>
+            <h3 className="text-sm font-bold text-stone-900">
+              Classement Commercial de l’Équipe (trié par Payout MAD)
+            </h3>
           </div>
           <span className="text-xs text-stone-500">
-            Cliquez sur un collaborateur pour filtrer son évolution et ses contrats
+            Mis à jour en temps réel selon les payouts actifs · Cliquez sur un membre pour filtrer
           </span>
         </div>
 
@@ -863,7 +878,7 @@ export const TeamPerformancePanel: React.FC<TeamPerformancePanelProps> = ({
                           {c.tier}
                         </span>
                       </td>
-                      <td className="px-4 py-3 text-right font-extrabold text-emerald-700 tabular-nums">
+                      <td className="px-4 py-3 text-right font-extrabold tabular-nums">
                         {isEditing ? (
                           <input
                             type="number"
@@ -873,8 +888,15 @@ export const TeamPerformancePanel: React.FC<TeamPerformancePanelProps> = ({
                             onChange={(e) => setEditPayout(Math.max(0, Number(e.target.value) || 0))}
                             className="w-24 rounded-lg border border-orange-400 px-2 py-1 text-right text-xs font-bold text-stone-900"
                           />
+                        ) : c.payoutStatus === 'Refusé' ? (
+                          <div className="flex flex-col items-end">
+                            <span className="text-red-500 line-through font-semibold text-[11px]">
+                              {formatMad(c.payoutMad)}
+                            </span>
+                            <span className="text-[10px] font-bold text-red-700">0 MAD actif</span>
+                          </div>
                         ) : (
-                          formatMad(c.payoutMad)
+                          <span className="text-emerald-700">{formatMad(c.payoutMad)}</span>
                         )}
                       </td>
                       <td className="px-4 py-3">
@@ -963,14 +985,27 @@ export const TeamPerformancePanel: React.FC<TeamPerformancePanelProps> = ({
                               </button>
                             </div>
                           ) : (
-                            <button
-                              type="button"
-                              onClick={() => startEditContract(c)}
-                              className="inline-flex items-center gap-1 rounded-lg border border-stone-300 bg-white px-2 py-1 text-[11px] font-semibold text-stone-700 hover:bg-stone-100"
-                            >
-                              <Pencil className="h-3 w-3" />
-                              Valider / Modifier
-                            </button>
+                            <div className="inline-flex items-center gap-1.5">
+                              {onOpenContractFiche && accessibleFicheIds?.has(c.ficheId) && (
+                                <button
+                                  type="button"
+                                  onClick={() => onOpenContractFiche(c)}
+                                  className="inline-flex items-center gap-1 rounded-lg border border-stone-200 bg-stone-50 px-2 py-1 text-[11px] font-semibold text-stone-700 hover:bg-orange-50 hover:text-orange-800 hover:border-orange-200"
+                                  title="Ouvrir les détails complets de la fiche client"
+                                >
+                                  <Eye className="h-3 w-3" />
+                                  Fiche
+                                </button>
+                              )}
+                              <button
+                                type="button"
+                                onClick={() => startEditContract(c)}
+                                className="inline-flex items-center gap-1 rounded-lg border border-stone-300 bg-white px-2 py-1 text-[11px] font-semibold text-stone-700 hover:bg-stone-100"
+                              >
+                                <Pencil className="h-3 w-3" />
+                                Valider / Modifier
+                              </button>
+                            </div>
                           )}
                         </td>
                       )}

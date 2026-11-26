@@ -2,11 +2,12 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   detectNewUnlockNotifications,
+  detectContractNotifications,
   mergeNotificationsFeed,
   countUnreadNotifications,
   markAllNotificationsRead,
 } from './notifications';
-import { evaluateAchievements } from './gamification';
+import { evaluateAchievements, type SignedContractRecord } from './gamification';
 
 test('detectNewUnlockNotifications seeds baseline silently on first run, then detects new auto achievements and awarded role badges', () => {
   const initialEval = evaluateAchievements(
@@ -79,4 +80,98 @@ test('detectNewUnlockNotifications seeds baseline silently on first run, then de
   assert.equal(countUnreadNotifications(feed), step2.created.length);
   const readFeed = markAllNotificationsRead(feed);
   assert.equal(countUnreadNotifications(readFeed), 0);
+});
+
+test('detectContractNotifications notifies supervisors when a collaborator signs and notifies on contract status transitions (Validé, Versé, Refusé)', () => {
+  const existingContract: SignedContractRecord = {
+    id: 'ctr_1',
+    orgScope: 'orange_pro_team',
+    ownerId: 'collab_1',
+    ownerName: 'Youssef Benali',
+    ficheId: 'f1',
+    numeroFiche: 'OP-001',
+    societe: 'Fiduciaire Atlas',
+    ville: 'Meknès',
+    secteur: 'fiduciaire',
+    produitOrangePro: 'Fibre Pro 200M',
+    tier: 'PME',
+    effectif: '15',
+    payoutMad: 1500,
+    payoutStatus: 'En attente',
+    signedAt: '2026-11-20T09:00:00.000Z',
+  };
+
+  // Step 1: First hydration seeds silently without spam
+  const initAdmin = detectContractNotifications(
+    { initialized: false, byId: {} },
+    [existingContract],
+    { currentUserUid: 'admin_1', canSuperviseTeam: true, nowIso: '2026-11-20T09:05:00.000Z' }
+  );
+  assert.equal(initAdmin.nextBaseline.initialized, true);
+  assert.equal(initAdmin.created.length, 0);
+
+  // Step 2: Collaborator signs a brand-new contract -> Super-Admin receives contract_signed notification
+  const newCollabContract: SignedContractRecord = {
+    ...existingContract,
+    id: 'ctr_2',
+    societe: 'Clinique Al Amal',
+    tier: 'Grand Compte',
+    payoutMad: 0,
+    payoutStatus: 'En attente',
+    signedAt: '2026-11-20T10:00:00.000Z',
+  };
+  const stepSigned = detectContractNotifications(
+    initAdmin.nextBaseline,
+    [existingContract, newCollabContract],
+    { currentUserUid: 'admin_1', canSuperviseTeam: true, nowIso: '2026-11-20T10:01:00.000Z' }
+  );
+  assert.equal(stepSigned.created.length, 1);
+  assert.equal(stepSigned.created[0].kind, 'contract_signed');
+  assert.equal(stepSigned.created[0].targetTab, 'team');
+  assert.match(stepSigned.created[0].title, /Youssef Benali/);
+  assert.match(stepSigned.created[0].message, /Clinique Al Amal/);
+
+  // Step 3: Contract status changes to Refusé -> Collaborator receives contract_status_changed notification with motif
+  const initCollab = detectContractNotifications(
+    { initialized: false, byId: {} },
+    [existingContract],
+    { currentUserUid: 'collab_1', canSuperviseTeam: false, nowIso: '2026-11-20T09:05:00.000Z' }
+  );
+  const refusedContract: SignedContractRecord = {
+    ...existingContract,
+    payoutStatus: 'Refusé',
+    refusMotif: 'Pièce justificative manquante',
+  };
+  const stepRefused = detectContractNotifications(
+    initCollab.nextBaseline,
+    [refusedContract],
+    { currentUserUid: 'collab_1', canSuperviseTeam: false, nowIso: '2026-11-20T11:00:00.000Z' }
+  );
+  assert.equal(stepRefused.created.length, 1);
+  assert.equal(stepRefused.created[0].kind, 'contract_status_changed');
+  assert.equal(stepRefused.created[0].contractMeta?.payoutStatus, 'Refusé');
+  assert.match(stepRefused.created[0].message, /Pièce justificative manquante/);
+
+  // Step 4: Contract status changes to Versé -> notification includes payout and referenceVirement
+  const paidContract: SignedContractRecord = {
+    ...existingContract,
+    payoutStatus: 'Versé',
+    referenceVirement: 'VIR-2026-991',
+  };
+  const stepPaid = detectContractNotifications(
+    stepRefused.nextBaseline,
+    [paidContract],
+    { currentUserUid: 'collab_1', canSuperviseTeam: false, nowIso: '2026-11-20T12:00:00.000Z' }
+  );
+  assert.equal(stepPaid.created.length, 1);
+  assert.equal(stepPaid.created[0].contractMeta?.payoutStatus, 'Versé');
+  assert.match(stepPaid.created[0].message, /VIR-2026-991/);
+
+  // Step 5: Re-running unchanged snapshot emits 0 duplicates
+  const stepRepeat = detectContractNotifications(
+    stepPaid.nextBaseline,
+    [paidContract],
+    { currentUserUid: 'collab_1', canSuperviseTeam: false, nowIso: '2026-11-20T12:05:00.000Z' }
+  );
+  assert.equal(stepRepeat.created.length, 0);
 });

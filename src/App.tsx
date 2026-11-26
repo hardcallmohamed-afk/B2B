@@ -47,6 +47,8 @@ import {
   Menu,
   Clock,
   Navigation,
+  Eye,
+  FileSpreadsheet,
 } from 'lucide-react';
 import { onAuthStateChanged, type User } from 'firebase/auth';
 import { doc, onSnapshot, query, where } from 'firebase/firestore';
@@ -63,6 +65,10 @@ import { AccountSettingsPanel, type UserProfileSettings } from './components/Acc
 import { NotificationBell } from './components/NotificationBell';
 import { AchievementToast } from './components/AchievementToast';
 import { CrmSidebar, CRM_TAB_META, type CrmTabId } from './components/CrmSidebar';
+import { FicheDetailModal } from './components/FicheDetailModal';
+import { QuoteModal } from './components/QuoteModal';
+import { ActiviteModal } from './components/ActiviteModal';
+import { RdvModal } from './components/RdvModal';
 import {
   buildHashFromRoute,
   getRouteBreadcrumb,
@@ -75,13 +81,16 @@ import {
 import { getUserInitials } from './utils/avatarResize';
 import {
   detectNewUnlockNotifications,
+  detectContractNotifications,
   mergeNotificationsFeed,
   markAllNotificationsRead,
   playCelebrationChime,
   triggerBrowserPushNotification,
   type AppNotification,
   type BadgeBaselineSnapshot,
+  type ContractBaselineSnapshot,
 } from './utils/notifications';
+import { buildMemberContractSyncSummary } from './utils/clientProfiles';
 import {
   moveFicheToStatut,
   computePortfolioVelocity,
@@ -174,6 +183,7 @@ import {
   adminUpdateUserManualBadges,
   createSignedContract,
   adminUpdateSignedContract,
+  adminSyncMemberContractStats,
   managerUpdateSignedContract,
   fetchTeamMemberFiches,
   getCurrentUserIdToken,
@@ -2770,6 +2780,14 @@ export default function App() {
   const badgeBaselineRef = useRef<BadgeBaselineSnapshot>({ initialized: false, unlockedIds: [] });
   const seenBadgesUidRef = useRef<string>('');
   const teamStatsHydratedRef = useRef<boolean>(false);
+  const contractBaselineRef = useRef<ContractBaselineSnapshot>({ initialized: false, byId: {} });
+  const seenContractsUidRef = useRef<string>('');
+  const signedContractsHydratedRef = useRef<boolean>(false);
+  const [detailModalFicheId, setDetailModalFicheId] = useState<string | null>(null);
+  const [quoteModalFiche, setQuoteModalFiche] = useState<FicheEntreprise | null>(null);
+  const [activiteModalFiche, setActiviteModalFiche] = useState<FicheEntreprise | null>(null);
+  const [rdvModalFiche, setRdvModalFiche] = useState<FicheEntreprise | null>(null);
+  const [detailActivityRefreshKey, setDetailActivityRefreshKey] = useState<number>(0);
 
   useEffect(() => {
     if (!profileMenuOpen) return;
@@ -3268,6 +3286,13 @@ export default function App() {
       badgeBaselineRef.current = { initialized: false, unlockedIds: [] };
       seenBadgesUidRef.current = '';
       teamStatsHydratedRef.current = false;
+      contractBaselineRef.current = { initialized: false, byId: {} };
+      seenContractsUidRef.current = '';
+      signedContractsHydratedRef.current = false;
+      setDetailModalFicheId(null);
+      setQuoteModalFiche(null);
+      setActiviteModalFiche(null);
+      setRdvModalFiche(null);
       if (!u) {
         setCloudSynced(false);
         setCloudSyncError(null);
@@ -4117,6 +4142,7 @@ export default function App() {
                 : undefined,
           });
         });
+        signedContractsHydratedRef.current = true;
         setSignedContracts(list);
       },
       (err) => {
@@ -4766,6 +4792,81 @@ export default function App() {
     canAccessWorkspace,
     myAchievementSummary,
     teamStats,
+    userProfile.notifyBadges,
+    userProfile.notifySound,
+  ]);
+
+  // Détection en temps réel des nouveaux contrats collaborateurs & changements de statut/payout
+  useEffect(() => {
+    if (!cloudUser || !cloudSynced || !canAccessWorkspace) return;
+    if (!signedContractsHydratedRef.current) return;
+    const uid = cloudUser.uid;
+    const canSuperviseTeam =
+      isSuperAdmin || currentUserRole === 'manager' || currentUserRole === 'team_lead';
+    const storageKey = `op_seen_contracts_${uid}`;
+
+    let currentBaseline = contractBaselineRef.current;
+    if (seenContractsUidRef.current !== uid) {
+      seenContractsUidRef.current = uid;
+      currentBaseline = { initialized: false, byId: {} };
+      try {
+        const raw = window.localStorage.getItem(storageKey);
+        if (raw) {
+          const parsed = JSON.parse(raw);
+          if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+            currentBaseline = {
+              initialized: true,
+              byId: parsed as ContractBaselineSnapshot['byId'],
+            };
+          }
+        }
+      } catch {
+        // Fallback to uninitialized baseline
+      }
+    }
+
+    const { nextBaseline, created } = detectContractNotifications(
+      currentBaseline,
+      signedContracts,
+      {
+        currentUserUid: uid,
+        canSuperviseTeam,
+      }
+    );
+    contractBaselineRef.current = nextBaseline;
+
+    try {
+      window.localStorage.setItem(storageKey, JSON.stringify(nextBaseline.byId));
+    } catch {
+      // Ignore quota
+    }
+
+    if (created.length === 0) return;
+
+    setNotifications((prev) => {
+      const merged = mergeNotificationsFeed(prev, created);
+      try {
+        window.localStorage.setItem(`op_notifications_${uid}`, JSON.stringify(merged));
+      } catch {
+        // Ignore quota
+      }
+      return merged;
+    });
+
+    if (userProfile.notifyBadges !== false) {
+      setAchievementToastQueue((prev) => [...prev, ...created]);
+      created.forEach((item) => triggerBrowserPushNotification(item));
+      if (userProfile.notifySound !== false) {
+        playCelebrationChime();
+      }
+    }
+  }, [
+    cloudUser,
+    cloudSynced,
+    canAccessWorkspace,
+    isSuperAdmin,
+    currentUserRole,
+    signedContracts,
     userProfile.notifyBadges,
     userProfile.notifySound,
   ]);
@@ -7075,22 +7176,41 @@ ${assistPasteText.slice(0, 6000)}`;
           ? (payload.secteur as SecteurCode)
           : signContractTarget.secteur;
       const resolvedEffectif = payload.effectif?.trim() || signContractTarget.effectif;
-      await createSignedContract({
-        id: contractId,
-        ownerId: cloudUser.uid,
-        ownerName: currentUserDisplayName,
-        ficheId: signContractTarget.id,
-        numeroFiche: signContractTarget.numeroFiche || '',
-        societe: signContractTarget.societe,
-        ville: signContractTarget.ville,
-        secteur: resolvedSecteur,
-        produitOrangePro: payload.produitOrangePro,
-        tier: payload.tier,
-        effectif: resolvedEffectif,
-        payoutMad: payload.payoutMad,
-        payoutStatus: isSuperAdmin ? 'Validé' : 'En attente',
-        signedAt: new Date().toISOString(),
-      });
+      const canSetInitialPayout =
+        isSuperAdmin || currentUserRole === 'manager' || currentUserRole === 'team_lead';
+      const createdContract = await createSignedContract(
+        {
+          id: contractId,
+          ownerId: cloudUser.uid,
+          ownerName: currentUserDisplayName,
+          ficheId: signContractTarget.id,
+          numeroFiche: signContractTarget.numeroFiche || '',
+          societe: signContractTarget.societe,
+          ville: signContractTarget.ville,
+          secteur: resolvedSecteur,
+          produitOrangePro: payload.produitOrangePro,
+          tier: payload.tier,
+          effectif: resolvedEffectif,
+          payoutMad: payload.payoutMad,
+          payoutStatus: canSetInitialPayout ? 'Validé' : 'En attente',
+          signedAt: new Date().toISOString(),
+        },
+        canSetInitialPayout
+      );
+
+      if (isSuperAdmin) {
+        const nextOwnerContracts: SignedContractRecord[] = [
+          ...signedContracts.filter((c) => c.ownerId === cloudUser.uid && c.id !== createdContract.id),
+          {
+            ...createdContract,
+            orgScope: 'orange_pro_team',
+          },
+        ];
+        void adminSyncMemberContractStats(
+          cloudUser.uid,
+          buildMemberContractSyncSummary(nextOwnerContracts)
+        );
+      }
 
       setFiches((prev) =>
         prev.map((x) =>
@@ -7107,9 +7227,9 @@ ${assistPasteText.slice(0, 6000)}`;
       );
       setSignContractTarget(null);
       notify(
-        isSuperAdmin
+        canSetInitialPayout
           ? `Contrat « ${signContractTarget.societe} » signé (${payload.payoutMad.toLocaleString('fr-FR')} MAD).`
-          : `Contrat signé ! La fiche est verrouillée et votre payout (${payload.payoutMad.toLocaleString('fr-FR')} MAD) est visible dans Équipe & Payouts.`
+          : `Contrat signé ! La fiche est verrouillée et votre dossier a été transmis à la supervision dans Équipe & Payouts.`
       );
     } catch {
       notify('Erreur lors de l’enregistrement du contrat signé.', 'err');
@@ -7153,13 +7273,42 @@ ${assistPasteText.slice(0, 6000)}`;
       return;
     }
 
+    const targetContract = signedContracts.find((c) => c.id === contractId);
+
     try {
       await managerUpdateSignedContract(contractId, {
         ...updates,
         referenceVirement: updates.payoutStatus === 'Versé' ? refVirement : undefined,
         refusMotif: updates.payoutStatus === 'Refusé' ? refusMotif : undefined,
       });
-      notify('Payout, statut de paiement et références mis à jour avec succès.');
+
+      if (isSuperAdmin && targetContract?.ownerId) {
+        const updatedOwnerContracts = signedContracts
+          .filter((c) => c.ownerId === targetContract.ownerId)
+          .map((c) =>
+            c.id === contractId
+              ? {
+                  ...c,
+                  produitOrangePro: updates.produitOrangePro,
+                  tier: updates.tier,
+                  payoutMad: updates.payoutMad,
+                  payoutStatus: updates.payoutStatus,
+                  referenceVirement: updates.payoutStatus === 'Versé' ? refVirement : undefined,
+                  refusMotif: updates.payoutStatus === 'Refusé' ? refusMotif : undefined,
+                }
+              : c
+          );
+        await adminSyncMemberContractStats(
+          targetContract.ownerId,
+          buildMemberContractSyncSummary(updatedOwnerContracts)
+        );
+      }
+
+      notify(
+        updates.payoutStatus === 'Refusé'
+          ? 'Contrat marqué « Refusé » : le payout et le classement ont été recalculés automatiquement.'
+          : 'Payout, statut de paiement et classement mis à jour avec succès.'
+      );
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Impossible de mettre à jour le payout.';
       notify(msg, 'err');
@@ -7420,6 +7569,7 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
         queueCount={achievementToastQueue.length}
         onDismiss={() => setAchievementToastQueue((prev) => prev.slice(1))}
         onOpenBadges={() => navigateCrm('badges')}
+        onOpenTeam={() => navigateCrm('team')}
       />
 
       {/* Shell CRM B2B avec barre verticale persistante + colonne principale */}
@@ -7541,6 +7691,7 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
                   notifications={notifications}
                   onMarkAllRead={handleMarkAllNotificationsRead}
                   onOpenBadges={() => navigateCrm('badges')}
+                  onOpenTeam={() => navigateCrm('team')}
                 />
 
                 {/* Menu Profil Utilisateur (Photo, Rôle, Paramètres & Déconnexion) */}
@@ -8881,6 +9032,8 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
                   setAssistAiSummary('');
                   setLastVerifyDiag('');
                 }}
+                onOpenDetail={(f) => setDetailModalFicheId(f.id)}
+                onOpenQuote={(f) => setQuoteModalFiche(f)}
                 onQuickAddInStage={(statut) => {
                   setQuickAddStatut(statut);
                   setShowQuickAdd(true);
@@ -9100,6 +9253,16 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
                                   </button>
                                 )}
                                 {renderEditable('societe', f.societe, 'Société')}
+                                <button
+                                  type="button"
+                                  data-testid={`open-fiche-detail-${f.id}`}
+                                  onClick={() => setDetailModalFicheId(f.id)}
+                                  title="Ouvrir les détails complets, besoins client & Devis PDF"
+                                  className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-orange-50 hover:bg-orange-100 text-orange-800 text-[10px] font-semibold shrink-0"
+                                >
+                                  <Eye className="w-3 h-3" />
+                                  Détails
+                                </button>
                                 {isDup && (
                                   <button
                                     type="button"
@@ -9447,6 +9610,24 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
                                 )}
                                 <button
                                   type="button"
+                                  onClick={() => setDetailModalFicheId(f.id)}
+                                  aria-label={`Voir les détails de ${f.societe}`}
+                                  title="Voir détails & profil clientèle"
+                                  className="p-1.5 rounded-lg bg-orange-50 hover:bg-orange-100 text-orange-800"
+                                >
+                                  <Eye className="w-3.5 h-3.5" />
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => setQuoteModalFiche(f)}
+                                  aria-label={`Générer Devis PDF pour ${f.societe}`}
+                                  title="Générer Devis PDF client"
+                                  className="p-1.5 rounded-lg bg-emerald-50 hover:bg-emerald-100 text-emerald-700"
+                                >
+                                  <FileSpreadsheet className="w-3.5 h-3.5" />
+                                </button>
+                                <button
+                                  type="button"
                                   onClick={() => openEmailStudio(f)}
                                   aria-label={`Studio Email IA pour ${f.societe}`}
                                   title="Studio Email IA & Skills"
@@ -9602,6 +9783,8 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
                 setAssistAiSummary('');
                 setLastVerifyDiag('');
               }}
+              onOpenDetail={(f) => setDetailModalFicheId(f.id)}
+              onOpenQuote={(f) => setQuoteModalFiche(f)}
               onQuickAddInStage={(statut) => {
                 setQuickAddStatut(statut);
                 setShowQuickAdd(true);
@@ -10279,6 +10462,12 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
                   }
                 : undefined
             }
+            accessibleFicheIds={new Set(accessibleFiches.map((f) => f.id))}
+            onOpenContractFiche={(c) => {
+              if (accessibleFiches.some((f) => f.id === c.ficheId)) {
+                setDetailModalFicheId(c.ficheId);
+              }
+            }}
           />
         )}
 
@@ -11404,6 +11593,108 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
           </div>
         </div>
       )}
+
+      {/* Modal Détails Complets d'une Fiche Entreprise (Profil Clientèle, Besoins, Activités & Devis PDF) */}
+      <FicheDetailModal
+        isOpen={Boolean(detailModalFicheId)}
+        fiche={
+          detailModalFicheId
+            ? accessibleFiches.find((f) => f.id === detailModalFicheId) ||
+              fiches.find((f) => f.id === detailModalFicheId) ||
+              null
+            : null
+        }
+        currentUserUid={cloudUser.uid}
+        isSuperAdmin={isSuperAdmin}
+        verifyingId={verifyingId}
+        activityRefreshKey={detailActivityRefreshKey}
+        onClose={() => setDetailModalFicheId(null)}
+        onChangeStatut={(targetFiche, nextStatut) => {
+          if (nextStatut === 'Signé Orange Pro') {
+            openSignContractModal(targetFiche);
+            return;
+          }
+          handleMoveFicheKanban(targetFiche.id, nextStatut);
+        }}
+        onChangeSecteur={(ficheId, nextSecteur) => {
+          setFiches((prev) =>
+            prev.map((x) => (x.id === ficheId ? { ...x, secteur: nextSecteur } : x))
+          );
+        }}
+        onOpenQuote={(f) => setQuoteModalFiche(f)}
+        onOpenActivite={(f) => setActiviteModalFiche(f)}
+        onOpenRdv={(f) => setRdvModalFiche(f)}
+        onOpenEmail={(f) => {
+          setDetailModalFicheId(null);
+          openEmailStudio(f);
+        }}
+        onOpenAiBrief={(f) => {
+          setDetailModalFicheId(null);
+          handleOpenAiBrief(f);
+        }}
+        onVerifyWeb={(f) => void handleVerifyWeb(f)}
+        onOpenAssist={(f) => {
+          setAssistModalFiche(f);
+          setAssistPasteText('');
+          setAssistAiSummary('');
+          setLastVerifyDiag('');
+        }}
+        onOpenSignContract={(f) => openSignContractModal(f)}
+        onCopyText={(val, label) => {
+          copyTextSafe(val);
+          notify(`${label} copié.`);
+        }}
+      />
+
+      {/* Modal Génération Devis Client PDF (Zéro Commission) */}
+      <QuoteModal
+        isOpen={Boolean(quoteModalFiche)}
+        onClose={() => setQuoteModalFiche(null)}
+        fiche={quoteModalFiche}
+        currentUserName={currentUserDisplayName}
+        currentUserUid={cloudUser.uid}
+        commercialEmail={cloudUser.email || undefined}
+        commercialPhone={userProfile.phonePro || undefined}
+        onFicheUpdated={(updatedFiche) => {
+          setFiches((prev) => prev.map((x) => (x.id === updatedFiche.id ? updatedFiche : x)));
+          setDetailActivityRefreshKey((k) => k + 1);
+        }}
+        onNotify={(msg, type) =>
+          notify(msg, type === 'err' ? 'err' : type === 'warn' ? 'warn' : 'ok')
+        }
+      />
+
+      {/* Modal Journalisation d'Activité CRM */}
+      <ActiviteModal
+        isOpen={Boolean(activiteModalFiche)}
+        onClose={() => setActiviteModalFiche(null)}
+        fiche={activiteModalFiche}
+        currentUserName={currentUserDisplayName}
+        currentUserUid={cloudUser.uid}
+        onFicheUpdated={(updatedFiche) => {
+          setFiches((prev) => prev.map((x) => (x.id === updatedFiche.id ? updatedFiche : x)));
+          setDetailActivityRefreshKey((k) => k + 1);
+        }}
+        onNotify={(msg, type) =>
+          notify(msg, type === 'err' ? 'err' : type === 'warn' ? 'warn' : 'ok')
+        }
+      />
+
+      {/* Modal Planification de Rendez-vous Client */}
+      <RdvModal
+        isOpen={Boolean(rdvModalFiche)}
+        onClose={() => setRdvModalFiche(null)}
+        fiche={rdvModalFiche}
+        currentUserName={currentUserDisplayName}
+        currentUserUid={cloudUser.uid}
+        onRdvConfirmed={(updatedFiche) => {
+          setFiches((prev) => prev.map((x) => (x.id === updatedFiche.id ? updatedFiche : x)));
+          setDetailActivityRefreshKey((k) => k + 1);
+        }}
+        onNotify={(msg, type) =>
+          notify(msg, type === 'err' ? 'err' : type === 'warn' ? 'warn' : 'ok')
+        }
+      />
 
       {/* Modal Confirmation Signature Orange Pro & Calcul Payout */}
       <SignContractModal

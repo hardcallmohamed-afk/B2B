@@ -1,6 +1,30 @@
-import type { BadgeRarity, EvaluatedAchievement } from './gamification';
+import {
+  formatMad,
+  type BadgeRarity,
+  type EvaluatedAchievement,
+  type PayoutStatus,
+  type SignedContractRecord,
+} from './gamification';
 
-export type NotificationKind = 'achievement_unlocked' | 'role_badge_awarded' | 'distinction_awarded';
+export type NotificationKind =
+  | 'achievement_unlocked'
+  | 'role_badge_awarded'
+  | 'distinction_awarded'
+  | 'contract_signed'
+  | 'contract_status_changed';
+
+export interface ContractNotificationMeta {
+  contractId: string;
+  ownerId: string;
+  ownerName: string;
+  societe: string;
+  produitOrangePro: string;
+  payoutMad: number;
+  payoutStatus: PayoutStatus;
+  previousStatus?: PayoutStatus;
+  referenceVirement?: string;
+  refusMotif?: string;
+}
 
 export interface AppNotification {
   id: string;
@@ -12,6 +36,8 @@ export interface AppNotification {
   xpBoost: number;
   createdAt: string;
   read: boolean;
+  targetTab?: 'badges' | 'team';
+  contractMeta?: ContractNotificationMeta;
 }
 
 export interface BadgeBaselineSnapshot {
@@ -19,7 +45,17 @@ export interface BadgeBaselineSnapshot {
   unlockedIds: string[];
 }
 
-const MAX_NOTIFICATIONS = 30;
+export interface ContractBaselineEntry {
+  payoutStatus: PayoutStatus;
+  payoutMad: number;
+}
+
+export interface ContractBaselineSnapshot {
+  initialized: boolean;
+  byId: Record<string, ContractBaselineEntry>;
+}
+
+const MAX_NOTIFICATIONS = 40;
 
 export function detectNewUnlockNotifications(
   baseline: BadgeBaselineSnapshot,
@@ -76,6 +112,7 @@ export function detectNewUnlockNotifications(
       xpBoost: item.xpBoost,
       createdAt: nowIso,
       read: false,
+      targetTab: 'badges',
     });
   }
 
@@ -86,6 +123,149 @@ export function detectNewUnlockNotifications(
     nextBaseline: {
       initialized: true,
       unlockedIds: unionIds,
+    },
+    created,
+  };
+}
+
+export function detectContractNotifications(
+  baseline: ContractBaselineSnapshot,
+  contracts: SignedContractRecord[],
+  options: {
+    currentUserUid: string;
+    canSuperviseTeam: boolean;
+    nowIso?: string;
+  }
+): {
+  nextBaseline: ContractBaselineSnapshot;
+  created: AppNotification[];
+} {
+  const nowIso = options.nowIso || new Date().toISOString();
+  const stamp = Date.parse(nowIso) || Date.now();
+  const nextById: Record<string, ContractBaselineEntry> = { ...baseline.byId };
+
+  for (const c of contracts) {
+    nextById[c.id] = {
+      payoutStatus: c.payoutStatus,
+      payoutMad: Math.max(0, Number(c.payoutMad) || 0),
+    };
+  }
+
+  if (!baseline.initialized) {
+    return {
+      nextBaseline: {
+        initialized: true,
+        byId: nextById,
+      },
+      created: [],
+    };
+  }
+
+  const created: AppNotification[] = [];
+
+  for (const c of contracts) {
+    const prev = baseline.byId[c.id];
+    const amount = Math.max(0, Number(c.payoutMad) || 0);
+    const isOwner = c.ownerId === options.currentUserUid;
+    const baseMeta: ContractNotificationMeta = {
+      contractId: c.id,
+      ownerId: c.ownerId,
+      ownerName: c.ownerName || 'Collaborateur',
+      societe: c.societe || 'Client Orange Pro',
+      produitOrangePro: c.produitOrangePro || c.tier,
+      payoutMad: amount,
+      payoutStatus: c.payoutStatus,
+      referenceVirement: c.referenceVirement,
+      refusMotif: c.refusMotif,
+    };
+
+    if (!prev) {
+      // Nouveau contrat signé : notifier Super-Admin / Manager / Chef d'équipe lorsqu'un collaborateur signe
+      if (options.canSuperviseTeam && !isOwner) {
+        created.push({
+          id: `notif_ctr_signed_${c.id}_${stamp}`,
+          kind: 'contract_signed',
+          badgeId: 'contract_signed',
+          title: `Nouveau contrat signé par ${baseMeta.ownerName}`,
+          message: `${baseMeta.societe}${c.ville ? ` (${c.ville})` : ''} · ${baseMeta.produitOrangePro} — ${formatMad(amount)} (${c.payoutStatus}).`,
+          rarity: c.tier === 'Grand Compte' ? 'epique' : 'rare',
+          xpBoost: 0,
+          createdAt: nowIso,
+          read: false,
+          targetTab: 'team',
+          contractMeta: baseMeta,
+        });
+      }
+      continue;
+    }
+
+    if (prev.payoutStatus !== c.payoutStatus) {
+      if (isOwner || options.canSuperviseTeam) {
+        let title = `Statut contrat mis à jour : ${baseMeta.societe}`;
+        let message = `Statut passé de « ${prev.payoutStatus} » à « ${c.payoutStatus} » (${formatMad(amount)}).`;
+        let rarity: BadgeRarity = 'rare';
+
+        if (c.payoutStatus === 'Refusé') {
+          title = `Contrat refusé : ${baseMeta.societe}`;
+          message = `${isOwner ? 'Votre contrat' : `Contrat de ${baseMeta.ownerName}`} a été refusé${c.refusMotif ? ` — Motif : ${c.refusMotif}` : ''}. Le payout est retiré des totaux.`;
+          rarity = 'commun';
+        } else if (c.payoutStatus === 'Versé') {
+          title = `Payout versé : ${baseMeta.societe}`;
+          message = `${formatMad(amount)} versé${isOwner ? '' : ` à ${baseMeta.ownerName}`}${c.referenceVirement ? ` (Réf. ${c.referenceVirement})` : ''}.`;
+          rarity = 'legendaire';
+        } else if (c.payoutStatus === 'Validé') {
+          title = `Contrat validé : ${baseMeta.societe}`;
+          message = `${isOwner ? 'Votre contrat' : `Contrat de ${baseMeta.ownerName}`} est validé pour ${formatMad(amount)}.`;
+          rarity = 'epique';
+        } else if (c.payoutStatus === 'En attente') {
+          title = `Contrat remis en attente : ${baseMeta.societe}`;
+          message = `${isOwner ? 'Votre contrat' : `Contrat de ${baseMeta.ownerName}`} est passé de « ${prev.payoutStatus} » à « En attente » (${formatMad(amount)}).`;
+          rarity = 'rare';
+        }
+
+        created.push({
+          id: `notif_ctr_status_${c.id}_${c.payoutStatus}_${stamp}`,
+          kind: 'contract_status_changed',
+          badgeId: `contract_${c.payoutStatus.toLowerCase()}`,
+          title,
+          message,
+          rarity,
+          xpBoost: 0,
+          createdAt: nowIso,
+          read: false,
+          targetTab: 'team',
+          contractMeta: {
+            ...baseMeta,
+            previousStatus: prev.payoutStatus,
+          },
+        });
+      }
+      continue;
+    }
+
+    if (prev.payoutMad !== amount && c.payoutStatus !== 'Refusé') {
+      if (isOwner || options.canSuperviseTeam) {
+        created.push({
+          id: `notif_ctr_payout_${c.id}_${amount}_${stamp}`,
+          kind: 'contract_status_changed',
+          badgeId: 'contract_payout_updated',
+          title: `Payout ajusté : ${baseMeta.societe}`,
+          message: `Commission ${isOwner ? '' : `de ${baseMeta.ownerName} `}ajustée de ${formatMad(prev.payoutMad)} à ${formatMad(amount)} (${c.payoutStatus}).`,
+          rarity: 'rare',
+          xpBoost: 0,
+          createdAt: nowIso,
+          read: false,
+          targetTab: 'team',
+          contractMeta: baseMeta,
+        });
+      }
+    }
+  }
+
+  return {
+    nextBaseline: {
+      initialized: true,
+      byId: nextById,
     },
     created,
   };
@@ -177,7 +357,7 @@ export function triggerBrowserPushNotification(notification: AppNotification): v
   try {
     const push = new window.Notification(notification.title, {
       body: notification.message,
-      tag: `orange_pro_${notification.badgeId}`,
+      tag: `orange_pro_${notification.id}`,
     });
     window.setTimeout(() => {
       try {

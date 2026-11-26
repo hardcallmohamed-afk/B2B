@@ -13,6 +13,8 @@ import {
   ChevronRight,
   Clock,
   AlertTriangle,
+  Eye,
+  FileSpreadsheet,
 } from 'lucide-react';
 import {
   SECTEURS_META,
@@ -39,6 +41,8 @@ interface KanbanBoardProps {
   onVerifyOne: (fiche: FicheEntreprise) => void;
   onOpenAiBrief: (fiche: FicheEntreprise) => void;
   onOpenAssist?: (fiche: FicheEntreprise) => void;
+  onOpenDetail?: (fiche: FicheEntreprise) => void;
+  onOpenQuote?: (fiche: FicheEntreprise) => void;
   onQuickAddInStage?: (statut: StatutCRM) => void;
 }
 
@@ -96,6 +100,8 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
   onVerifyOne,
   onOpenAiBrief,
   onOpenAssist,
+  onOpenDetail,
+  onOpenQuote,
   onQuickAddInStage,
 }) => {
   const [draggingId, setDraggingId] = useState<string | null>(null);
@@ -345,10 +351,21 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
                             />
                           </div>
 
-                          {/* Titre société */}
-                          <h4 className="text-xs font-bold text-stone-900 leading-snug line-clamp-2 mt-0.5">
-                            {f.societe}
-                          </h4>
+                          {/* Titre société (cliquable pour ouvrir les détails) */}
+                          {onOpenDetail ? (
+                            <button
+                              type="button"
+                              onClick={() => onOpenDetail(f)}
+                              className="text-left text-xs font-bold text-stone-900 hover:text-orange-700 hover:underline leading-snug line-clamp-2 mt-0.5 block w-full"
+                              title="Ouvrir les détails complets de la fiche"
+                            >
+                              {f.societe}
+                            </button>
+                          ) : (
+                            <h4 className="text-xs font-bold text-stone-900 leading-snug line-clamp-2 mt-0.5">
+                              {f.societe}
+                            </h4>
+                          )}
 
                           {/* Métadonnées propres sans pilules */}
                           <p className="text-[11px] text-stone-500 mt-1 truncate">
@@ -482,6 +499,28 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
                                 >
                                   <Sparkles className={`w-3.5 h-3.5 ${verifyingId === f.id ? 'animate-spin' : ''}`} />
                                 </button>
+                                {onOpenDetail && (
+                                  <button
+                                    type="button"
+                                    onClick={() => onOpenDetail(f)}
+                                    aria-label={`Détails de ${f.societe}`}
+                                    title="Voir détails & profil client"
+                                    className="p-1 rounded hover:bg-orange-50 text-stone-700 hover:text-orange-700"
+                                  >
+                                    <Eye className="w-3.5 h-3.5" />
+                                  </button>
+                                )}
+                                {onOpenQuote && (
+                                  <button
+                                    type="button"
+                                    onClick={() => onOpenQuote(f)}
+                                    aria-label={`Devis PDF pour ${f.societe}`}
+                                    title="Générer Devis PDF"
+                                    className="p-1 rounded hover:bg-emerald-50 text-emerald-700"
+                                  >
+                                    <FileSpreadsheet className="w-3.5 h-3.5" />
+                                  </button>
+                                )}
                                 {onOpenAssist && (
                                   <button
                                     type="button"

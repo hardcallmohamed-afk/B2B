@@ -741,6 +741,35 @@ export async function adminUpdateSignedContract(
   await updateOrUpsertSignedContract(contractId, updates, `signed_contracts/${contractId}`);
 }
 
+/**
+ * Super-Admin helper: immediately recalculates & persists /team_stats/{targetUid}
+ * (totalContracts, totalPayoutMad, monthlyHistory) after a contract is signed,
+ * validated, paid, or refused so every collaborator's leaderboard stays live.
+ */
+export async function adminSyncMemberContractStats(
+  targetUid: string,
+  summary: {
+    totalContracts: number;
+    totalPayoutMad: number;
+    monthlyHistory: string[];
+  }
+): Promise<void> {
+  if (!targetUid) return;
+  const ref = doc(db, 'team_stats', targetUid);
+  try {
+    const snap = await getDoc(ref);
+    if (!snap.exists()) return;
+    await updateDoc(ref, {
+      totalContracts: Math.max(0, Math.round(summary.totalContracts)),
+      totalPayoutMad: Math.max(0, Math.round(summary.totalPayoutMad)),
+      monthlyHistory: summary.monthlyHistory.slice(-18),
+      updatedAt: serverTimestamp(),
+    });
+  } catch {
+    // Non-fatal: live /signed_contracts overlay still keeps leaderboard accurate
+  }
+}
+
 const BATCH_LIMIT = 400;
 
 function buildMutableFicheUpdate(docData: SanitizedFicheDoc): DocumentData {

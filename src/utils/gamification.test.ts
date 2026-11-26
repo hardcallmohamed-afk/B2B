@@ -324,5 +324,168 @@ test('Refusé contracts are excluded from leaderboard, monthly evolution, and pa
   assert.equal(summary.enAttenteMad, 0);
   assert.equal(summary.totalSignedContractsCount, 1);
   assert.equal(summary.totalSignedPayoutMad, 1500);
+  assert.equal(summary.refusedContractsCount, 1);
+  assert.equal(summary.refusedPayoutMad, 900);
+  assert.deepEqual(buildMonthlyHistoryStrings(contracts), ['2026-06:1:1500']);
 });
+
+test('Stale team_stats values drop immediately when all or some contracts are marked Refusé and leaderboard ranks by payoutMad first', () => {
+  const now = new Date('2026-06-15T10:00:00Z');
+  const members: TeamStatRecord[] = [
+    {
+      uid: 'u1',
+      orgScope: 'orange_pro_team',
+      displayName: 'Karim (3 petits contrats)',
+      role: 'commercial',
+      zone: 'Meknès',
+      active: true,
+      totalProspects: 12,
+      totalQualified: 5,
+      totalContracts: 3, // stale before refusal
+      totalPayoutMad: 4500, // stale before refusal
+      xp: 800,
+      unlockedCount: 4,
+      manualBadges: [],
+      monthlyHistory: ['2026-06:3:4500'],
+    },
+    {
+      uid: 'u2',
+      orgScope: 'orange_pro_team',
+      displayName: 'Nadia (1 Grand Compte)',
+      role: 'commercial',
+      zone: 'Casablanca',
+      active: true,
+      totalProspects: 8,
+      totalQualified: 3,
+      totalContracts: 1,
+      totalPayoutMad: 3500,
+      xp: 600,
+      unlockedCount: 3,
+      manualBadges: [],
+      monthlyHistory: ['2026-06:1:3500'],
+    },
+  ];
+
+  // Karim had 2 contracts: 1 active (1000 MAD) + 1 refused (3500 MAD); Nadia has 1 active (3500 MAD)
+  const contracts: SignedContractRecord[] = [
+    {
+      id: 'k1',
+      orgScope: 'orange_pro_team',
+      ownerId: 'u1',
+      ownerName: 'Karim',
+      ficheId: 'f1',
+      numeroFiche: 'MK-1',
+      societe: 'TPE Alpha',
+      ville: 'Meknès',
+      secteur: 'commerce',
+      produitOrangePro: 'Pack TPE',
+      tier: 'TPE / Libéral',
+      effectif: '5',
+      payoutMad: 1000,
+      payoutStatus: 'Validé',
+      signedAt: '2026-06-05T10:00:00Z',
+    },
+    {
+      id: 'k2',
+      orgScope: 'orange_pro_team',
+      ownerId: 'u1',
+      ownerName: 'Karim',
+      ficheId: 'f2',
+      numeroFiche: 'MK-2',
+      societe: 'TPE Beta',
+      ville: 'Meknès',
+      secteur: 'commerce',
+      produitOrangePro: 'Pack TPE',
+      tier: 'TPE / Libéral',
+      effectif: '6',
+      payoutMad: 3500,
+      payoutStatus: 'Refusé',
+      refusMotif: 'Client annulé',
+      signedAt: '2026-06-06T10:00:00Z',
+    },
+    {
+      id: 'n1',
+      orgScope: 'orange_pro_team',
+      ownerId: 'u2',
+      ownerName: 'Nadia',
+      ficheId: 'f3',
+      numeroFiche: 'CS-1',
+      societe: 'Clinique Royale',
+      ville: 'Casablanca',
+      secteur: 'clinique',
+      produitOrangePro: 'Fibre Dédiée',
+      tier: 'Grand Compte',
+      effectif: '60',
+      payoutMad: 3500,
+      payoutStatus: 'Versé',
+      referenceVirement: 'VIR-2026-01',
+      signedAt: '2026-06-07T10:00:00Z',
+    },
+  ];
+
+  const leaderboard = buildTeamLeaderboard(members, contracts);
+  // Nadia (3500 MAD) MUST rank #1 ahead of Karim (1000 MAD after refusal)
+  assert.equal(leaderboard[0].uid, 'u2');
+  assert.equal(leaderboard[0].payoutMad, 3500);
+  assert.equal(leaderboard[0].rank, 1);
+
+  assert.equal(leaderboard[1].uid, 'u1');
+  assert.equal(leaderboard[1].contractsCount, 1);
+  assert.equal(leaderboard[1].payoutMad, 1000);
+  assert.equal(leaderboard[1].rank, 2);
+
+  // Even when ALL of Karim's contracts are refused, payout drops to 0 (not stale 4500)
+  const allRefusedForKarim = contracts.map((c) =>
+    c.ownerId === 'u1' ? { ...c, payoutStatus: 'Refusé' as const, refusMotif: 'Rejeté' } : c
+  );
+  const lbAfterFullRefusal = buildTeamLeaderboard(members, allRefusedForKarim);
+  const karimRow = lbAfterFullRefusal.find((r) => r.uid === 'u1');
+  assert.equal(karimRow?.contractsCount, 0);
+  assert.equal(karimRow?.payoutMad, 0);
+
+  const summaryAfterFullRefusal = computeCurrentMonthPayoutSummary(
+    allRefusedForKarim,
+    members,
+    'u1',
+    now
+  );
+  assert.equal(summaryAfterFullRefusal.totalSignedContractsCount, 0);
+  assert.equal(summaryAfterFullRefusal.totalSignedPayoutMad, 0);
+  assert.equal(summaryAfterFullRefusal.currentMonthPayoutMad, 0);
+  assert.equal(summaryAfterFullRefusal.refusedContractsCount, 2);
+
+  const evoAfterFullRefusal = buildTeamMonthlyEvolution(members, allRefusedForKarim, 'u1', now);
+  const juneKarim = evoAfterFullRefusal.find((p) => p.ym === '2026-06');
+  assert.equal(juneKarim?.contracts, 0);
+  assert.equal(juneKarim?.payoutMad, 0);
+});
+
+test('getClientTypeProfile provides authentic telecom details for every sector code', async () => {
+  const { getClientTypeProfile } = await import('./clientProfiles');
+  const sectors = [
+    'fiduciaire',
+    'clinique',
+    'notaire',
+    'immobilier',
+    'riad_hotellerie',
+    'auto_ecole',
+    'pme',
+    'industrie',
+    'btp',
+    'gros',
+    'enseignement',
+    'liberal',
+    'commerce',
+  ] as const;
+
+  for (const secteur of sectors) {
+    const profile = getClientTypeProfile({ secteur, effectif: '25' });
+    assert.ok(profile.clientTypeLabel.length > 5);
+    assert.ok(profile.telecomChallenges.length >= 2);
+    assert.ok(profile.recommendedSolutions.length >= 2);
+    assert.ok(profile.salesArguments.length >= 2);
+    assert.ok(profile.discoveryQuestions.length >= 2);
+  }
+});
+
 
