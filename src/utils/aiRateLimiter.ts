@@ -204,7 +204,12 @@ export function validatePublicHttpUrl(rawUrl: unknown): UrlValidationResult {
 
   const host = parsed.hostname.toLowerCase();
 
-  // Localhost, IPv6 loopback, et métadonnées cloud
+  // Reject ambiguous numeric hosts (decimal, octal, hex)
+  if (/^(?:0x[0-9a-f]+|0[0-7]+|\d+)$/i.test(host)) {
+    return { valid: false, error: 'Accès interdit : format d’hôte numérique ambigu.' };
+  }
+
+  // Localhost, IPv6 loopback, unique-local, link-local, et métadonnées cloud
   if (
     host === 'localhost' ||
     host === '127.0.0.1' ||
@@ -212,6 +217,9 @@ export function validatePublicHttpUrl(rawUrl: unknown): UrlValidationResult {
     host === '[::1]' ||
     host === '0.0.0.0' ||
     host === 'metadata.google.internal' ||
+    host.startsWith('fc') ||
+    host.startsWith('fd') ||
+    host.startsWith('fe80:') ||
     host.endsWith('.localhost') ||
     host.endsWith('.local') ||
     host.endsWith('.internal')
@@ -219,7 +227,12 @@ export function validatePublicHttpUrl(rawUrl: unknown): UrlValidationResult {
     return { valid: false, error: 'Accès interdit : les adresses locales ou internes sont bloquées (anti-SSRF).' };
   }
 
-  // Vérification des plages IPv4 privées
+  // IPv4-mapped check (e.g. ::ffff:127.0.0.1)
+  if (host.includes('ffff:') || host.includes('::ffff:')) {
+    return { valid: false, error: 'Accès interdit : adresses IPv4 mappées non autorisées.' };
+  }
+
+  // Vérification des plages IPv4 privées, CGNAT et TEST-NET
   const ipv4Match = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
   if (ipv4Match) {
     const o1 = Number(ipv4Match[1]);
@@ -247,13 +260,25 @@ export function validatePublicHttpUrl(rawUrl: unknown): UrlValidationResult {
     if (o1 === 192 && o2 === 168) {
       return { valid: false, error: 'Accès interdit aux adresses réseau privées (192.168.x.x).' };
     }
+    // 100.64.0.0/10 (CGNAT)
+    if (o1 === 100 && o2 >= 64 && o2 <= 127) {
+      return { valid: false, error: 'Accès interdit aux adresses CGNAT (100.64.x.x).' };
+    }
+    // 192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24 (TEST-NET)
+    if (
+      (o1 === 192 && o2 === 0 && o3 === 2) ||
+      (o1 === 198 && o2 === 51 && o3 === 100) ||
+      (o1 === 203 && o2 === 0 && o3 === 113)
+    ) {
+      return { valid: false, error: 'Accès interdit aux adresses de test (TEST-NET).' };
+    }
     // 169.254.0.0/16 (Link-local & AWS/GCP metadata)
     if (o1 === 169 && o2 === 254) {
       return { valid: false, error: 'Accès interdit aux adresses de liaison locale ou métadonnées cloud.' };
     }
-    // 0.0.0.0/8
-    if (o1 === 0) {
-      return { valid: false, error: 'Accès interdit à l’adresse réseau 0.0.0.0.' };
+    // 0.0.0.0/8 & 255.255.255.255
+    if (o1 === 0 || (o1 === 255 && o2 === 255 && o3 === 255 && o4 === 255)) {
+      return { valid: false, error: 'Accès interdit à l’adresse réseau 0.0.0.0 ou diffusion.' };
     }
   }
 

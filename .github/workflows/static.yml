@@ -23,6 +23,7 @@ jobs:
         with:
           node-version: 22
       - run: npm install --include=dev --legacy-peer-deps
+      - run: npm test
       - run: npx vite build --base=/B2B/
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3

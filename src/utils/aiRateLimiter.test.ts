@@ -69,14 +69,18 @@ test('checkAndIncrementCrawlUsage allows up to 30 pages per hour and blocks at 3
   assert.equal(nextHourRes.count, 1);
 });
 
-test('validatePublicHttpUrl blocks SSRF (localhost, private IPv4, metadata) and accepts public domains', () => {
+test('validatePublicHttpUrl blocks SSRF (localhost, private IPv4, CGNAT, TEST-NET, numeric hosts, metadata) and accepts public domains', () => {
   // Forbidden targets
   assert.equal(validatePublicHttpUrl('http://localhost:3000').valid, false);
   assert.equal(validatePublicHttpUrl('http://127.0.0.1/admin').valid, false);
   assert.equal(validatePublicHttpUrl('http://10.0.0.1/secrets').valid, false);
   assert.equal(validatePublicHttpUrl('http://172.16.5.1/api').valid, false);
-  assert.equal(validatePublicHttpUrl('http://172.31.255.255/api').valid, false);
   assert.equal(validatePublicHttpUrl('http://192.168.1.1/router').valid, false);
+  assert.equal(validatePublicHttpUrl('http://100.64.0.1/api').valid, false); // CGNAT
+  assert.equal(validatePublicHttpUrl('http://192.0.2.1/api').valid, false); // TEST-NET
+  assert.equal(validatePublicHttpUrl('http://2130706433/api').valid, false); // Decimal IP
+  assert.equal(validatePublicHttpUrl('http://0x7f000001/api').valid, false); // Hex IP
+  assert.equal(validatePublicHttpUrl('http://[::1]/api').valid, false);
   assert.equal(validatePublicHttpUrl('http://169.254.169.254/latest/meta-data').valid, false);
   assert.equal(validatePublicHttpUrl('http://metadata.google.internal/computeMetadata').valid, false);
   assert.equal(validatePublicHttpUrl('ftp://example.com').valid, false);

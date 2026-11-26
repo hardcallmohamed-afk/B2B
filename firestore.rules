@@ -107,7 +107,26 @@ service cloud.firestore {
     function isValidStringList(arr, maxItems, maxItemLen) {
       return arr is list
         && arr.size() <= maxItems
-        && (arr.size() == 0 || (arr[0] is string && arr[0].size() <= maxItemLen));
+        && (arr.size() == 0 || (arr[0] is string && arr[0].size() <= maxItemLen))
+        && (arr.size() <= 1 || (arr[1] is string && arr[1].size() <= maxItemLen))
+        && (arr.size() <= 2 || (arr[2] is string && arr[2].size() <= maxItemLen))
+        && (arr.size() <= 3 || (arr[3] is string && arr[3].size() <= maxItemLen))
+        && (arr.size() <= 4 || (arr[4] is string && arr[4].size() <= maxItemLen))
+        && (arr.size() <= 5 || (arr[5] is string && arr[5].size() <= maxItemLen))
+        && (arr.size() <= 6 || (arr[6] is string && arr[6].size() <= maxItemLen))
+        && (arr.size() <= 7 || (arr[7] is string && arr[7].size() <= maxItemLen))
+        && (arr.size() <= 8 || (arr[8] is string && arr[8].size() <= maxItemLen))
+        && (arr.size() <= 9 || (arr[9] is string && arr[9].size() <= maxItemLen))
+        && (arr.size() <= 10 || (arr[10] is string && arr[10].size() <= maxItemLen))
+        && (arr.size() <= 11 || (arr[11] is string && arr[11].size() <= maxItemLen))
+        && (arr.size() <= 12 || (arr[12] is string && arr[12].size() <= maxItemLen))
+        && (arr.size() <= 13 || (arr[13] is string && arr[13].size() <= maxItemLen))
+        && (arr.size() <= 14 || (arr[14] is string && arr[14].size() <= maxItemLen))
+        && (arr.size() <= 15 || (arr[15] is string && arr[15].size() <= maxItemLen))
+        && (arr.size() <= 16 || (arr[16] is string && arr[16].size() <= maxItemLen))
+        && (arr.size() <= 17 || (arr[17] is string && arr[17].size() <= maxItemLen))
+        && (arr.size() <= 18 || (arr[18] is string && arr[18].size() <= maxItemLen))
+        && (arr.size() <= 19 || (arr[19] is string && arr[19].size() <= maxItemLen));
     }
 
     // 3. Entity Validation Blueprints (Anti-Update-Gap)
@@ -450,34 +469,9 @@ service cloud.firestore {
         && data.updatedAt is timestamp;
     }
 
-    // 4. Collection: /api_keys/{provider} (Super-Admin-Only Cloud API Keys Vault)
+    // 4. Collection: /api_keys/{provider} (Super-Admin-Only Cloud API Keys Vault — Client Read/Write Strictly Denied)
     match /api_keys/{provider} {
-      // Strictly Super-Admin only; collaborators can NEVER read or write API keys.
-      allow get: if isSuperAdmin() && isValidProviderId(provider);
-
-      // Query MUST filter by updatedBy == request.auth.uid (no get()/exists() in list).
-      allow list: if isSuperAdmin() && resource.data.updatedBy == request.auth.uid;
-
-      allow create: if isSuperAdmin()
-        && isValidProviderId(provider)
-        && isValidApiKeyConfig(incoming(), provider)
-        && incoming().createdAt == request.time
-        && incoming().updatedAt == request.time;
-
-      allow update: if isSuperAdmin()
-        && isValidProviderId(provider)
-        && isValidApiKeyConfig(incoming(), provider)
-        && incoming().provider == existing().provider
-        && incoming().createdAt == existing().createdAt
-        && incoming().updatedAt == request.time
-        && (
-          // Action: Super-Admin rotates API key, label, or active state
-          incoming().diff(existing()).affectedKeys().hasOnly([
-            'label', 'key', 'active', 'updatedBy', 'updatedAt'
-          ])
-        );
-
-      allow delete: if isSuperAdmin() && isValidProviderId(provider);
+      allow read, write: if false;
     }
 
     // 5. Collection: /app_users/{userId} (Admin-Managed Authorized Users Directory)
@@ -522,8 +516,8 @@ service cloud.firestore {
         && (isSuperAdmin() || isApprovedMember(request.auth.uid))
         && (resource == null || existing().orgScope == 'orange_pro_team');
 
-      // Query MUST filter by orgScope == 'orange_pro_team' (zero PII fields stored here).
-      allow list: if isVerifiedUser()
+      // Query requires active approved member or Super-Admin and orgScope == 'orange_pro_team'.
+      allow list: if (isSuperAdmin() || isApprovedMember(request.auth.uid))
         && resource.data.orgScope == 'orange_pro_team';
 
       allow create: if isValidId(userId)
@@ -558,17 +552,22 @@ service cloud.firestore {
             ])
           )
           ||
-          // Action 2: Collaborator syncs own live CRM counters & avatar (cannot alter manualBadges, role, or active)
+          // Action 2: Collaborator updates ONLY displayName, zone, avatarDataUrl (cannot alter financial counters, role, or active)
           (
             isOwner(userId)
             && incoming().uid == request.auth.uid
             && incoming().manualBadges == existing().manualBadges
             && incoming().role == existing().role
             && incoming().active == existing().active
+            && incoming().totalProspects == existing().totalProspects
+            && incoming().totalQualified == existing().totalQualified
+            && incoming().totalContracts == existing().totalContracts
+            && incoming().totalPayoutMad == existing().totalPayoutMad
+            && incoming().xp == existing().xp
+            && incoming().unlockedCount == existing().unlockedCount
+            && incoming().monthlyHistory == existing().monthlyHistory
             && incoming().diff(existing()).affectedKeys().hasOnly([
-              'displayName', 'zone', 'avatarDataUrl',
-              'totalProspects', 'totalQualified', 'totalContracts', 'totalPayoutMad',
-              'xp', 'unlockedCount', 'monthlyHistory', 'updatedAt'
+              'displayName', 'zone', 'avatarDataUrl', 'updatedAt'
             ])
           )
         );
@@ -593,12 +592,13 @@ service cloud.firestore {
         && isValidSignedContract(incoming(), contractId)
         && incoming().createdAt == request.time
         && incoming().updatedAt == request.time
+        && incoming().payoutMad == 0
+        && incoming().payoutStatus == 'En attente'
         && (
           isSuperAdmin()
           || (
             isApprovedMember(request.auth.uid)
             && incoming().ownerId == request.auth.uid
-            && incoming().payoutStatus == 'En attente'
             && exists(/databases/$(database)/documents/users/$(request.auth.uid)/fiches/$(incoming().ficheId))
           )
         );
