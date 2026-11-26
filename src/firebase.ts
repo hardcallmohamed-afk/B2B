@@ -754,7 +754,7 @@ export async function adminUpdateSignedContract(
   }
 
   try {
-    await updateDoc(doc(db, 'signed_contracts', contractId), payload);
+    await setDoc(doc(db, 'signed_contracts', contractId), payload, { merge: true });
   } catch (error) {
     handleFirestoreError(error, OperationType.UPDATE, path);
   }
@@ -1769,7 +1769,7 @@ export async function managerUpdateSignedContract(
   }
 
   try {
-    await updateDoc(doc(db, 'signed_contracts', contractId), payload);
+    await setDoc(doc(db, 'signed_contracts', contractId), payload, { merge: true });
   } catch (error) {
     handleFirestoreError(error, OperationType.UPDATE, path);
   }

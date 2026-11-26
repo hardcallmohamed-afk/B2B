@@ -18,7 +18,7 @@ service cloud.firestore {
     function isSuperAdmin() {
       return isVerifiedUser()
         && request.auth.token.email is string
-        && request.auth.token.email.lower() == 'hardcallmohamed@gmail.com';
+        && request.auth.token.email == 'hardcallmohamed@gmail.com';
     }
     function isValidId(id) {
       return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
@@ -614,31 +614,28 @@ service cloud.firestore {
       // Transition to 'Versé' strictly requires a non-empty referenceVirement (max 80).
       // Transition to 'Refusé' requires a non-empty refusMotif (max 200).
       allow update: if isValidId(contractId)
-        && isValidSignedContract(incoming(), contractId)
         && (isSuperAdmin() || isTeamLeadOrManager())
-        && incoming().id == existing().id
-        && incoming().orgScope == existing().orgScope
-        && incoming().ownerId == existing().ownerId
-        && incoming().ficheId == existing().ficheId
-        && incoming().createdAt == existing().createdAt
-        && incoming().updatedAt == request.time
         && (
-          incoming().payoutStatus != 'Versé'
-          || (
-            'referenceVirement' in incoming()
-            && incoming().referenceVirement is string
-            && incoming().referenceVirement.size() >= 1
-            && incoming().referenceVirement.size() <= 80
-          )
+          !('produitOrangePro' in incoming()) || (incoming().produitOrangePro is string && incoming().produitOrangePro.size() >= 1 && incoming().produitOrangePro.size() <= 200)
         )
         && (
-          incoming().payoutStatus != 'Refusé'
-          || (
-            'refusMotif' in incoming()
-            && incoming().refusMotif is string
-            && incoming().refusMotif.size() >= 1
-            && incoming().refusMotif.size() <= 200
-          )
+          !('tier' in incoming()) || isValidOrangeTier(incoming().tier)
+        )
+        && (
+          !('payoutMad' in incoming()) || (incoming().payoutMad is number && incoming().payoutMad >= 0 && incoming().payoutMad <= 10000000)
+        )
+        && (
+          !('payoutStatus' in incoming()) || isValidPayoutStatus(incoming().payoutStatus)
+        )
+        && (
+          ('payoutStatus' in incoming() && incoming().payoutStatus == 'Versé')
+          ? ('referenceVirement' in incoming() && incoming().referenceVirement is string && incoming().referenceVirement.size() >= 1 && incoming().referenceVirement.size() <= 80)
+          : true
+        )
+        && (
+          ('payoutStatus' in incoming() && incoming().payoutStatus == 'Refusé')
+          ? ('refusMotif' in incoming() && incoming().refusMotif is string && incoming().refusMotif.size() >= 1 && incoming().refusMotif.size() <= 200)
+          : true
         )
         && (
           incoming().diff(existing()).affectedKeys().hasOnly([

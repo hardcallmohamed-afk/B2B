@@ -7103,9 +7103,11 @@ ${assistPasteText.slice(0, 6000)}`;
       payoutMad: number;
       payoutStatus: PayoutStatus;
       referenceVirement?: string;
+      refusMotif?: string;
     }
   ) => {
     let refVirement = updates.referenceVirement;
+    let refusMotif = updates.refusMotif;
     if (updates.payoutStatus === 'Versé' && !refVirement) {
       const inputRef = window.prompt(
         'Veuillez saisir la référence de virement bancaire (ex: VIR-2026-98124) pour valider le versement :',
@@ -7117,13 +7119,25 @@ ${assistPasteText.slice(0, 6000)}`;
       }
       refVirement = inputRef.trim().slice(0, 80);
     }
+    if (updates.payoutStatus === 'Refusé' && !refusMotif) {
+      const inputMotif = window.prompt(
+        'Veuillez saisir le motif de refus du contrat :',
+        ''
+      );
+      if (!inputMotif || !inputMotif.trim()) {
+        notify('Mise à jour annulée : le motif de refus est obligatoire pour le statut « Refusé ».', 'warn');
+        return;
+      }
+      refusMotif = inputMotif.trim().slice(0, 200);
+    }
 
     try {
       await managerUpdateSignedContract(contractId, {
         ...updates,
         referenceVirement: refVirement,
+        refusMotif,
       });
-      notify('Payout, statut de paiement et référence de virement mis à jour avec succès.');
+      notify('Payout, statut de paiement et références mis à jour avec succès.');
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Impossible de mettre à jour le payout.';
       notify(msg, 'err');
