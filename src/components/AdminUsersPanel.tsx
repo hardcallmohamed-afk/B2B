@@ -73,6 +73,7 @@ import {
   probeApiKeyProviderViaServer,
   type ApiKeyDetectionResult,
 } from '../utils/apiKeyDetector';
+import { isStaticHostingEnvironment } from '../utils/aiCopilotClient';
 
 const CLOUD_API_PROVIDERS = [
   { id: 'groq', label: 'Groq (Llama / Mixtral)' },
@@ -681,15 +682,193 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
     }
   };
 
+  const testCloudVaultKeyDirectly = async (
+    providerId: string
+  ): Promise<{ ok: boolean; model: string; message: string }> => {
+    const normalized = providerId.toLowerCase();
+    const record =
+      cloudApiKeys.find((k) => k.provider.toLowerCase() === normalized && k.active && k.key?.trim()) ||
+      cloudApiKeys.find((k) => k.provider.toLowerCase() === normalized && k.key?.trim());
+    const secret = String(record?.key || '').trim();
+    if (!secret) {
+      return {
+        ok: false,
+        model: normalized,
+        message: `Aucune clé enregistrée pour « ${normalized} » dans le Coffre Cloud.`,
+      };
+    }
+
+    const promptText =
+      'Réponds en une phrase courte en français : confirme que la connexion Orange Pro B2B fonctionne.';
+
+    try {
+      if (normalized === 'gemini') {
+        const model = 'gemini-2.5-flash';
+        const res = await fetch(
+          `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(secret)}`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ contents: [{ parts: [{ text: promptText }] }] }),
+            signal: AbortSignal.timeout(15000),
+          }
+        );
+        const json = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          return {
+            ok: false,
+            model,
+            message: json?.error?.message || `Erreur Gemini (HTTP ${res.status}).`,
+          };
+        }
+        const reply = (json?.candidates?.[0]?.content?.parts || [])
+          .map((p: { text?: string }) => p.text || '')
+          .join(' ')
+          .trim();
+        return {
+          ok: Boolean(reply),
+          model,
+          message: reply || 'Réponse Gemini reçue.',
+        };
+      }
+
+      if (normalized === 'anthropic') {
+        const model = 'claude-3-5-haiku-latest';
+        const res = await fetch('https://api.anthropic.com/v1/messages', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-api-key': secret,
+            'anthropic-version': '2023-06-01',
+            'anthropic-dangerous-direct-browser-access': 'true',
+          },
+          body: JSON.stringify({
+            model,
+            max_tokens: 180,
+            messages: [{ role: 'user', content: promptText }],
+          }),
+          signal: AbortSignal.timeout(15000),
+        });
+        const json = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          return {
+            ok: false,
+            model,
+            message: json?.error?.message || `Erreur Anthropic (HTTP ${res.status}).`,
+          };
+        }
+        const reply = Array.isArray(json?.content)
+          ? json.content.map((p: { text?: string }) => p?.text || '').join(' ').trim()
+          : '';
+        return {
+          ok: Boolean(reply),
+          model,
+          message: reply || 'Réponse Anthropic reçue.',
+        };
+      }
+
+      const openAiCompatConfig: Record<
+        string,
+        { url: string; model: string; extraHeaders?: Record<string, string> }
+      > = {
+        groq: {
+          url: 'https://api.groq.com/openai/v1/chat/completions',
+          model: 'llama-3.3-70b-versatile',
+        },
+        mistral: {
+          url: 'https://api.mistral.ai/v1/chat/completions',
+          model: 'mistral-small-latest',
+        },
+        openrouter: {
+          url: 'https://openrouter.ai/api/v1/chat/completions',
+          model: 'openrouter/free',
+          extraHeaders: {
+            'HTTP-Referer':
+              typeof window !== 'undefined' ? window.location.origin : 'https://orange-pro-mdm.local',
+            'X-Title': 'Orange Pro B2B MDM Studio',
+          },
+        },
+        openai: {
+          url: 'https://api.openai.com/v1/chat/completions',
+          model: 'gpt-4o-mini',
+        },
+        deepseek: {
+          url: 'https://api.deepseek.com/chat/completions',
+          model: 'deepseek-chat',
+        },
+      };
+
+      const cfg = openAiCompatConfig[normalized];
+      if (!cfg) {
+        return {
+          ok: false,
+          model: normalized,
+          message: `Test direct non pris en charge pour « ${normalized} ».`,
+        };
+      }
+
+      const res = await fetch(cfg.url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${secret}`,
+          ...(cfg.extraHeaders || {}),
+        },
+        body: JSON.stringify({
+          model: cfg.model,
+          temperature: 0.2,
+          messages: [{ role: 'user', content: promptText }],
+        }),
+        signal: AbortSignal.timeout(15000),
+      });
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        return {
+          ok: false,
+          model: cfg.model,
+          message: json?.message || json?.error?.message || `Erreur ${normalized} (HTTP ${res.status}).`,
+        };
+      }
+      const reply = String(json?.choices?.[0]?.message?.content || '').trim();
+      return {
+        ok: Boolean(reply),
+        model: String(json?.model || cfg.model),
+        message: reply || 'Connexion validée.',
+      };
+    } catch (err) {
+      return {
+        ok: false,
+        model: normalized,
+        message: err instanceof Error ? err.message : 'Erreur réseau lors du test direct.',
+      };
+    }
+  };
+
   const handleTestSecureProxy = async (providerId: string) => {
     setProxyTestBusy(providerId);
     setProxyTestResult(null);
     try {
+      if (isStaticHostingEnvironment()) {
+        const direct = await testCloudVaultKeyDirectly(providerId);
+        const formatted = direct.ok
+          ? `${direct.message} (${direct.model} · Test direct Coffre Cloud)`
+          : direct.message;
+        setProxyTestResult({ ok: direct.ok, provider: providerId, message: formatted });
+        onNotify(
+          direct.ok
+            ? `Clé ${providerId} du Coffre Cloud validée (${direct.model}).`
+            : formatted,
+          direct.ok ? 'ok' : 'err'
+        );
+        return;
+      }
+
       const idToken = await getCurrentUserIdToken();
       const res = await fetch('/api/ai/groq-secure', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
+          Accept: 'application/json',
           Authorization: `Bearer ${idToken}`,
         },
         body: JSON.stringify({
@@ -698,13 +877,37 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
             'Réponds en une phrase courte en français : confirme que la connexion sécurisée Orange Pro B2B fonctionne.',
         }),
       });
-      const data = (await res.json().catch(() => ({}))) as {
-        reply?: string;
-        model?: string;
-        error?: string;
-      };
+      const rawText = await res.text();
+      let data: { reply?: string; model?: string; error?: string } = {};
+      if (rawText.trim()) {
+        try {
+          const parsed = JSON.parse(rawText);
+          if (parsed && typeof parsed === 'object') data = parsed;
+        } catch {
+          data = {};
+        }
+      }
+
+      const shouldFallbackDirect =
+        !res.ok &&
+        (res.status === 404 ||
+          res.status === 405 ||
+          res.status === 502 ||
+          res.status === 503 ||
+          !data.error);
+
+      if (shouldFallbackDirect) {
+        const direct = await testCloudVaultKeyDirectly(providerId);
+        if (direct.ok) {
+          const okMsg = `${direct.message} (${direct.model} · Test direct Coffre Cloud)`;
+          setProxyTestResult({ ok: true, provider: providerId, message: okMsg });
+          onNotify(`Clé ${providerId} validée en mode direct (${direct.model}).`);
+          return;
+        }
+      }
+
       if (!res.ok) {
-        const errMsg = data.error || `Erreur serveur HTTP ${res.status}.`;
+        const errMsg = data.error || `Service proxy indisponible (HTTP ${res.status}).`;
         setProxyTestResult({ ok: false, provider: providerId, message: errMsg });
         onNotify(errMsg, 'err');
         return;
@@ -713,7 +916,14 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
       setProxyTestResult({ ok: true, provider: providerId, message: okMsg });
       onNotify(`Proxy serveur sécurisé (${providerId}) opérationnel.`);
     } catch (err) {
-      const msg = err instanceof Error ? err.message : 'Erreur réseau lors du test du proxy.';
+      const direct = await testCloudVaultKeyDirectly(providerId);
+      if (direct.ok) {
+        const okMsg = `${direct.message} (${direct.model} · Test direct Coffre Cloud)`;
+        setProxyTestResult({ ok: true, provider: providerId, message: okMsg });
+        onNotify(`Clé ${providerId} validée en mode direct (${direct.model}).`);
+        return;
+      }
+      const msg = err instanceof Error ? err.message : 'Erreur réseau lors du test de la clé.';
       setProxyTestResult({ ok: false, provider: providerId, message: msg });
       onNotify(msg, 'err');
     } finally {
@@ -1859,12 +2069,16 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
                     </div>
                   </div>
                   <div className="flex items-center gap-1 shrink-0">
-                    {['groq', 'mistral', 'openrouter', 'openai', 'deepseek', 'anthropic'].includes(item.provider) && (
+                    {['groq', 'mistral', 'gemini', 'openrouter', 'openai', 'deepseek', 'anthropic'].includes(item.provider) && (
                       <button
                         type="button"
                         disabled={proxyTestBusy !== null}
                         onClick={() => void handleTestSecureProxy(item.provider)}
-                        title="Tester l'appel serveur sécurisé (/api/ai/groq-secure)"
+                        title={
+                          isStaticHostingEnvironment()
+                            ? 'Tester directement la clé du Coffre Cloud'
+                            : "Tester l'appel serveur sécurisé (/api/ai/groq-secure)"
+                        }
                         className="px-2 py-1 rounded-lg border border-orange-200 bg-orange-50 hover:bg-orange-100 text-orange-800 text-[11px] font-semibold inline-flex items-center gap-1 disabled:opacity-50"
                       >
                         {proxyTestBusy === item.provider ? (
@@ -1904,18 +2118,29 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
           </div>
         )}
 
-        {/* Test direct du proxy serveur sécurisé (/api/ai/groq-secure) */}
+        {/* Test du Coffre Clés API Cloud */}
         <div className="pt-2 border-t border-stone-100 flex flex-wrap items-center justify-between gap-2 text-[11px]">
           <span className="text-stone-500">
-            Endpoint serveur sécurisé (Admin SDK + vérification token Firebase) :{' '}
-            <code className="font-mono font-semibold text-stone-800">POST /api/ai/groq-secure</code>
+            {isStaticHostingEnvironment() ? (
+              <>
+                Test direct HTTPS depuis le Coffre Cloud :{' '}
+                <code className="font-mono font-semibold text-stone-800">{apiProvider}</code>
+              </>
+            ) : (
+              <>
+                Endpoint serveur sécurisé (Admin SDK + vérification token Firebase) :{' '}
+                <code className="font-mono font-semibold text-stone-800">POST /api/ai/groq-secure</code>
+              </>
+            )}
           </span>
           <button
             type="button"
             disabled={proxyTestBusy !== null}
             onClick={() =>
               void handleTestSecureProxy(
-                ['groq', 'mistral', 'openrouter', 'openai', 'deepseek'].includes(apiProvider)
+                ['groq', 'mistral', 'gemini', 'openrouter', 'openai', 'deepseek', 'anthropic'].includes(
+                  apiProvider
+                )
                   ? apiProvider
                   : 'groq'
               )
@@ -1927,7 +2152,9 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
             ) : (
               <Sparkles className="w-3.5 h-3.5 text-orange-600" />
             )}
-            Tester l’appel serveur sécurisé
+            {isStaticHostingEnvironment()
+              ? 'Tester la clé du Coffre Cloud'
+              : 'Tester l’appel serveur sécurisé'}
           </button>
         </div>
 

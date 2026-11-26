@@ -11,6 +11,7 @@ import {
   isStaticHostingEnvironment,
   normalizeCommercialBrief,
   normalizePortfolioInsights,
+  parseGeneratedEmailFromLlmText,
   parseJsonObjectFromLlmText,
   type CopilotFicheInput,
 } from './aiCopilotClient';
@@ -188,4 +189,25 @@ test('local deterministic Copilote helpers produce real diagnostic, brief, and c
     sampleFiches[0]
   );
   assert.match(proseBrief.resume, /Fibre Dédiée SLA/);
+});
+
+test('parseGeneratedEmailFromLlmText handles JSON, Objet-prefixed French text, and plain prose', () => {
+  const fromJson = parseGeneratedEmailFromLlmText(
+    '```json\n{"objet": "Fibre Pro Arena-Dot", "corps": "Bonjour, je vous propose un RDV demain matin."}\n```'
+  );
+  assert.equal(fromJson?.objet, 'Fibre Pro Arena-Dot');
+  assert.match(fromJson?.corps || '', /RDV demain matin/);
+
+  const fromSubjectProse = parseGeneratedEmailFromLlmText(
+    '**Objet :** Audit Télécom Sté Arena-Dot\n\nBonjour M. le Gérant,\nPouvons-nous échanger demain matin ?'
+  );
+  assert.equal(fromSubjectProse?.objet, 'Audit Télécom Sté Arena-Dot');
+  assert.match(fromSubjectProse?.corps || '', /Bonjour M\. le Gérant/);
+
+  const fromBodyOnly = parseGeneratedEmailFromLlmText(
+    'Bonjour, suite à notre échange sur la Fibre Dédiée Orange Pro, je reste disponible demain à 10h.',
+    'Objet par défaut'
+  );
+  assert.equal(fromBodyOnly?.objet, 'Objet par défaut');
+  assert.match(fromBodyOnly?.corps || '', /Fibre Dédiée Orange Pro/);
 });

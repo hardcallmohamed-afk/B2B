@@ -279,6 +279,60 @@ export function parseJsonObjectFromLlmText<T = Record<string, unknown>>(rawText:
   return null;
 }
 
+export function parseGeneratedEmailFromLlmText(
+  rawText: string,
+  fallbackObjet?: string
+): { objet?: string; corps?: string } | null {
+  const jsonParsed = parseJsonObjectFromLlmText<{
+    objet?: unknown;
+    subject?: unknown;
+    corps?: unknown;
+    body?: unknown;
+    message?: unknown;
+  }>(rawText);
+
+  if (jsonParsed) {
+    const rawObjet = jsonParsed.objet ?? jsonParsed.subject;
+    const rawCorps = jsonParsed.corps ?? jsonParsed.body ?? jsonParsed.message;
+    const objet = typeof rawObjet === 'string' ? rawObjet.trim() : '';
+    const corps = typeof rawCorps === 'string' ? rawCorps.trim() : '';
+    if (objet || corps) {
+      return {
+        ...(objet ? { objet } : {}),
+        ...(corps ? { corps } : {}),
+      };
+    }
+  }
+
+  const cleaned = String(rawText || '')
+    .replace(/```(?:[a-z]+)?/gi, '')
+    .replace(/```/g, '')
+    .trim();
+  if (!cleaned || cleaned.length < 20) return null;
+
+  const subjectLineMatch = cleaned.match(
+    /^\s*(?:\*{0,2})(?:objet|sujet|subject)(?:\*{0,2})\s*[:\-]\s*(.+)$/im
+  );
+  if (subjectLineMatch) {
+    const objet = subjectLineMatch[1].replace(/\*{1,2}/g, '').trim();
+    const afterSubject = cleaned
+      .replace(subjectLineMatch[0], '')
+      .replace(/^\s*(?:\*{0,2})(?:corps|message|body)(?:\*{0,2})\s*[:\-]\s*/im, '')
+      .trim();
+    if (objet || afterSubject) {
+      return {
+        ...(objet ? { objet } : {}),
+        ...(afterSubject ? { corps: afterSubject } : {}),
+      };
+    }
+  }
+
+  return {
+    ...(fallbackObjet?.trim() ? { objet: fallbackObjet.trim() } : {}),
+    corps: cleaned,
+  };
+}
+
 export function normalizePortfolioInsights(raw: unknown): PortfolioInsights | null {
   if (!raw || typeof raw !== 'object') return null;
   const obj = raw as Record<string, unknown>;

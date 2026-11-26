@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { detectApiKeyProviderSync } from './apiKeyDetector';
+import { detectApiKeyProviderSync, probeApiKeyProviderViaServer } from './apiKeyDetector';
 
 test('detectApiKeyProviderSync detects high-confidence prefixes across major providers', () => {
   const groq = detectApiKeyProviderSync('gsk_1234567890abcdefghijklmnop');
@@ -50,4 +50,36 @@ test('detectApiKeyProviderSync flags ambiguous formats (Mistral 32-char, DeepSee
   assert.equal(genericSk?.needsServerProbe, true);
 
   assert.equal(detectApiKeyProviderSync('short'), null);
+});
+
+test('probeApiKeyProviderViaServer skips /api/ai/detect-provider on static GitHub Pages hosts', async () => {
+  const prevWindow = (globalThis as { window?: unknown }).window;
+  const originalFetch = globalThis.fetch;
+  const calledUrls: string[] = [];
+
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    const url = typeof input === 'string' ? input : input.toString();
+    calledUrls.push(url);
+    return new Response(JSON.stringify({ data: [] }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    });
+  }) as typeof fetch;
+
+  (globalThis as { window: { location: { hostname: string; protocol: string } } }).window = {
+    location: { hostname: 'hardcallmohamed-afk.github.io', protocol: 'https:' },
+  };
+
+  try {
+    const result = await probeApiKeyProviderViaServer('AbCdEfGhIjKlMnOpQrStUvWxYz123456');
+    assert.equal(result.provider, 'mistral');
+    assert.equal(calledUrls.some((u) => u.includes('/api/ai/detect-provider')), false);
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (prevWindow === undefined) {
+      delete (globalThis as { window?: unknown }).window;
+    } else {
+      (globalThis as { window?: unknown }).window = prevWindow;
+    }
+  }
 });

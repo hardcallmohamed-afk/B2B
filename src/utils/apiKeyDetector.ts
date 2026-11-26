@@ -1,3 +1,5 @@
+import { isStaticHostingEnvironment } from './aiCopilotClient';
+
 export type DetectedApiProviderId =
   | 'groq'
   | 'openrouter'
@@ -139,6 +141,88 @@ export function detectApiKeyProviderSync(rawKey: string): ApiKeyDetectionResult 
   return null;
 }
 
+async function probeAmbiguousKeyDirectCors(
+  key: string,
+  allowedProviders?: readonly DetectedApiProviderId[]
+): Promise<{
+  provider: DetectedApiProviderId | null;
+  label: string;
+  verified: boolean;
+} | null> {
+  const isAllowed = (id: DetectedApiProviderId) => !allowedProviders || allowedProviders.includes(id);
+
+  const candidates: Array<{
+    id: DetectedApiProviderId;
+    url: string;
+    headers?: Record<string, string>;
+  }> = [];
+
+  if (/^[A-Za-z0-9]{32}$/.test(key) && isAllowed('mistral')) {
+    candidates.push({
+      id: 'mistral',
+      url: 'https://api.mistral.ai/v1/models',
+      headers: { Authorization: `Bearer ${key}` },
+    });
+  } else if (/^sk-[a-f0-9]{24,}$/.test(key)) {
+    if (isAllowed('deepseek')) {
+      candidates.push({
+        id: 'deepseek',
+        url: 'https://api.deepseek.com/models',
+        headers: { Authorization: `Bearer ${key}` },
+      });
+    }
+    if (isAllowed('openai')) {
+      candidates.push({
+        id: 'openai',
+        url: 'https://api.openai.com/v1/models',
+        headers: { Authorization: `Bearer ${key}` },
+      });
+    }
+  } else if (/^sk-/.test(key)) {
+    if (isAllowed('openai')) {
+      candidates.push({
+        id: 'openai',
+        url: 'https://api.openai.com/v1/models',
+        headers: { Authorization: `Bearer ${key}` },
+      });
+    }
+    if (isAllowed('deepseek')) {
+      candidates.push({
+        id: 'deepseek',
+        url: 'https://api.deepseek.com/models',
+        headers: { Authorization: `Bearer ${key}` },
+      });
+    }
+    if (isAllowed('mistral')) {
+      candidates.push({
+        id: 'mistral',
+        url: 'https://api.mistral.ai/v1/models',
+        headers: { Authorization: `Bearer ${key}` },
+      });
+    }
+  }
+
+  for (const cand of candidates) {
+    try {
+      const res = await fetch(cand.url, {
+        method: 'GET',
+        headers: cand.headers,
+        signal: AbortSignal.timeout(4500),
+      });
+      if (res.ok) {
+        return {
+          provider: cand.id,
+          label: PROVIDER_DISPLAY_LABELS[cand.id],
+          verified: true,
+        };
+      }
+    } catch {
+      // Ignore CORS or network errors and keep checking / fall back to pattern guess
+    }
+  }
+  return null;
+}
+
 export async function probeApiKeyProviderViaServer(
   rawKey: string,
   allowedProviders?: readonly DetectedApiProviderId[]
@@ -153,38 +237,51 @@ export async function probeApiKeyProviderViaServer(
     return { provider: null, label: '', verified: false };
   }
 
-  try {
-    const res = await fetch('/api/ai/detect-provider', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        apiKey: key,
-        allowedProviders: allowedProviders ? Array.from(allowedProviders) : undefined,
-      }),
-      signal: AbortSignal.timeout(7500),
-    });
+  if (syncGuess && !syncGuess.needsServerProbe && (!allowedProviders || allowedProviders.includes(syncGuess.provider))) {
+    return {
+      provider: syncGuess.provider,
+      label: PROVIDER_DISPLAY_LABELS[syncGuess.provider],
+      verified: true,
+    };
+  }
 
-    if (res.ok) {
-      const data = (await res.json().catch(() => null)) as {
-        detectedProvider?: string;
-        label?: string;
-        verified?: boolean;
-      } | null;
-      const detected = data?.detectedProvider as DetectedApiProviderId | undefined;
-      if (
-        detected &&
-        detected in PROVIDER_DISPLAY_LABELS &&
-        (!allowedProviders || allowedProviders.includes(detected))
-      ) {
-        return {
-          provider: detected,
-          label: data?.label || PROVIDER_DISPLAY_LABELS[detected],
-          verified: Boolean(data?.verified),
-        };
+  if (!isStaticHostingEnvironment()) {
+    try {
+      const res = await fetch('/api/ai/detect-provider', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          apiKey: key,
+          allowedProviders: allowedProviders ? Array.from(allowedProviders) : undefined,
+        }),
+        signal: AbortSignal.timeout(7500),
+      });
+
+      if (res.ok) {
+        const data = (await res.json().catch(() => null)) as {
+          detectedProvider?: string;
+          label?: string;
+          verified?: boolean;
+        } | null;
+        const detected = data?.detectedProvider as DetectedApiProviderId | undefined;
+        if (
+          detected &&
+          detected in PROVIDER_DISPLAY_LABELS &&
+          (!allowedProviders || allowedProviders.includes(detected))
+        ) {
+          return {
+            provider: detected,
+            label: data?.label || PROVIDER_DISPLAY_LABELS[detected],
+            verified: Boolean(data?.verified),
+          };
+        }
       }
+    } catch {
+      // Repli sur la vérification directe / motif local
     }
-  } catch {
-    // Repli silencieux sur la détection locale par motif
+  } else {
+    const directProbe = await probeAmbiguousKeyDirectCors(key, allowedProviders);
+    if (directProbe) return directProbe;
   }
 
   if (syncGuess && (!allowedProviders || allowedProviders.includes(syncGuess.provider))) {

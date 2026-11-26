@@ -80,6 +80,7 @@ import {
 import {
   fetchJsonWithRetry,
   isStaticHostingEnvironment,
+  parseGeneratedEmailFromLlmText,
   parseJsonObjectFromLlmText,
 } from './utils/aiCopilotClient';
 import {
@@ -5368,7 +5369,7 @@ Réponds UNIQUEMENT en JSON strict : {"telephone":"","email":"","contact":"","ro
             }
           })().catch(() => {})
         );
-      } else if (serverAiStatus.available) {
+      } else if (serverAiStatus.available && !isStaticHostingEnvironment()) {
         // Piste 1 intégrée : Google Search Grounding via Gemini côté serveur (sans clé client requise)
         tasks.push(
           (async () => {
@@ -6830,9 +6831,14 @@ ${assistPasteText.slice(0, 6000)}`;
     if (!emailModalFiche) return;
     const pool = mergeHubAndCloudKeys(apiKeysRef.current, cloudApiKeys);
     const anyEmailCandidates = getAnyAvailableLlmKeys(pool, 'email');
-    if (anyEmailCandidates.length === 0 && !serverAiStatus.available && !cloudUser) {
+    const canTryServerEmail =
+      !isStaticHostingEnvironment() && (serverAiStatus.available || Boolean(cloudUser));
+    if (anyEmailCandidates.length === 0 && !canTryServerEmail) {
       regenerateLocalEmail(emailModalFiche, emailCycle, emailTon, emailSignature, activeSkill);
-      notify('Modèle du skill appliqué localement. Ajoutez n’importe quelle clé IA dans le Hub API pour la rédaction IA.', 'warn');
+      notify(
+        'Modèle du skill appliqué localement. Ajoutez une clé IA dans le Hub API ou le Coffre Cloud pour la rédaction IA.',
+        'warn'
+      );
       return;
     }
     setIsGeneratingEmail(true);
@@ -6865,21 +6871,24 @@ ${emailCustomPrompt.trim() ? `Consigne ponctuelle : ${emailCustomPrompt.trim()}`
 
 Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
 
+      let lastEmailAiErr = '';
       if (anyEmailCandidates.length > 0) {
         const rRes = await callAnyAvailableLLM(pool, 'email', prompt, undefined, updateApiKeyStatus);
         if (rRes.ok && rRes.text) {
-          const parsed = parseJsonObjectFromLlmText<{ objet?: string; corps?: string }>(rRes.text);
+          const parsed = parseGeneratedEmailFromLlmText(rRes.text, emailObjet);
           if (parsed?.objet || parsed?.corps) {
-            if (parsed.objet) setEmailObjet(String(parsed.objet));
-            if (parsed.corps) setEmailCorps(String(parsed.corps));
+            if (parsed.objet) setEmailObjet(parsed.objet);
+            if (parsed.corps) setEmailCorps(parsed.corps);
             setEmailProviderUsed(`${rRes.providerLabel} · ${rRes.usedModel}`);
             notify(`Email rédigé par ${rRes.providerLabel} (${rRes.usedModel}).`);
             return;
           }
+        } else if (rRes.error) {
+          lastEmailAiErr = rRes.error;
         }
       }
 
-      if (serverAiStatus.available) {
+      if (serverAiStatus.available && !isStaticHostingEnvironment()) {
         const res = await fetchJsonWithRetry<{
           objet?: string;
           corps?: string;
@@ -6901,24 +6910,34 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
           notify(`Email rédigé par Gemini IA intégré (${res.data.model || serverAiStatus.model}).`);
           return;
         }
+        if (res.error && !lastEmailAiErr) lastEmailAiErr = res.error;
       }
 
-      const fallbackRes = await handleCopilotFallbackPrompt(
-        prompt,
-        'Tu es un expert en rédaction commerciale B2B Orange Pro Maroc. Retourne uniquement du JSON {"objet":"...","corps":"..."}.'
-      );
-      if (fallbackRes.ok && fallbackRes.text) {
-        const parsed = parseJsonObjectFromLlmText<{ objet?: string; corps?: string }>(fallbackRes.text);
-        if (parsed?.objet || parsed?.corps) {
-          if (parsed.objet) setEmailObjet(String(parsed.objet));
-          if (parsed.corps) setEmailCorps(String(parsed.corps));
-          setEmailProviderUsed(fallbackRes.sourceLabel || 'IA Alternative');
-          notify(`Email rédigé par ${fallbackRes.sourceLabel || 'IA disponible'}.`);
-          return;
+      if (!isStaticHostingEnvironment() && cloudUser) {
+        const fallbackRes = await handleCopilotFallbackPrompt(
+          prompt,
+          'Tu es un expert en rédaction commerciale B2B Orange Pro Maroc. Retourne uniquement du JSON {"objet":"...","corps":"..."}.'
+        );
+        if (fallbackRes.ok && fallbackRes.text) {
+          const parsed = parseGeneratedEmailFromLlmText(fallbackRes.text, emailObjet);
+          if (parsed?.objet || parsed?.corps) {
+            if (parsed.objet) setEmailObjet(parsed.objet);
+            if (parsed.corps) setEmailCorps(parsed.corps);
+            setEmailProviderUsed(fallbackRes.sourceLabel || 'IA Alternative');
+            notify(`Email rédigé par ${fallbackRes.sourceLabel || 'IA disponible'}.`);
+            return;
+          }
+        } else if (fallbackRes.error && !lastEmailAiErr) {
+          lastEmailAiErr = fallbackRes.error;
         }
       }
 
-      notify('Réponse IA indisponible pour le moment — modèle du skill conservé.', 'warn');
+      notify(
+        lastEmailAiErr
+          ? `Fournisseurs IA indisponibles (${lastEmailAiErr.slice(0, 90)}) — modèle du skill conservé.`
+          : 'Réponse IA indisponible pour le moment — modèle du skill conservé.',
+        'warn'
+      );
     } catch {
       notify('Erreur réseau IA — modèle du skill conservé.', 'err');
     } finally {
@@ -10037,7 +10056,7 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
               </div>
               <div className="sm:col-span-2">
                 <label htmlFor="email-custom" className="block font-semibold text-stone-600 mb-1">
-                  Consigne ponctuelle libre (Routeur IA : Mistral → OpenRouter → Gemini → Groq)
+                  Consigne ponctuelle libre (Routeur multi-IA : Hub API + Coffre Cloud)
                 </label>
                 <div className="flex gap-1.5">
                   <input
