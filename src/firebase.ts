@@ -624,17 +624,10 @@ export async function syncMyTeamStat(
       }
       await updateDoc(ref, payload);
     } else {
-      // Strictly respect Action 2 in firestore.rules: collaborator never touches manualBadges, role, or active
+      // Phase 3 Rules: Collaborator can only update displayName, zone, and avatarDataUrl on /team_stats
       const payload: DocumentData = {
         displayName: clean.displayName,
         zone: clean.zone,
-        totalProspects: clean.totalProspects,
-        totalQualified: clean.totalQualified,
-        totalContracts: clean.totalContracts,
-        totalPayoutMad: clean.totalPayoutMad,
-        xp: clean.xp,
-        unlockedCount: clean.unlockedCount,
-        monthlyHistory: clean.monthlyHistory,
         updatedAt: serverTimestamp(),
       };
       if (typeof clean.avatarDataUrl === 'string') {
@@ -699,9 +692,15 @@ export async function adminUpdateUserManualBadges(
 }
 
 export async function createSignedContract(
-  input: SignedContractLike
+  input: SignedContractLike,
+  isSuperAdmin = false
 ): Promise<SanitizedSignedContractDoc> {
-  const clean = sanitizeSignedContractPayload(input);
+  const clean = sanitizeSignedContractPayload({
+    ...input,
+    // Phase 3 Rules: client creation forces payoutMad = 0 and payoutStatus = 'En attente'
+    payoutMad: isSuperAdmin ? input.payoutMad : 0,
+    payoutStatus: isSuperAdmin ? input.payoutStatus : 'En attente',
+  });
   const path = `signed_contracts/${clean.id}`;
   try {
     await setDoc(doc(db, 'signed_contracts', clean.id), {
