@@ -4628,19 +4628,21 @@ export default function App() {
   }, [teamStats, cloudUser]);
 
   const myCollaboratorMetrics = useMemo<CollaboratorMetrics>(() => {
-    const signedFichesCount = fiches.filter((f) => f.statut === 'Signé Orange Pro').length;
-    const contractsCount = Math.max(signedFichesCount, mySignedContracts.length);
+    const validContracts = mySignedContracts.filter(
+      (c) => c.payoutStatus === 'Validé' || c.payoutStatus === 'Versé'
+    );
+    const contractsCount = validContracts.length;
     const qualifiedCount = fiches.filter(
       (f) =>
         f.statut === 'RDV pris' ||
         f.statut === 'Devis envoyé' ||
         f.statut === 'Signé Orange Pro'
     ).length;
-    const grandCompteContracts = mySignedContracts.filter(
+    const grandCompteContracts = validContracts.filter(
       (c) => c.tier === 'Grand Compte'
     ).length;
-    const pmeContracts = mySignedContracts.filter((c) => c.tier === 'PME').length;
-    const totalPayoutMad = mySignedContracts.reduce((sum, c) => sum + (Number(c.payoutMad) || 0), 0);
+    const pmeContracts = validContracts.filter((c) => c.tier === 'PME').length;
+    const totalPayoutMad = validContracts.reduce((sum, c) => sum + (Number(c.payoutMad) || 0), 0);
     const multiContactFiches = fiches.filter(
       (f) =>
         (f.telephonesSupplementaires?.length || 0) > 0 ||
@@ -10229,11 +10231,12 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
           <TeamPerformancePanel
             currentUserUid={cloudUser.uid}
             isSuperAdmin={isSuperAdmin}
+            currentUserRole={appUserProfile?.role || (isSuperAdmin ? 'super_admin' : 'commercial')}
             teamStats={teamStats}
             signedContracts={signedContracts}
-            onAdminUpdateContract={isSuperAdmin ? handleAdminUpdateContract : undefined}
+            onAdminUpdateContract={(isSuperAdmin || appUserProfile?.role === 'manager' || appUserProfile?.role === 'team_lead') ? handleAdminUpdateContract : undefined}
             onJumpToBadges={
-              isSuperAdmin
+              (isSuperAdmin || appUserProfile?.role === 'manager' || appUserProfile?.role === 'team_lead')
                 ? (uid) => {
                     setBadgesFocusUid(uid);
                     setActiveTab('badges');

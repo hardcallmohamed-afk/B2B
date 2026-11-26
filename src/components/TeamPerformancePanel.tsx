@@ -42,6 +42,7 @@ import { RoleBadge } from './RoleBadge';
 interface TeamPerformancePanelProps {
   currentUserUid: string;
   isSuperAdmin: boolean;
+  currentUserRole?: TeamRole;
   teamStats: TeamStatRecord[];
   signedContracts: SignedContractRecord[];
   onAdminUpdateContract?: (
@@ -51,6 +52,8 @@ interface TeamPerformancePanelProps {
       tier: OrangeProTier;
       payoutMad: number;
       payoutStatus: PayoutStatus;
+      referenceVirement?: string;
+      refusMotif?: string;
     }
   ) => Promise<void>;
   onJumpToBadges?: (targetUid: string) => void;
@@ -60,16 +63,19 @@ const PAYOUT_STATUS_STYLES: Record<PayoutStatus, string> = {
   'En attente': 'border-amber-200 bg-amber-50 text-amber-800',
   Validé: 'border-sky-200 bg-sky-50 text-sky-800',
   Versé: 'border-emerald-200 bg-emerald-50 text-emerald-800',
+  Refusé: 'border-red-200 bg-red-50 text-red-800',
 };
 
 export const TeamPerformancePanel: React.FC<TeamPerformancePanelProps> = ({
   currentUserUid,
   isSuperAdmin,
+  currentUserRole,
   teamStats,
   signedContracts,
   onAdminUpdateContract,
   onJumpToBadges,
 }) => {
+  const canManageContracts = isSuperAdmin || currentUserRole === 'manager' || currentUserRole === 'team_lead';
   const [selectedRole, setSelectedRole] = useState<'all' | TeamRole>('all');
   const [selectedRegion, setSelectedRegion] = useState<string>('all');
   const [selectedCity, setSelectedCity] = useState<string>('all');
@@ -77,6 +83,8 @@ export const TeamPerformancePanel: React.FC<TeamPerformancePanelProps> = ({
   const [editingContractId, setEditingContractId] = useState<string | null>(null);
   const [editPayout, setEditPayout] = useState<number>(0);
   const [editStatus, setEditStatus] = useState<PayoutStatus>('En attente');
+  const [editRefvirement, setEditRefvirement] = useState<string>('');
+  const [editRefusMotif, setEditRefusMotif] = useState<string>('');
   const [savingContractId, setSavingContractId] = useState<string | null>(null);
 
   const roleFilteredStats = useMemo(() => {
@@ -216,10 +224,20 @@ export const TeamPerformancePanel: React.FC<TeamPerformancePanelProps> = ({
     setEditingContractId(c.id);
     setEditPayout(c.payoutMad);
     setEditStatus(c.payoutStatus);
+    setEditRefvirement(c.referenceVirement || '');
+    setEditRefusMotif(c.refusMotif || '');
   };
 
   const saveEditContract = async (c: SignedContractRecord) => {
     if (!onAdminUpdateContract) return;
+    if (editStatus === 'Versé' && !editRefvirement.trim()) {
+      alert('Référence de virement obligatoire pour valider le versement.');
+      return;
+    }
+    if (editStatus === 'Refusé' && !editRefusMotif.trim()) {
+      alert('Motif de refus obligatoire pour rejeter un contrat.');
+      return;
+    }
     setSavingContractId(c.id);
     try {
       await onAdminUpdateContract(c.id, {
@@ -227,6 +245,8 @@ export const TeamPerformancePanel: React.FC<TeamPerformancePanelProps> = ({
         tier: c.tier,
         payoutMad: Math.max(0, Math.round(Number(editPayout) || 0)),
         payoutStatus: editStatus,
+        referenceVirement: editStatus === 'Versé' ? editRefvirement.trim() : undefined,
+        refusMotif: editStatus === 'Refusé' ? editRefusMotif.trim() : undefined,
       });
       setEditingContractId(null);
     } finally {
@@ -855,24 +875,53 @@ export const TeamPerformancePanel: React.FC<TeamPerformancePanelProps> = ({
                       </td>
                       <td className="px-4 py-3">
                         {isEditing ? (
-                          <select
-                            value={editStatus}
-                            onChange={(e) => setEditStatus(e.target.value as PayoutStatus)}
-                            className="rounded-lg border border-orange-400 bg-white px-2 py-1 text-xs font-semibold text-stone-900"
-                          >
-                            <option value="En attente">En attente</option>
-                            <option value="Validé">Validé</option>
-                            <option value="Versé">Versé</option>
-                          </select>
+                          <div className="space-y-1.5">
+                            <select
+                              value={editStatus}
+                              onChange={(e) => setEditStatus(e.target.value as PayoutStatus)}
+                              className="rounded-lg border border-orange-400 bg-white px-2 py-1 text-xs font-semibold text-stone-900"
+                            >
+                              <option value="En attente">En attente</option>
+                              <option value="Validé">Validé</option>
+                              <option value="Versé">Versé</option>
+                              <option value="Refusé">Refusé</option>
+                            </select>
+                            {editStatus === 'Versé' && (
+                              <input
+                                type="text"
+                                placeholder="Ref virement (ex: VIR-2026-...) *required"
+                                value={editRefvirement}
+                                onChange={(e) => setEditRefvirement(e.target.value)}
+                                className="w-full rounded-md border border-emerald-400 px-2 py-1 text-[11px] text-stone-900"
+                              />
+                            )}
+                            {editStatus === 'Refusé' && (
+                              <input
+                                type="text"
+                                placeholder="Motif de refus *required"
+                                value={editRefusMotif}
+                                onChange={(e) => setEditRefusMotif(e.target.value)}
+                                className="w-full rounded-md border border-red-400 px-2 py-1 text-[11px] text-stone-900"
+                              />
+                            )}
+                          </div>
                         ) : (
-                          <span
-                            className={`inline-block rounded-md border px-2 py-0.5 text-[11px] font-semibold ${PAYOUT_STATUS_STYLES[c.payoutStatus]}`}
-                          >
-                            {c.payoutStatus}
-                          </span>
+                          <div>
+                            <span
+                              className={`inline-block rounded-md border px-2 py-0.5 text-[11px] font-semibold ${PAYOUT_STATUS_STYLES[c.payoutStatus]}`}
+                            >
+                              {c.payoutStatus}
+                            </span>
+                            {c.payoutStatus === 'Refusé' && c.refusMotif && (
+                              <p className="mt-0.5 text-[10px] text-red-600 italic">Motif : {c.refusMotif}</p>
+                            )}
+                            {c.payoutStatus === 'Versé' && c.referenceVirement && (
+                              <p className="mt-0.5 text-[10px] text-stone-500 font-mono">Réf : {c.referenceVirement}</p>
+                            )}
+                          </div>
                         )}
                       </td>
-                      {isSuperAdmin && (
+                      {canManageContracts && (
                         <td className="px-4 py-3 text-right">
                           {isEditing ? (
                             <div className="inline-flex items-center gap-1">
@@ -901,7 +950,7 @@ export const TeamPerformancePanel: React.FC<TeamPerformancePanelProps> = ({
                               className="inline-flex items-center gap-1 rounded-lg border border-stone-300 bg-white px-2 py-1 text-[11px] font-semibold text-stone-700 hover:bg-stone-100"
                             >
                               <Pencil className="h-3 w-3" />
-                              Modifier
+                              Valider / Modifier
                             </button>
                           )}
                         </td>

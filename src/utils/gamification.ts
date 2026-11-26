@@ -80,7 +80,7 @@ export const RARITY_META: Record<BadgeRarity, RarityMeta> = {
   },
 };
 
-export type PayoutStatus = 'En attente' | 'Validé' | 'Versé';
+export type PayoutStatus = 'En attente' | 'Validé' | 'Versé' | 'Refusé';
 export type OrangeProTier = 'Grand Compte' | 'PME' | 'TPE / Libéral';
 
 export const ORANGE_PRO_PRODUCTS: Array<{
@@ -554,6 +554,8 @@ export interface SignedContractRecord {
   payoutMad: number;
   payoutStatus: PayoutStatus;
   signedAt: string;
+  referenceVirement?: string;
+  refusMotif?: string;
 }
 
 export interface TeamStatRecord {

@@ -720,20 +720,41 @@ export async function adminUpdateSignedContract(
     produitOrangePro: string;
     tier: 'Grand Compte' | 'PME' | 'TPE / Libéral';
     payoutMad: number;
-    payoutStatus: 'En attente' | 'Validé' | 'Versé';
+    payoutStatus: PayoutStatus;
+    referenceVirement?: string;
+    refusMotif?: string;
   }
 ): Promise<void> {
   const path = `signed_contracts/${contractId}`;
   const cleanProduit = updates.produitOrangePro.trim().slice(0, 200) || 'Pack Orange Pro';
   const cleanPayout = Math.min(10000000, Math.max(0, Math.round(Number(updates.payoutMad) || 0)));
+  const cleanRef = typeof updates.referenceVirement === 'string' ? updates.referenceVirement.trim().slice(0, 80) : '';
+  const cleanMotif = typeof updates.refusMotif === 'string' ? updates.refusMotif.trim().slice(0, 200) : '';
+
+  if (updates.payoutStatus === 'Versé' && !cleanRef) {
+    throw new Error('Une référence de virement bancaire est obligatoire pour passer le contrat au statut « Versé ».');
+  }
+  if (updates.payoutStatus === 'Refusé' && !cleanMotif) {
+    throw new Error('Un motif de refus est obligatoire pour rejeter le contrat.');
+  }
+
+  const payload: DocumentData = {
+    produitOrangePro: cleanProduit,
+    tier: updates.tier,
+    payoutMad: cleanPayout,
+    payoutStatus: updates.payoutStatus,
+    updatedAt: serverTimestamp(),
+  };
+
+  if (cleanRef) {
+    payload.referenceVirement = cleanRef;
+  }
+  if (cleanMotif) {
+    payload.refusMotif = cleanMotif;
+  }
+
   try {
-    await updateDoc(doc(db, 'signed_contracts', contractId), {
-      produitOrangePro: cleanProduit,
-      tier: updates.tier,
-      payoutMad: cleanPayout,
-      payoutStatus: updates.payoutStatus,
-      updatedAt: serverTimestamp(),
-    });
+    await updateDoc(doc(db, 'signed_contracts', contractId), payload);
   } catch (error) {
     handleFirestoreError(error, OperationType.UPDATE, path);
   }
@@ -1714,17 +1735,22 @@ export async function managerUpdateSignedContract(
     produitOrangePro: string;
     tier: 'Grand Compte' | 'PME' | 'TPE / Libéral';
     payoutMad: number;
-    payoutStatus: 'En attente' | 'Validé' | 'Versé';
+    payoutStatus: PayoutStatus;
     referenceVirement?: string;
+    refusMotif?: string;
   }
 ): Promise<void> {
   const path = `signed_contracts/${contractId}`;
   const cleanProduit = updates.produitOrangePro.trim().slice(0, 200) || 'Pack Orange Pro';
   const cleanPayout = Math.min(10000000, Math.max(0, Math.round(Number(updates.payoutMad) || 0)));
   const cleanRef = typeof updates.referenceVirement === 'string' ? updates.referenceVirement.trim().slice(0, 80) : '';
+  const cleanMotif = typeof updates.refusMotif === 'string' ? updates.refusMotif.trim().slice(0, 200) : '';
 
   if (updates.payoutStatus === 'Versé' && !cleanRef) {
     throw new Error('Une référence de virement bancaire est obligatoire pour passer le contrat au statut « Versé ».');
+  }
+  if (updates.payoutStatus === 'Refusé' && !cleanMotif) {
+    throw new Error('Un motif de refus est obligatoire pour rejeter le contrat.');
   }
 
   const payload: DocumentData = {
@@ -1737,6 +1763,9 @@ export async function managerUpdateSignedContract(
 
   if (cleanRef) {
     payload.referenceVirement = cleanRef;
+  }
+  if (cleanMotif) {
+    payload.refusMotif = cleanMotif;
   }
 
   try {

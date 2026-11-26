@@ -67,7 +67,7 @@ service cloud.firestore {
     }
 
     function isValidPayoutStatus(val) {
-      return val is string && val in ['En attente', 'Validé', 'Versé'];
+      return val is string && val in ['En attente', 'Validé', 'Versé', 'Refusé'];
     }
 
     function isValidDeviceType(val) {
@@ -222,7 +222,7 @@ service cloud.firestore {
         && data.keys().hasOnly([
           'id', 'orgScope', 'ownerId', 'ownerName', 'ficheId', 'numeroFiche',
           'societe', 'ville', 'secteur', 'produitOrangePro', 'tier', 'effectif',
-          'payoutMad', 'payoutStatus', 'signedAt', 'referenceVirement', 'createdAt', 'updatedAt'
+          'payoutMad', 'payoutStatus', 'signedAt', 'referenceVirement', 'refusMotif', 'createdAt', 'updatedAt'
         ])
         && data.id is string
         && data.id == contractId
@@ -242,6 +242,7 @@ service cloud.firestore {
         && isValidPayoutStatus(data.payoutStatus)
         && data.signedAt is string && data.signedAt.size() <= 64
         && (!('referenceVirement' in data) || (data.referenceVirement is string && data.referenceVirement.size() <= 80))
+        && (!('refusMotif' in data) || (data.refusMotif is string && data.refusMotif.size() <= 200))
         && data.createdAt is timestamp
         && data.updatedAt is timestamp;
     }
@@ -609,11 +610,12 @@ service cloud.firestore {
           )
         );
 
-      // Payout amounts, products, and statuses are controlled by Super-Admin and Managers.
+      // Payout amounts, products, and statuses are controlled by Super-Admin, Managers and Team Leads.
       // Transition to 'Versé' strictly requires a non-empty referenceVirement (max 80).
+      // Transition to 'Refusé' requires a non-empty refusMotif (max 200).
       allow update: if isValidId(contractId)
         && isValidSignedContract(incoming(), contractId)
-        && (isSuperAdmin() || isManager())
+        && (isSuperAdmin() || isTeamLeadOrManager())
         && incoming().id == existing().id
         && incoming().orgScope == existing().orgScope
         && incoming().ownerId == existing().ownerId
@@ -630,8 +632,17 @@ service cloud.firestore {
           )
         )
         && (
+          incoming().payoutStatus != 'Refusé'
+          || (
+            'refusMotif' in incoming()
+            && incoming().refusMotif is string
+            && incoming().refusMotif.size() >= 1
+            && incoming().refusMotif.size() <= 200
+          )
+        )
+        && (
           incoming().diff(existing()).affectedKeys().hasOnly([
-            'produitOrangePro', 'tier', 'payoutMad', 'payoutStatus', 'referenceVirement', 'updatedAt'
+            'produitOrangePro', 'tier', 'payoutMad', 'payoutStatus', 'referenceVirement', 'refusMotif', 'updatedAt'
           ])
         );
 

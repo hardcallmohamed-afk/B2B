@@ -513,7 +513,7 @@ export const VALID_TEAM_ROLES = new Set([
   'commercial',
 ] as const);
 export const VALID_ORANGE_TIERS = new Set(['Grand Compte', 'PME', 'TPE / Libéral'] as const);
-export const VALID_PAYOUT_STATUSES = new Set(['En attente', 'Validé', 'Versé'] as const);
+export const VALID_PAYOUT_STATUSES = new Set(['En attente', 'Validé', 'Versé', 'Refusé'] as const);
 
 export interface TeamStatLike {
   uid: string;
@@ -617,9 +617,10 @@ export interface SanitizedSignedContractDoc {
   tier: 'Grand Compte' | 'PME' | 'TPE / Libéral';
   effectif: string;
   payoutMad: number;
-  payoutStatus: 'En attente' | 'Validé' | 'Versé';
+  payoutStatus: 'En attente' | 'Validé' | 'Versé' | 'Refusé';
   signedAt: string;
   referenceVirement?: string;
+  refusMotif?: string;
 }
 
 export function sanitizeSignedContractPayload(
@@ -635,10 +636,10 @@ export function sanitizeSignedContractPayload(
   const tier: 'Grand Compte' | 'PME' | 'TPE / Libéral' = VALID_ORANGE_TIERS.has(input.tier as never)
     ? (input.tier as 'Grand Compte' | 'PME' | 'TPE / Libéral')
     : 'PME';
-  const payoutStatus: 'En attente' | 'Validé' | 'Versé' = VALID_PAYOUT_STATUSES.has(
+  const payoutStatus: 'En attente' | 'Validé' | 'Versé' | 'Refusé' = VALID_PAYOUT_STATUSES.has(
     input.payoutStatus as never
   )
-    ? (input.payoutStatus as 'En attente' | 'Validé' | 'Versé')
+    ? (input.payoutStatus as 'En attente' | 'Validé' | 'Versé' | 'Refusé')
     : 'En attente';
 
   const doc: SanitizedSignedContractDoc = {
@@ -661,6 +662,9 @@ export function sanitizeSignedContractPayload(
 
   if (typeof input.referenceVirement === 'string' && input.referenceVirement.trim().length > 0) {
     doc.referenceVirement = clampString(input.referenceVirement.trim(), 80);
+  }
+  if (typeof input.refusMotif === 'string' && input.refusMotif.trim().length > 0) {
+    doc.refusMotif = clampString(input.refusMotif.trim(), 200);
   }
 
   return doc;
