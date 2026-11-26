@@ -1282,15 +1282,21 @@ service cloud.firestore {
       allow update: if isValidId(collabUid)
         && isValidDirectChatChannel(incoming(), collabUid)
         && (isSuperAdmin() || (isOwner(collabUid) && existing().collabUid == request.auth.uid))
-        && incoming().collabUid == existing().collabUid
-        && incoming().orgScope == existing().orgScope
-        && incoming().createdAt == existing().createdAt
+        && (!('collabUid' in existing()) || incoming().collabUid == existing().collabUid)
+        && (!('orgScope' in existing()) || incoming().orgScope == existing().orgScope)
+        && (
+          ('createdAt' in existing() && existing().createdAt is timestamp && incoming().createdAt == existing().createdAt)
+          || ((!('createdAt' in existing()) || !(existing().createdAt is timestamp)) && incoming().createdAt == request.time)
+        )
         && incoming().updatedAt == request.time
-        && incoming().diff(existing()).affectedKeys().hasOnly([
-          'collabName', 'collabEmail', 'collabZone', 'lastMessageText',
-          'lastMessageAt', 'lastSenderUid', 'lastSenderName',
-          'unreadByAdmin', 'unreadByCollab', 'updatedAt'
-        ]);
+        && (
+          isSuperAdmin()
+          || incoming().diff(existing()).affectedKeys().hasOnly([
+            'collabName', 'collabEmail', 'collabZone', 'lastMessageText',
+            'lastMessageAt', 'lastSenderUid', 'lastSenderName',
+            'unreadByAdmin', 'unreadByCollab', 'updatedAt'
+          ])
+        );
 
       allow delete: if isSuperAdmin() && isValidId(collabUid);
 

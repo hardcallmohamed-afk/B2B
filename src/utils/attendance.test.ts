@@ -301,3 +301,44 @@ test('reconcilePresenceOnlineState and computeTeamBoundsZoom keep online status 
   assert.ok(multi.zoom >= 7 && multi.zoom <= 11);
   assert.ok(multi.centerLat > 33.57 && multi.centerLat < 33.90);
 });
+
+test('attendance helpers strictly clamp multi-byte French text within Firestore UTF-8 byte limits', async () => {
+  const {
+    encodeLiveFieldTelemetry,
+    buildDeviceHistoryList,
+    buildWorkDisconnectEntry,
+    splitFirstAndLastName,
+  } = await import('./attendance');
+
+  const byteLen = (s: string) => Buffer.byteLength(s, 'utf8');
+
+  const telemetry = encodeLiveFieldTelemetry({
+    baseDeviceLabel: 'Windows · Chrome (PC / Bureau) — Édition Étendue',
+    status: 'en_rdv_client',
+    lat: 33.90991,
+    lng: -5.536218,
+    accuracyMeters: 12,
+    speedKmh: 45,
+    clientName: 'Clinique Spécialisée Al-Fès & Associés 😀',
+    actionLabel: 'Déplacement Terrain',
+  });
+  assert.ok(byteLen(telemetry) <= 160, `telemetry exceeded 160 bytes: ${byteLen(telemetry)}`);
+
+  const devices = buildDeviceHistoryList(
+    ['Android · Chrome — Écran Spécial 🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥'],
+    'iPhone (iOS) · Safari (Mobile) — Édition Spéciale €€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€'
+  );
+  for (const d of devices) {
+    assert.ok(byteLen(d) <= 160, `device exceeded 160 bytes: ${byteLen(d)}`);
+  }
+
+  const disconnectEntry = buildWorkDisconnectEntry(
+    '2026-11-26T10:43:00.000Z',
+    'Déconnexion réseau imprévue à Fès-Meknès — tunnel SSH'
+  );
+  assert.ok(byteLen(disconnectEntry) <= 80, `disconnectEntry exceeded 80 bytes: ${byteLen(disconnectEntry)}`);
+
+  const split = splitFirstAndLastName('Éléonore-Chloé ' + 'É'.repeat(40));
+  assert.ok(byteLen(split.firstName) <= 60);
+  assert.ok(byteLen(split.lastName) <= 60);
+});

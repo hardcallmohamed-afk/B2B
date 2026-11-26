@@ -493,9 +493,25 @@ export interface SanitizedAppUserDoc {
   createdBy: string;
 }
 
-function clampString(value: unknown, maxLen: number, fallback = ''): string {
+const utf8Encoder = new TextEncoder();
+
+export function clampUtf8Bytes(value: unknown, maxBytes: number, fallback = ''): string {
   const str = typeof value === 'string' ? value : fallback;
-  return str.slice(0, maxLen);
+  if (maxBytes <= 0) return '';
+  if (utf8Encoder.encode(str).length <= maxBytes) return str;
+  let bytes = 0;
+  let out = '';
+  for (const ch of str) {
+    const chBytes = utf8Encoder.encode(ch).length;
+    if (bytes + chBytes > maxBytes) break;
+    out += ch;
+    bytes += chBytes;
+  }
+  return out;
+}
+
+function clampString(value: unknown, maxLen: number, fallback = ''): string {
+  return clampUtf8Bytes(value, maxLen, fallback);
 }
 
 export function sanitizeDocId(rawId: unknown, fallbackPrefix = 'doc'): string {
@@ -517,7 +533,7 @@ function sanitizeStringArray(arr: unknown, maxItems: number, maxItemLen: number)
   const out: string[] = [];
   for (const item of arr) {
     if (typeof item !== 'string') continue;
-    const trimmed = item.trim().slice(0, maxItemLen);
+    const trimmed = clampUtf8Bytes(item.trim(), maxItemLen);
     if (!trimmed || seen.has(trimmed)) continue;
     seen.add(trimmed);
     out.push(trimmed);

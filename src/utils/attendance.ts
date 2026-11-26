@@ -1,4 +1,11 @@
 // Pure client device detection, name splitting, and B2B work-hours attendance tracking helpers.
+import { clampUtf8Bytes } from './firestoreSanitize';
+import {
+  MOROCCO_CITIES_CATALOG,
+  detectMoroccoGeographyFromCoordinates,
+  normalizeCityKey,
+  resolveCityAndRegionFromZoneString,
+} from './moroccoCities';
 
 export type ClientDeviceType = 'desktop' | 'mobile' | 'tablet';
 
@@ -37,11 +44,11 @@ export function splitFirstAndLastName(displayName: string): SplitNameResult {
   }
   const parts = clean.split(' ');
   if (parts.length === 1) {
-    return { firstName: parts[0].slice(0, 60), lastName: '' };
+    return { firstName: clampUtf8Bytes(parts[0], 60), lastName: '' };
   }
   return {
-    firstName: parts[0].slice(0, 60),
-    lastName: parts.slice(1).join(' ').slice(0, 60),
+    firstName: clampUtf8Bytes(parts[0], 60),
+    lastName: clampUtf8Bytes(parts.slice(1).join(' '), 60),
   };
 }
 
@@ -104,7 +111,7 @@ export function detectClientDeviceInfo(
     deviceType,
     os,
     browser,
-    label: `${os} · ${browser} (${typeLabel})`.slice(0, 160),
+    label: clampUtf8Bytes(`${os} · ${browser} (${typeLabel})`, 160),
   };
 }
 
@@ -174,9 +181,9 @@ export function formatDateTimeShort(iso?: string): string {
 }
 
 export function buildWorkDisconnectEntry(iso: string, reason: string): string {
-  const cleanIso = (iso || new Date().toISOString()).trim().slice(0, 32);
-  const cleanReason = (reason || 'Déconnexion').trim().replace(/\|/g, '/').slice(0, 44);
-  return `${cleanIso}|${cleanReason}`.slice(0, 80);
+  const cleanIso = clampUtf8Bytes((iso || new Date().toISOString()).trim(), 32);
+  const cleanReason = clampUtf8Bytes((reason || 'Déconnexion').trim().replace(/\|/g, '/'), 44);
+  return clampUtf8Bytes(`${cleanIso}|${cleanReason}`, 80);
 }
 
 export function parseWorkDisconnectEvent(raw: string): ParsedWorkDisconnectEvent {
@@ -271,7 +278,7 @@ export function buildDeviceHistoryList(
   nextDeviceLabel: string,
   maxItems = 12
 ): string[] {
-  const cleanNext = stripFieldTelemetrySuffix(nextDeviceLabel).slice(0, 160);
+  const cleanNext = clampUtf8Bytes(stripFieldTelemetrySuffix(nextDeviceLabel), 160);
   const out: string[] = [];
   const seen = new Set<string>();
   if (cleanNext) {
@@ -279,7 +286,7 @@ export function buildDeviceHistoryList(
     out.push(cleanNext);
   }
   for (const item of existing || []) {
-    const clean = stripFieldTelemetrySuffix(item).slice(0, 160);
+    const clean = clampUtf8Bytes(stripFieldTelemetrySuffix(item), 160);
     if (!clean || seen.has(clean)) continue;
     seen.add(clean);
     out.push(clean);
@@ -359,13 +366,6 @@ export const FIELD_STATUS_META: Record<
   },
 };
 
-import {
-  MOROCCO_CITIES_CATALOG,
-  detectMoroccoGeographyFromCoordinates,
-  normalizeCityKey,
-  resolveCityAndRegionFromZoneString,
-} from './moroccoCities';
-
 export const MOROCCO_CITY_COORDS: Record<string, { lat: number; lng: number; label: string }> =
   Object.fromEntries(
     MOROCCO_CITIES_CATALOG.map((c) => [
@@ -375,16 +375,18 @@ export const MOROCCO_CITY_COORDS: Record<string, { lat: number; lng: number; lab
   );
 
 function sanitizeTelemetryPart(val: string | undefined, maxLen: number): string {
-  return (val || '')
-    .replace(/[|\r\n]/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim()
-    .slice(0, maxLen);
+  return clampUtf8Bytes(
+    (val || '')
+      .replace(/[|\r\n]/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim(),
+    maxLen
+  );
 }
 
 /**
  * Packs live field status, 6-decimal high-precision GPS coordinates (~0.11m precision),
- * and current client activity inside the 160-char currentDevice field
+ * and current client activity inside the 160-byte currentDevice field
  * so it is 100% compatible with deployed Firestore security rules.
  */
 export function encodeLiveFieldTelemetry(input: LiveFieldTelemetryInput): string {
@@ -400,7 +402,7 @@ export function encodeLiveFieldTelemetry(input: LiveFieldTelemetryInput): string
     : '';
   const clientPart = sanitizeTelemetryPart(input.clientName, 32);
   const actionPart = sanitizeTelemetryPart(input.actionLabel, 18);
-  return `${base}||@FT|${status}|${coordPart}|${clientPart}|${actionPart}`.slice(0, 160);
+  return clampUtf8Bytes(`${base}||@FT|${status}|${coordPart}|${clientPart}|${actionPart}`, 160);
 }
 
 export function parseLiveFieldTelemetry(

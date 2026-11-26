@@ -64,7 +64,7 @@ test('sanitizeFichePayload clamps strings, validates enums, caps enrichment clue
 
   assert.equal(out.id, 'fiche_bad_id');
   assert.equal(out.numeroFiche, 'OP-0042');
-  assert.equal(out.societe.length, 200);
+  assert.equal(Buffer.byteLength(out.societe, 'utf8'), 200);
   assert.equal(out.secteur, 'pme');
   assert.equal(out.statut, 'À contacter');
   assert.equal(out.telephonesSupplementaires?.length, 10);
@@ -172,7 +172,7 @@ test('sanitizeAppUserPayload enforces role enum, email lowercasing, and blueprin
   assert.equal(out.email, 'rep.meknes@orangepro.ma');
   assert.equal(out.displayName, 'Youssef Benali');
   assert.equal(out.role, 'commercial'); // invalid role safely falls back to commercial
-  assert.equal(out.zone.length, 100);
+  assert.equal(Buffer.byteLength(out.zone, 'utf8'), 100);
   assert.equal(out.active, true);
   assert.equal(out.createdBy, 'admin_123');
 });
@@ -575,6 +575,57 @@ test('sanitizeFicheAuditLogPayload, direct chat, coaching WebRTC, and contract c
   assert.equal(contractNotif.kind, 'contract_status_changed');
   assert.equal(contractNotif.payoutStatus, 'Refusé');
   assert.equal(contractNotif.payoutMad, 1500);
+});
+
+test('clampUtf8Bytes keeps user_presence and direct_chats payloads within Firestore UTF-8 byte limits', async () => {
+  const {
+    sanitizeUserPresencePayload,
+    sanitizeDirectChatChannelPayload,
+    clampUtf8Bytes,
+  } = await import('./firestoreSanitize');
+  const byteLen = (s: string) => Buffer.byteLength(s, 'utf8');
+
+  const accentedLong = 'Éàçù€—'.repeat(60) + '🚀'.repeat(20);
+  assert.ok(byteLen(clampUtf8Bytes(accentedLong, 160)) <= 160);
+
+  const pres = sanitizeUserPresencePayload({
+    uid: 'eHlHBvh4asbWuG24W1RAph3SHil1',
+    email: 'hardcallmohamed@gmail.com',
+    displayName: accentedLong,
+    firstName: accentedLong,
+    lastName: accentedLong,
+    phonePro: '📞'.repeat(20),
+    role: 'super_admin',
+    zone: accentedLong,
+    isOnline: true,
+    currentDevice: accentedLong,
+    devicesUsed: [accentedLong, 'Android · ' + accentedLong],
+    workHoursDisconnectTimes: ['2026-11-26T10:43:00Z|' + accentedLong],
+  });
+  assert.ok(byteLen(pres.displayName) <= 120);
+  assert.ok(byteLen(pres.firstName) <= 60);
+  assert.ok(byteLen(pres.lastName) <= 60);
+  assert.ok(byteLen(pres.phonePro) <= 30);
+  assert.ok(byteLen(pres.zone) <= 100);
+  assert.ok(byteLen(pres.currentDevice) <= 160);
+  for (const d of pres.devicesUsed) assert.ok(byteLen(d) <= 160);
+  for (const t of pres.workHoursDisconnectTimes) assert.ok(byteLen(t) <= 80);
+
+  const chan = sanitizeDirectChatChannelPayload({
+    collabUid: 'HFduvO7RQYVw9pLwJu8ndy6w0al1',
+    collabName: accentedLong,
+    collabEmail: 'collab@orangepro.ma',
+    collabZone: accentedLong,
+    lastMessageText: accentedLong,
+    lastSenderUid: 'eHlHBvh4asbWuG24W1RAph3SHil1',
+    lastSenderName: accentedLong,
+    unreadByAdmin: 0,
+    unreadByCollab: 1,
+  });
+  assert.ok(byteLen(chan.collabName) <= 120);
+  assert.ok(byteLen(chan.collabZone || '') <= 100);
+  assert.ok(byteLen(chan.lastMessageText) <= 500);
+  assert.ok(byteLen(chan.lastSenderName || '') <= 120);
 });
 
 
