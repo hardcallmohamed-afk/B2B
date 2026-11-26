@@ -10,7 +10,7 @@ import {
   getApp as getAdminApp,
 } from 'firebase-admin/app';
 import { getAuth as getAdminAuth } from 'firebase-admin/auth';
-import { getFirestore as getAdminFirestore } from 'firebase-admin/firestore';
+import { getFirestore as getAdminFirestore, FieldValue } from 'firebase-admin/firestore';
 import nodemailer from 'nodemailer';
 import dns from 'dns';
 import {
@@ -1385,8 +1385,8 @@ Produis un audit structuré, actionnable immédiatement sur le terrain (Meknès 
         key,
         active,
         updatedBy: caller.uid,
-        createdAt: getAdminFirestore.FieldValue?.serverTimestamp?.() || new Date(),
-        updatedAt: getAdminFirestore.FieldValue?.serverTimestamp?.() || new Date(),
+        createdAt: FieldValue.serverTimestamp() || new Date(),
+        updatedAt: FieldValue.serverTimestamp() || new Date(),
       }, { merge: true });
 
       res.json({ success: true, provider });

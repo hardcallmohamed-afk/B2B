@@ -60,6 +60,7 @@ import {
   type SanitizedAttendanceSessionDoc,
   type SanitizedActiviteDoc,
   type SyncDiff,
+  type PayoutStatus,
 } from './utils/firestoreSanitize';
 import { normalizeManagedRole, type ManagedAppUser, type ManagedUserRole } from './utils/authAccess';
 import type { TeamRole } from './utils/gamification';
@@ -725,39 +726,7 @@ export async function adminUpdateSignedContract(
     refusMotif?: string;
   }
 ): Promise<void> {
-  const path = `signed_contracts/${contractId}`;
-  const cleanProduit = updates.produitOrangePro.trim().slice(0, 200) || 'Pack Orange Pro';
-  const cleanPayout = Math.min(10000000, Math.max(0, Math.round(Number(updates.payoutMad) || 0)));
-  const cleanRef = typeof updates.referenceVirement === 'string' ? updates.referenceVirement.trim().slice(0, 80) : '';
-  const cleanMotif = typeof updates.refusMotif === 'string' ? updates.refusMotif.trim().slice(0, 200) : '';
-
-  if (updates.payoutStatus === 'Versé' && !cleanRef) {
-    throw new Error('Une référence de virement bancaire est obligatoire pour passer le contrat au statut « Versé ».');
-  }
-  if (updates.payoutStatus === 'Refusé' && !cleanMotif) {
-    throw new Error('Un motif de refus est obligatoire pour rejeter le contrat.');
-  }
-
-  const payload: DocumentData = {
-    produitOrangePro: cleanProduit,
-    tier: updates.tier,
-    payoutMad: cleanPayout,
-    payoutStatus: updates.payoutStatus,
-    updatedAt: serverTimestamp(),
-  };
-
-  if (cleanRef) {
-    payload.referenceVirement = cleanRef;
-  }
-  if (cleanMotif) {
-    payload.refusMotif = cleanMotif;
-  }
-
-  try {
-    await setDoc(doc(db, 'signed_contracts', contractId), payload, { merge: true });
-  } catch (error) {
-    handleFirestoreError(error, OperationType.UPDATE, path);
-  }
+  await updateOrUpsertSignedContract(contractId, updates, `signed_contracts/${contractId}`);
 }
 
 const BATCH_LIMIT = 400;
@@ -1740,7 +1709,21 @@ export async function managerUpdateSignedContract(
     refusMotif?: string;
   }
 ): Promise<void> {
-  const path = `signed_contracts/${contractId}`;
+  await updateOrUpsertSignedContract(contractId, updates, `signed_contracts/${contractId}`);
+}
+
+async function updateOrUpsertSignedContract(
+  contractId: string,
+  updates: {
+    produitOrangePro: string;
+    tier: 'Grand Compte' | 'PME' | 'TPE / Libéral';
+    payoutMad: number;
+    payoutStatus: PayoutStatus;
+    referenceVirement?: string;
+    refusMotif?: string;
+  },
+  operationPath: string
+): Promise<void> {
   const cleanProduit = updates.produitOrangePro.trim().slice(0, 200) || 'Pack Orange Pro';
   const cleanPayout = Math.min(10000000, Math.max(0, Math.round(Number(updates.payoutMad) || 0)));
   const cleanRef = typeof updates.referenceVirement === 'string' ? updates.referenceVirement.trim().slice(0, 80) : '';
@@ -1753,25 +1736,50 @@ export async function managerUpdateSignedContract(
     throw new Error('Un motif de refus est obligatoire pour rejeter le contrat.');
   }
 
-  const payload: DocumentData = {
-    produitOrangePro: cleanProduit,
-    tier: updates.tier,
-    payoutMad: cleanPayout,
-    payoutStatus: updates.payoutStatus,
-    updatedAt: serverTimestamp(),
-  };
-
-  if (cleanRef) {
-    payload.referenceVirement = cleanRef;
-  }
-  if (cleanMotif) {
-    payload.refusMotif = cleanMotif;
-  }
-
   try {
-    await setDoc(doc(db, 'signed_contracts', contractId), payload, { merge: true });
+    const docRef = doc(db, 'signed_contracts', contractId);
+    const snap = await getDoc(docRef);
+    if (snap.exists()) {
+      const payload: DocumentData = {
+        produitOrangePro: cleanProduit,
+        tier: updates.tier,
+        payoutMad: cleanPayout,
+        payoutStatus: updates.payoutStatus,
+        updatedAt: serverTimestamp(),
+      };
+      if (cleanRef) payload.referenceVirement = cleanRef;
+      else payload.referenceVirement = deleteField();
+      if (cleanMotif) payload.refusMotif = cleanMotif;
+      else payload.refusMotif = deleteField();
+
+      await updateDoc(docRef, payload);
+    } else {
+      const fullPayload: DocumentData = {
+        id: contractId,
+        orgScope: 'orange_pro_team',
+        ownerId: auth.currentUser?.uid || 'unknown',
+        ownerName: auth.currentUser?.displayName || 'Collaborateur',
+        ficheId: 'op_unknown',
+        numeroFiche: 'OP-0000',
+        societe: 'Client Orange Pro',
+        ville: 'Casablanca',
+        secteur: 'pme',
+        produitOrangePro: cleanProduit,
+        tier: updates.tier,
+        effectif: '1-10',
+        payoutMad: cleanPayout,
+        payoutStatus: updates.payoutStatus,
+        signedAt: new Date().toISOString(),
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      };
+      if (cleanRef) fullPayload.referenceVirement = cleanRef;
+      if (cleanMotif) fullPayload.refusMotif = cleanMotif;
+
+      await setDoc(docRef, fullPayload);
+    }
   } catch (error) {
-    handleFirestoreError(error, OperationType.UPDATE, path);
+    handleFirestoreError(error, OperationType.UPDATE, operationPath);
   }
 }
 

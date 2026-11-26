@@ -514,6 +514,7 @@ export const VALID_TEAM_ROLES = new Set([
 ] as const);
 export const VALID_ORANGE_TIERS = new Set(['Grand Compte', 'PME', 'TPE / Libéral'] as const);
 export const VALID_PAYOUT_STATUSES = new Set(['En attente', 'Validé', 'Versé', 'Refusé'] as const);
+export type PayoutStatus = 'En attente' | 'Validé' | 'Versé' | 'Refusé';
 
 export interface TeamStatLike {
   uid: string;
@@ -601,6 +602,7 @@ export interface SignedContractLike {
   payoutStatus: string;
   signedAt: string;
   referenceVirement?: string;
+  refusMotif?: string;
 }
 
 export interface SanitizedSignedContractDoc {

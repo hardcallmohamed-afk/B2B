@@ -597,16 +597,14 @@ service cloud.firestore {
 
       allow create: if isValidId(contractId)
         && isValidSignedContract(incoming(), contractId)
-        && incoming().createdAt == request.time
-        && incoming().updatedAt == request.time
-        && incoming().payoutMad == 0
-        && incoming().payoutStatus == 'En attente'
         && (
           isSuperAdmin()
+          || isTeamLeadOrManager()
           || (
-            isApprovedMember(request.auth.uid)
+            incoming().payoutMad == 0
+            && incoming().payoutStatus == 'En attente'
+            && isApprovedMember(request.auth.uid)
             && incoming().ownerId == request.auth.uid
-            && exists(/databases/$(database)/documents/users/$(request.auth.uid)/fiches/$(incoming().ficheId))
           )
         );
 
@@ -628,19 +626,30 @@ service cloud.firestore {
           !('payoutStatus' in incoming()) || isValidPayoutStatus(incoming().payoutStatus)
         )
         && (
-          ('payoutStatus' in incoming() && incoming().payoutStatus == 'Versé')
-          ? ('referenceVirement' in incoming() && incoming().referenceVirement is string && incoming().referenceVirement.size() >= 1 && incoming().referenceVirement.size() <= 80)
+          (
+            ('payoutStatus' in incoming() && incoming().payoutStatus == 'Versé')
+            ||
+            (!('payoutStatus' in incoming()) && existing().payoutStatus == 'Versé')
+          )
+          ? (
+              ('referenceVirement' in incoming() && incoming().referenceVirement is string && incoming().referenceVirement.size() >= 1 && incoming().referenceVirement.size() <= 80)
+              ||
+              ('referenceVirement' in existing() && existing().referenceVirement is string && existing().referenceVirement.size() >= 1 && existing().referenceVirement.size() <= 80)
+            )
           : true
         )
         && (
-          ('payoutStatus' in incoming() && incoming().payoutStatus == 'Refusé')
-          ? ('refusMotif' in incoming() && incoming().refusMotif is string && incoming().refusMotif.size() >= 1 && incoming().refusMotif.size() <= 200)
+          (
+            ('payoutStatus' in incoming() && incoming().payoutStatus == 'Refusé')
+            ||
+            (!('payoutStatus' in incoming()) && existing().payoutStatus == 'Refusé')
+          )
+          ? (
+              ('refusMotif' in incoming() && incoming().refusMotif is string && incoming().refusMotif.size() >= 1 && incoming().refusMotif.size() <= 200)
+              ||
+              ('refusMotif' in existing() && existing().refusMotif is string && existing().refusMotif.size() >= 1 && existing().refusMotif.size() <= 200)
+            )
           : true
-        )
-        && (
-          incoming().diff(existing()).affectedKeys().hasOnly([
-            'produitOrangePro', 'tier', 'payoutMad', 'payoutStatus', 'referenceVirement', 'refusMotif', 'updatedAt'
-          ])
         );
 
       allow delete: if isSuperAdmin() && isValidId(contractId);
