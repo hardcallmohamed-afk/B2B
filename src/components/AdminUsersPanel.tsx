@@ -32,11 +32,17 @@ import {
   ChevronUp,
   History,
   X,
+  MapPin,
+  Navigation,
+  Activity,
+  Building2,
+  Crown,
 } from 'lucide-react';
 import {
   adminCreateManagedUser,
   adminUpdateManagedUser,
   adminDeleteManagedUser,
+  adminUpdateUserManualBadges,
   adminUpsertApiKey,
   adminDeleteApiKey,
   fetchUserAttendanceSessions,
@@ -61,10 +67,15 @@ import { ADMIN_DISTINCTION_BADGES, type TeamStatRecord } from '../utils/gamifica
 import { getUserInitials } from '../utils/avatarResize';
 import {
   WORK_SCHEDULE_LABEL,
+  FIELD_STATUS_META,
   formatDateTimeShort,
   formatWorkedDuration,
+  parseLiveFieldTelemetry,
   parseWorkDisconnectEvent,
+  resolveCollaboratorCoordinates,
   splitFirstAndLastName,
+  type FieldActivityStatus,
+  type ParsedLiveFieldTelemetry,
 } from '../utils/attendance';
 import { BadgeArtwork } from './BadgeArtwork';
 import { RoleBadge } from './RoleBadge';
@@ -162,11 +173,12 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
     zone: string;
   }>({ displayName: '', phonePro: '', zone: '' });
 
-  // Suivi présence, appareils et pointage heures de travail
+  // Suivi présence, appareils, position GPS et pointage heures de travail
   const [attendanceSearch, setAttendanceSearch] = useState('');
   const [attendanceFilter, setAttendanceFilter] = useState<
-    'all' | 'online' | 'offline' | 'work_disconnect'
+    'all' | 'online' | 'en_rdv_client' | 'en_deplacement' | 'au_travail' | 'offline' | 'work_disconnect'
   >('all');
+  const [selectedRadarUid, setSelectedRadarUid] = useState<string>('');
   const [expandedSessionsUid, setExpandedSessionsUid] = useState<string | null>(null);
   const [sessionsByUid, setSessionsByUid] = useState<Record<string, AttendanceSessionRecord[]>>({});
   const [loadingSessionsUid, setLoadingSessionsUid] = useState<string | null>(null);
@@ -220,7 +232,7 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
     return map;
   }, [teamStats]);
 
-  // Liste consolidée (Super-Admin + tous les utilisateurs gérés + présences connues) pour le suivi complet
+  // Liste consolidée (Super-Admin + tous les utilisateurs gérés + présences connues) pour le suivi complet + radar dispatch
   const consolidatedTeamTracking = useMemo(() => {
     const seen = new Set<string>();
     const rows: Array<{
@@ -246,6 +258,14 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
       todayWorkedSeconds: number;
       totalWorkedSeconds: number;
       isSuperAdminRow: boolean;
+      telemetry: ParsedLiveFieldTelemetry;
+      fieldStatus: FieldActivityStatus;
+      coords: {
+        lat: number;
+        lng: number;
+        source: 'gps_live' | 'zone_reseau';
+        cityLabel: string;
+      };
     }> = [];
 
     const buildRow = (params: {
@@ -263,6 +283,15 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
       const split = splitFirstAndLastName(effectiveName);
       const firstName = pres?.firstName || split.firstName;
       const lastName = pres?.lastName || split.lastName;
+      const isOnline = Boolean(pres?.isOnline);
+      const effectiveZone = pres?.zone || stat?.zone || params.fallbackZone || 'Meknès';
+      const telemetry = parseLiveFieldTelemetry(pres?.currentDevice || '', isOnline, pres?.lastSeenAt);
+      const coords = resolveCollaboratorCoordinates({
+        uid: params.uid,
+        zone: effectiveZone,
+        lat: telemetry.lat,
+        lng: telemetry.lng,
+      });
       return {
         uid: params.uid,
         displayName: effectiveName,
@@ -272,10 +301,10 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
         phonePro: pres?.phonePro || '',
         avatarDataUrl: pres?.avatarDataUrl || stat?.avatarDataUrl || '',
         role: pres?.role || stat?.role || params.fallbackRole,
-        zone: pres?.zone || stat?.zone || params.fallbackZone,
+        zone: effectiveZone,
         active: params.active,
-        isOnline: Boolean(pres?.isOnline),
-        currentDevice: pres?.currentDevice || '',
+        isOnline,
+        currentDevice: telemetry.cleanDeviceLabel,
         devicesUsed: pres?.devicesUsed || [],
         lastLoginAt: pres?.lastLoginAt || '',
         lastLogoutAt: pres?.lastLogoutAt || '',
@@ -286,6 +315,9 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
         todayWorkedSeconds: pres?.todayWorkedSeconds || 0,
         totalWorkedSeconds: pres?.totalWorkedSeconds || 0,
         isSuperAdminRow: params.isSuperAdminRow,
+        telemetry,
+        fieldStatus: telemetry.status,
+        coords,
       };
     };
 
@@ -341,6 +373,15 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
 
   const attendanceSummary = useMemo(() => {
     const onlineCount = consolidatedTeamTracking.filter((r) => r.isOnline).length;
+    const withClientCount = consolidatedTeamTracking.filter(
+      (r) => r.fieldStatus === 'en_rdv_client'
+    ).length;
+    const movingCount = consolidatedTeamTracking.filter(
+      (r) => r.fieldStatus === 'en_deplacement'
+    ).length;
+    const workingCount = consolidatedTeamTracking.filter(
+      (r) => r.fieldStatus === 'au_travail' || r.fieldStatus === 'en_rdv_client' || r.fieldStatus === 'en_deplacement'
+    ).length;
     const totalTodaySec = consolidatedTeamTracking.reduce((s, r) => s + r.todayWorkedSeconds, 0);
     const totalWorkDisconnects = consolidatedTeamTracking.reduce(
       (s, r) => s + r.workHoursDisconnectCount,
@@ -349,6 +390,9 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
     return {
       totalMembers: consolidatedTeamTracking.length,
       onlineCount,
+      withClientCount,
+      movingCount,
+      workingCount,
       totalTodaySec,
       totalWorkDisconnects,
     };
@@ -358,6 +402,9 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
     const q = attendanceSearch.trim().toLowerCase();
     return consolidatedTeamTracking.filter((r) => {
       if (attendanceFilter === 'online' && !r.isOnline) return false;
+      if (attendanceFilter === 'en_rdv_client' && r.fieldStatus !== 'en_rdv_client') return false;
+      if (attendanceFilter === 'en_deplacement' && r.fieldStatus !== 'en_deplacement') return false;
+      if (attendanceFilter === 'au_travail' && r.fieldStatus !== 'au_travail') return false;
       if (attendanceFilter === 'offline' && r.isOnline) return false;
       if (attendanceFilter === 'work_disconnect' && r.workHoursDisconnectCount === 0) return false;
       if (!q) return true;
@@ -368,10 +415,20 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
         r.email.toLowerCase().includes(q) ||
         r.phonePro.toLowerCase().includes(q) ||
         r.currentDevice.toLowerCase().includes(q) ||
+        r.telemetry.clientName.toLowerCase().includes(q) ||
         r.zone.toLowerCase().includes(q)
       );
     });
   }, [consolidatedTeamTracking, attendanceSearch, attendanceFilter]);
+
+  const activeRadarMember = useMemo(() => {
+    return (
+      consolidatedTeamTracking.find((m) => m.uid === selectedRadarUid) ||
+      filteredTrackingRows[0] ||
+      consolidatedTeamTracking[0] ||
+      null
+    );
+  }, [consolidatedTeamTracking, filteredTrackingRows, selectedRadarUid]);
 
   const filteredUsers = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -490,6 +547,42 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
       onNotify(`Rôle mis à jour pour ${u.displayName}.`);
     } catch {
       onNotify('Impossible de modifier le rôle.', 'err');
+    } finally {
+      setBusyUid(null);
+    }
+  };
+
+  const handleGrantFullSupervisorAccess = async (u: ManagedAppUser) => {
+    setBusyUid(u.uid);
+    try {
+      await adminUpdateManagedUser(u.uid, {
+        displayName: u.displayName,
+        role: 'manager',
+        zone: u.zone,
+        active: true,
+        email: u.email,
+      });
+      const existingBadges = statByUid.get(u.uid)?.manualBadges || [];
+      const eliteSupervisorBadges = Array.from(
+        new Set([
+          ...existingBadges,
+          'role_superviseur_diversifia',
+          'role_chef_equipe',
+          'role_expert_gc',
+          'role_responsable_zone',
+        ])
+      );
+      await adminUpdateUserManualBadges(u.uid, eliteSupervisorBadges, {
+        displayName: u.displayName,
+        role: 'manager',
+        zone: u.zone,
+        active: true,
+      });
+      onNotify(
+        `Privilèges Superviseur Élite / Direction attribués à ${u.displayName} (rôle Manager + badges officiels de supervision).`
+      );
+    } catch {
+      onNotify('Impossible d’attribuer les privilèges Superviseur Élite.', 'err');
     } finally {
       setBusyUid(null);
     }
@@ -1434,6 +1527,20 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
                           ))}
                         </select>
 
+                        {u.role !== 'manager' && (
+                          <button
+                            type="button"
+                            disabled={isBusy}
+                            data-testid={`grant-supervisor-btn-${u.uid}`}
+                            onClick={() => void handleGrantFullSupervisorAccess(u)}
+                            title="Accorder immédiatement le rôle Superviseur / Manager + tous les badges officiels de supervision DIVERSIFIA"
+                            className="px-2.5 py-1 rounded-lg border border-orange-300 bg-orange-50 hover:bg-orange-100 text-orange-900 text-[11px] font-bold flex items-center gap-1"
+                          >
+                            <Crown className="w-3 h-3 text-orange-600" />
+                            Accès Superviseur Élite
+                          </button>
+                        )}
+
                         <button
                           type="button"
                           disabled={isBusy}
@@ -1574,7 +1681,7 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
       </div>
       )}
 
-      {/* Suivi Équipe, Profils complets, Appareils & Pointage Heures de Travail */}
+      {/* Suivi Équipe, Radar Dispatch Temps Réel, Position GPS, Activité Client & Pointage Heures de Travail */}
       {showAttendanceSection && (
       <div
         data-testid="admin-attendance-panel"
@@ -1583,11 +1690,11 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
             <h3 className="text-sm font-bold text-stone-900 flex items-center gap-2">
-              <Clock className="w-4 h-4 text-orange-600" />
-              Suivi Collaborateurs — Profils, Appareils &amp; Pointage Heures de Travail
+              <Navigation className="w-4 h-4 text-orange-600" />
+              Radar Dispatch Terrain Temps Réel — Position GPS, Statut Client &amp; Pointage Collaborateurs
             </h3>
             <p className="text-xs text-stone-500 mt-0.5">
-              Vue réservée au Super-Admin : Nom &amp; Prénom, photo, téléphone, appareils utilisés, heure de connexion, heure de sortie, déconnexions pendant les heures de travail ({WORK_SCHEDULE_LABEL}) et heures travaillées.
+              Console strictement privée Super-Admin (invisible côté collaborateur) : suivez en direct qui est <strong>Avec Client / En RDV</strong>, <strong>En Déplacement</strong>, <strong>Au Travail</strong> ou <strong>Hors Ligne</strong>, la fiche client traitée, la position GPS et les heures travaillées ({WORK_SCHEDULE_LABEL}).
             </p>
           </div>
 
@@ -1597,13 +1704,23 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
               value={attendanceFilter}
               onChange={(e) =>
                 setAttendanceFilter(
-                  e.target.value as 'all' | 'online' | 'offline' | 'work_disconnect'
+                  e.target.value as
+                    | 'all'
+                    | 'online'
+                    | 'en_rdv_client'
+                    | 'en_deplacement'
+                    | 'au_travail'
+                    | 'offline'
+                    | 'work_disconnect'
                 )
               }
               className="px-2.5 py-1.5 rounded-lg border border-stone-300 bg-stone-50 text-xs font-semibold text-stone-800"
             >
               <option value="all">Tous les membres ({attendanceSummary.totalMembers})</option>
               <option value="online">En ligne ({attendanceSummary.onlineCount})</option>
+              <option value="en_rdv_client">Avec Client / En RDV ({attendanceSummary.withClientCount})</option>
+              <option value="en_deplacement">En Déplacement ({attendanceSummary.movingCount})</option>
+              <option value="au_travail">Au Travail ({attendanceSummary.workingCount})</option>
               <option value="offline">
                 Hors ligne ({attendanceSummary.totalMembers - attendanceSummary.onlineCount})
               </option>
@@ -1615,38 +1732,319 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
                 type="search"
                 value={attendanceSearch}
                 onChange={(e) => setAttendanceSearch(e.target.value)}
-                placeholder="Nom, prénom, tél, appareil..."
+                placeholder="Nom, client, ville, appareil..."
                 className="w-full pl-8 pr-3 py-1.5 rounded-lg border border-stone-300 text-xs focus:outline-none focus:border-orange-600"
               />
             </div>
           </div>
         </div>
 
-        {/* 4 KPI de présence */}
-        <div className="grid grid-cols-2 lg:grid-cols-4 gap-2.5 text-xs">
+        {/* 6 KPI de présence & statut terrain temps réel */}
+        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2.5 text-xs">
           <div className="rounded-xl border border-stone-200 bg-stone-50/70 p-3">
             <div className="text-[11px] font-semibold text-stone-500">Membres suivis</div>
             <div className="text-lg font-extrabold text-stone-900 tabular-nums mt-0.5">
               {attendanceSummary.totalMembers}
             </div>
           </div>
-          <div className="rounded-xl border border-emerald-200 bg-emerald-50/60 p-3">
-            <div className="text-[11px] font-semibold text-emerald-800">En ligne maintenant</div>
-            <div className="text-lg font-extrabold text-emerald-900 tabular-nums mt-0.5">
-              {attendanceSummary.onlineCount}
+          <div className="rounded-xl border border-orange-200 bg-orange-50/70 p-3">
+            <div className="text-[11px] font-semibold text-orange-900">Avec Client / En RDV</div>
+            <div className="text-lg font-extrabold text-orange-700 tabular-nums mt-0.5">
+              {attendanceSummary.withClientCount}
             </div>
           </div>
-          <div className="rounded-xl border border-orange-200 bg-orange-50/60 p-3">
-            <div className="text-[11px] font-semibold text-orange-800">Heures travaillées (aujourd&apos;hui)</div>
-            <div className="text-lg font-extrabold text-orange-950 tabular-nums mt-0.5">
+          <div className="rounded-xl border border-sky-200 bg-sky-50/70 p-3">
+            <div className="text-[11px] font-semibold text-sky-900">En Déplacement</div>
+            <div className="text-lg font-extrabold text-sky-800 tabular-nums mt-0.5">
+              {attendanceSummary.movingCount}
+            </div>
+          </div>
+          <div className="rounded-xl border border-emerald-200 bg-emerald-50/60 p-3">
+            <div className="text-[11px] font-semibold text-emerald-800">Au Travail (Actifs)</div>
+            <div className="text-lg font-extrabold text-emerald-900 tabular-nums mt-0.5">
+              {attendanceSummary.workingCount}
+            </div>
+          </div>
+          <div className="rounded-xl border border-stone-200 bg-stone-50/70 p-3">
+            <div className="text-[11px] font-semibold text-stone-700">Heures (aujourd&apos;hui)</div>
+            <div className="text-lg font-extrabold text-stone-900 tabular-nums mt-0.5">
               {formatWorkedDuration(attendanceSummary.totalTodaySec)}
             </div>
           </div>
           <div className="rounded-xl border border-amber-200 bg-amber-50/60 p-3">
-            <div className="text-[11px] font-semibold text-amber-900">Déconnexions heures travail</div>
+            <div className="text-[11px] font-semibold text-amber-900">Déco. heures travail</div>
             <div className="text-lg font-extrabold text-amber-950 tabular-nums mt-0.5">
               {attendanceSummary.totalWorkDisconnects}
             </div>
+          </div>
+        </div>
+
+        {/* Radar Dispatch Terrain Temps Réel (Carte Interactive Maroc & Corridor Fès-Meknès-Rabat-Casablanca) */}
+        <div
+          data-testid="live-field-dispatch-radar"
+          className="rounded-xl border border-stone-200 bg-stone-900 text-stone-100 p-4 grid grid-cols-1 lg:grid-cols-12 gap-4 items-stretch"
+        >
+          {/* Carte SVG Interactive (7 colonnes) */}
+          <div className="lg:col-span-7 flex flex-col justify-between space-y-2.5">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <Activity className="w-4 h-4 text-orange-400" />
+                <span className="text-xs font-bold tracking-tight text-white">
+                  Carte Radar Dispatch Temps Réel — Réseau National &amp; Axe Fès · Meknès · Rabat · Casablanca
+                </span>
+              </div>
+              <span className="text-[11px] font-mono tabular-nums text-stone-400">
+                Flux Cloud Firestore /user_presence · Silencieux
+              </span>
+            </div>
+
+            <div className="relative rounded-xl border border-stone-800 bg-stone-950 overflow-hidden h-64">
+              <svg
+                viewBox="0 0 640 260"
+                className="w-full h-full select-none"
+                role="img"
+                aria-label="Carte Radar Dispatch Collaborateurs Maroc"
+              >
+                {/* Grille radar subtile */}
+                <defs>
+                  <pattern id="dispatch-grid" width="40" height="40" patternUnits="userSpaceOnUse">
+                    <path
+                      d="M 40 0 L 0 0 0 40"
+                      fill="none"
+                      stroke="rgba(255,255,255,0.05)"
+                      strokeWidth="1"
+                    />
+                  </pattern>
+                </defs>
+                <rect width="640" height="260" fill="url(#dispatch-grid)" />
+
+                {/* Axes routiers / autoroutiers B2B Maroc (Casablanca - Rabat - Kénitra - Meknès - Fès - Oujda / Tanger / Marrakech) */}
+                <path
+                  d="M 110 185 L 185 140 L 230 115 L 325 130 L 395 120 L 545 85"
+                  fill="none"
+                  stroke="rgba(234,88,12,0.32)"
+                  strokeWidth="2.5"
+                  strokeDasharray="5 4"
+                />
+                <path
+                  d="M 230 115 L 275 45 M 110 185 L 95 230 M 325 130 L 355 175"
+                  fill="none"
+                  stroke="rgba(148,163,184,0.22)"
+                  strokeWidth="1.5"
+                  strokeDasharray="3 3"
+                />
+
+                {/* Repères villes majeures */}
+                {[
+                  { name: 'Tanger', x: 275, y: 42 },
+                  { name: 'Kénitra', x: 228, y: 108 },
+                  { name: 'Rabat', x: 185, y: 138 },
+                  { name: 'Casablanca', x: 112, y: 182 },
+                  { name: 'Marrakech', x: 96, y: 232 },
+                  { name: 'Khémisset', x: 265, y: 132 },
+                  { name: 'Meknès', x: 325, y: 128 },
+                  { name: 'El Hajeb', x: 342, y: 154 },
+                  { name: 'Ifrane', x: 365, y: 174 },
+                  { name: 'Fès', x: 398, y: 118 },
+                  { name: 'Oujda', x: 545, y: 84 },
+                ].map((c) => (
+                  <g key={c.name}>
+                    <circle cx={c.x} cy={c.y} r={2.5} fill="rgba(148,163,184,0.55)" />
+                    <text
+                      x={c.x + 6}
+                      y={c.y + 3}
+                      fill="rgba(148,163,184,0.75)"
+                      fontSize="9"
+                      fontFamily="monospace"
+                    >
+                      {c.name}
+                    </text>
+                  </g>
+                ))}
+
+                {/* Marqueurs temps réel des collaborateurs */}
+                {consolidatedTeamTracking.map((m, idx) => {
+                  // Projection géographique Maroc vers viewport 640x260
+                  // lng: [-9.8 .. -1.8] -> x: [50 .. 580], lat: [30.2 .. 35.9] -> y: [238 .. 32]
+                  const normX = Math.min(1, Math.max(0, (m.coords.lng - -9.6) / (-1.8 - -9.6)));
+                  const normY = Math.min(1, Math.max(0, (35.9 - m.coords.lat) / (35.9 - 30.2)));
+                  const px = Math.round(55 + normX * 525 + ((idx % 5) - 2) * 7);
+                  const py = Math.round(32 + normY * 206 + ((idx % 3) - 1) * 6);
+                  const meta = FIELD_STATUS_META[m.fieldStatus];
+                  const isSelected = activeRadarMember?.uid === m.uid;
+
+                  return (
+                    <g
+                      key={m.uid}
+                      onClick={() => setSelectedRadarUid(m.uid)}
+                      className="cursor-pointer"
+                    >
+                      {isSelected && (
+                        <circle
+                          cx={px}
+                          cy={py}
+                          r={16}
+                          fill="none"
+                          stroke={meta.pinColor}
+                          strokeWidth="2"
+                          opacity="0.7"
+                        />
+                      )}
+                      <circle
+                        cx={px}
+                        cy={py}
+                        r={isSelected ? 8 : 6.5}
+                        fill={meta.pinColor}
+                        stroke="#FFFFFF"
+                        strokeWidth="2"
+                      />
+                      <text
+                        x={px}
+                        y={py - 11}
+                        textAnchor="middle"
+                        fill="#FFFFFF"
+                        fontSize="9.5"
+                        fontWeight="bold"
+                      >
+                        {m.firstName || m.displayName.split(' ')[0]}
+                      </text>
+                    </g>
+                  );
+                })}
+              </svg>
+            </div>
+
+            {/* Légende statuts dispatch */}
+            <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-stone-300">
+              <div className="flex flex-wrap items-center gap-3">
+                {(
+                  [
+                    'en_rdv_client',
+                    'en_deplacement',
+                    'au_travail',
+                    'en_pause',
+                    'hors_ligne',
+                  ] as FieldActivityStatus[]
+                ).map((st) => (
+                  <span key={st} className="inline-flex items-center gap-1.5">
+                    <span
+                      className="w-2.5 h-2.5 rounded-full inline-block"
+                      style={{ backgroundColor: FIELD_STATUS_META[st].pinColor }}
+                    />
+                    <span>{FIELD_STATUS_META[st].shortLabel}</span>
+                  </span>
+                ))}
+              </div>
+              <span className="text-stone-400">Cliquez sur un point pour inspecter le collaborateur</span>
+            </div>
+          </div>
+
+          {/* Fiche Focus Collaborateur sélectionné sur le Radar (5 colonnes) */}
+          <div className="lg:col-span-5 rounded-xl border border-stone-800 bg-stone-950/90 p-3.5 flex flex-col justify-between space-y-3 text-xs">
+            {activeRadarMember ? (
+              <>
+                <div className="space-y-2.5">
+                  <div className="flex items-start justify-between gap-2">
+                    <div>
+                      <div className="text-[10px] font-mono uppercase text-orange-400">
+                        Focus Télémétrie Collaborateur
+                      </div>
+                      <div className="text-sm font-extrabold text-white mt-0.5 flex items-center gap-2 flex-wrap">
+                        <span>{activeRadarMember.displayName}</span>
+                        <span
+                          className={`text-[10px] font-bold px-2 py-0.5 rounded-md ${
+                            FIELD_STATUS_META[activeRadarMember.fieldStatus].badgeCls
+                          }`}
+                        >
+                          {FIELD_STATUS_META[activeRadarMember.fieldStatus].label}
+                        </span>
+                      </div>
+                    </div>
+                    <a
+                      href={`https://www.google.com/maps?q=${activeRadarMember.coords.lat},${activeRadarMember.coords.lng}`}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="px-2.5 py-1.5 rounded-lg bg-orange-600 hover:bg-orange-500 text-white text-[11px] font-bold inline-flex items-center gap-1 shrink-0"
+                    >
+                      <MapPin className="w-3.5 h-3.5" />
+                      Google Maps
+                    </a>
+                  </div>
+
+                  <div className="rounded-lg border border-stone-800 bg-stone-900/90 p-2.5 space-y-1.5">
+                    <div className="flex items-center justify-between text-[11px]">
+                      <span className="text-stone-400 flex items-center gap-1">
+                        <Building2 className="w-3.5 h-3.5 text-orange-400" />
+                        Client / Activité en cours :
+                      </span>
+                      <span className="font-semibold text-orange-300">
+                        {activeRadarMember.telemetry.actionLabel || (activeRadarMember.isOnline ? 'Prospection CRM' : 'Hors session')}
+                      </span>
+                    </div>
+                    <div className="text-xs font-bold text-white truncate">
+                      {activeRadarMember.telemetry.clientName
+                        ? activeRadarMember.telemetry.clientName
+                        : activeRadarMember.isOnline
+                          ? `Portefeuille actif (${activeRadarMember.zone})`
+                          : 'Aucune fiche client ouverte actuellement'}
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-2 text-[11px]">
+                    <div className="rounded-lg border border-stone-800 bg-stone-900/70 p-2">
+                      <div className="text-stone-400">Position &amp; Source</div>
+                      <div className="font-mono font-bold text-stone-100 tabular-nums mt-0.5">
+                        {activeRadarMember.coords.lat.toFixed(4)}, {activeRadarMember.coords.lng.toFixed(4)}
+                      </div>
+                      <div className="text-[10px] text-stone-400 mt-0.5">
+                        {activeRadarMember.coords.source === 'gps_live'
+                          ? `GPS Direct (±${activeRadarMember.telemetry.accuracyMeters ?? 25}m · ${activeRadarMember.telemetry.speedKmh ?? 0} km/h)`
+                          : `Zone Réseau (${activeRadarMember.coords.cityLabel})`}
+                      </div>
+                    </div>
+
+                    <div className="rounded-lg border border-stone-800 bg-stone-900/70 p-2">
+                      <div className="text-stone-400">Temps travaillé</div>
+                      <div className="font-mono font-bold text-emerald-400 tabular-nums mt-0.5">
+                        Auj. : {formatWorkedDuration(activeRadarMember.todayWorkedSeconds)}
+                      </div>
+                      <div className="text-[10px] text-stone-400 tabular-nums mt-0.5">
+                        Cumul : {formatWorkedDuration(activeRadarMember.totalWorkedSeconds)}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Sélecteur rapide de collaborateur sur le radar */}
+                <div className="pt-2 border-t border-stone-800 space-y-1.5">
+                  <div className="text-[10px] font-semibold text-stone-400">
+                    Sélection rapide collaborateur ({consolidatedTeamTracking.length}) :
+                  </div>
+                  <div className="flex flex-wrap gap-1.5 max-h-20 overflow-y-auto">
+                    {consolidatedTeamTracking.map((m) => (
+                      <button
+                        key={m.uid}
+                        type="button"
+                        onClick={() => setSelectedRadarUid(m.uid)}
+                        className={`px-2 py-1 rounded-md text-[11px] font-semibold transition-colors inline-flex items-center gap-1.5 ${
+                          activeRadarMember.uid === m.uid
+                            ? 'bg-orange-600 text-white'
+                            : 'bg-stone-800 text-stone-300 hover:bg-stone-700'
+                        }`}
+                      >
+                        <span
+                          className="w-2 h-2 rounded-full"
+                          style={{ backgroundColor: FIELD_STATUS_META[m.fieldStatus].pinColor }}
+                        />
+                        <span className="truncate max-w-28">{m.displayName}</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </>
+            ) : (
+              <div className="text-stone-400 text-center py-8">Aucun collaborateur à afficher.</div>
+            )}
           </div>
         </div>
 
@@ -1664,6 +2062,7 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
               const recentDisconnects = member.workHoursDisconnectTimes
                 .slice(0, 3)
                 .map((raw) => parseWorkDisconnectEvent(raw));
+              const fieldMeta = FIELD_STATUS_META[member.fieldStatus];
 
               return (
                 <div
@@ -1671,7 +2070,7 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
                   className="rounded-xl border border-stone-200 bg-stone-50/40 p-3.5 space-y-3 text-xs"
                 >
                   <div className="flex flex-wrap items-start justify-between gap-3">
-                    {/* Identité : Photo, Nom, Prénom, Rôle, Téléphone, Email */}
+                    {/* Identité : Photo, Nom, Prénom, Rôle, Statut Terrain, Client Actif, Téléphone, Email */}
                     <div className="flex items-start gap-3 min-w-0">
                       <div className="relative shrink-0">
                         {member.avatarDataUrl ? (
@@ -1712,6 +2111,13 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
                             )}
                             {member.isOnline ? 'En ligne' : 'Hors ligne'}
                           </span>
+                          <span
+                            data-testid={`member-field-status-${member.uid}`}
+                            className={`inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-md ${fieldMeta.badgeCls}`}
+                          >
+                            <Navigation className="w-3 h-3" />
+                            {fieldMeta.label}
+                          </span>
                         </div>
 
                         <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[11px] text-stone-600">
@@ -1724,7 +2130,33 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
                           <span>
                             Zone : <strong className="text-stone-800">{member.zone || '—'}</strong>
                           </span>
+                          <span className="font-mono text-[11px] text-stone-700 tabular-nums">
+                            GPS :{' '}
+                            <a
+                              href={`https://www.google.com/maps?q=${member.coords.lat},${member.coords.lng}`}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="font-bold text-orange-700 hover:underline"
+                            >
+                              {member.coords.lat.toFixed(4)}, {member.coords.lng.toFixed(4)}
+                            </a>{' '}
+                            ({member.coords.source === 'gps_live' ? 'GPS Direct' : member.coords.cityLabel})
+                          </span>
                         </div>
+
+                        {(member.telemetry.clientName || member.telemetry.actionLabel) && (
+                          <div className="flex flex-wrap items-center gap-2 text-[11px] bg-orange-50/80 border border-orange-200/80 rounded-lg px-2.5 py-1 text-orange-950">
+                            <Building2 className="w-3.5 h-3.5 text-orange-600 shrink-0" />
+                            <span>
+                              Activité en direct :{' '}
+                              <strong>
+                                {member.telemetry.clientName
+                                  ? `${member.telemetry.clientName} · ${member.telemetry.actionLabel}`
+                                  : member.telemetry.actionLabel}
+                              </strong>
+                            </span>
+                          </div>
+                        )}
 
                         <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px]">
                           <span className="inline-flex items-center gap-1 text-stone-700">
@@ -1749,19 +2181,30 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
                       </div>
                     </div>
 
-                    <button
-                      type="button"
-                      onClick={() => void handleToggleUserSessions(member.uid)}
-                      className="px-2.5 py-1.5 rounded-lg border border-stone-300 bg-white hover:bg-stone-100 text-stone-800 text-[11px] font-semibold inline-flex items-center gap-1.5 shrink-0"
-                    >
-                      <History className="w-3.5 h-3.5 text-orange-600" />
-                      Historique pointage
-                      {isExpanded ? (
-                        <ChevronUp className="w-3.5 h-3.5" />
-                      ) : (
-                        <ChevronDown className="w-3.5 h-3.5" />
-                      )}
-                    </button>
+                    <div className="flex flex-wrap items-center gap-1.5 shrink-0">
+                      <a
+                        href={`https://www.google.com/maps?q=${member.coords.lat},${member.coords.lng}`}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="px-2.5 py-1.5 rounded-lg border border-orange-200 bg-orange-50 hover:bg-orange-100 text-orange-900 text-[11px] font-semibold inline-flex items-center gap-1"
+                      >
+                        <MapPin className="w-3.5 h-3.5 text-orange-600" />
+                        Localiser
+                      </a>
+                      <button
+                        type="button"
+                        onClick={() => void handleToggleUserSessions(member.uid)}
+                        className="px-2.5 py-1.5 rounded-lg border border-stone-300 bg-white hover:bg-stone-100 text-stone-800 text-[11px] font-semibold inline-flex items-center gap-1.5"
+                      >
+                        <History className="w-3.5 h-3.5 text-orange-600" />
+                        Historique pointage
+                        {isExpanded ? (
+                          <ChevronUp className="w-3.5 h-3.5" />
+                        ) : (
+                          <ChevronDown className="w-3.5 h-3.5" />
+                        )}
+                      </button>
+                    </div>
                   </div>
 
                   {/* Grille Pointage & Appareils */}

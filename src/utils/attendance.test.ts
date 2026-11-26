@@ -11,6 +11,11 @@ import {
   shouldFlagAbruptClosure,
   computeHeartbeatDeltaSeconds,
   buildDeviceHistoryList,
+  encodeLiveFieldTelemetry,
+  parseLiveFieldTelemetry,
+  resolveCollaboratorCoordinates,
+  stripFieldTelemetrySuffix,
+  computeDistanceKm,
 } from './attendance';
 
 test('splitFirstAndLastName separates prénom and nom cleanly', () => {
@@ -88,4 +93,47 @@ test('formatWorkedDuration, disconnect entry parsing, and heartbeat delta caps b
     ['Windows · Chrome (PC / Bureau)', 'Android · Chrome (Mobile)']
   );
   assert.match(getLocalDateKey(new Date(2026, 10, 25)), /^2026-11-25$/);
+});
+
+test('encodeLiveFieldTelemetry, parseLiveFieldTelemetry, and resolveCollaboratorCoordinates keep telemetry <= 160 chars and decode accurately', () => {
+  const encoded = encodeLiveFieldTelemetry({
+    baseDeviceLabel: 'iPhone (iOS) · Safari (Mobile)',
+    status: 'en_rdv_client',
+    lat: 33.8935,
+    lng: -5.5473,
+    accuracyMeters: 15,
+    speedKmh: 0,
+    clientName: 'Clinique Atlas (Meknès)',
+    actionLabel: 'Signature contrat',
+  });
+  assert.ok(encoded.length <= 160);
+  assert.equal(stripFieldTelemetrySuffix(encoded), 'iPhone (iOS) · Safari (Mobile)');
+
+  const parsed = parseLiveFieldTelemetry(encoded, true, new Date().toISOString());
+  assert.equal(parsed.cleanDeviceLabel, 'iPhone (iOS) · Safari (Mobile)');
+  assert.equal(parsed.status, 'en_rdv_client');
+  assert.equal(parsed.hasLiveGps, true);
+  assert.equal(parsed.lat, 33.8935);
+  assert.equal(parsed.lng, -5.5473);
+  assert.equal(parsed.accuracyMeters, 15);
+  assert.equal(parsed.clientName, 'Clinique Atlas (Meknès)');
+  assert.equal(parsed.actionLabel, 'Signature contrat');
+
+  // Offline status overrides active status
+  const parsedOffline = parseLiveFieldTelemetry(encoded, false);
+  assert.equal(parsedOffline.status, 'hors_ligne');
+
+  // Zone fallback when GPS is null
+  const fallbackCoords = resolveCollaboratorCoordinates({
+    uid: 'user_fes_01',
+    zone: 'Fès',
+    lat: null,
+    lng: null,
+  });
+  assert.equal(fallbackCoords.source, 'zone_reseau');
+  assert.equal(fallbackCoords.cityLabel, 'Fès');
+  assert.ok(Math.abs(fallbackCoords.lat - 34.0331) < 0.05);
+
+  const distFesMeknes = computeDistanceKm(34.0331, -5.0003, 33.8935, -5.5473);
+  assert.ok(distFesMeknes > 45 && distFesMeknes < 65);
 });

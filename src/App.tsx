@@ -119,10 +119,12 @@ import {
 } from './utils/pasteExtractor';
 import {
   detectClientDeviceInfo,
+  encodeLiveFieldTelemetry,
   getLocalDateKey,
   isDuringWorkHours,
   shouldFlagAbruptClosure,
   computeHeartbeatDeltaSeconds,
+  type FieldActivityStatus,
 } from './utils/attendance';
 import {
   auth,
@@ -3101,8 +3103,70 @@ export default function App() {
     totalBaseSeconds: number;
     sessionSeconds: number;
     deviceLabel: string;
+    baseDeviceLabel: string;
     closed: boolean;
   } | null>(null);
+  const liveFieldContextRef = useRef<{
+    lat: number | null;
+    lng: number | null;
+    accuracyMeters: number | null;
+    speedKmh: number | null;
+    clientName: string;
+    actionLabel: string;
+    lastClientActivityMs: number;
+    lastMoveActivityMs: number;
+  }>({
+    lat: null,
+    lng: null,
+    accuracyMeters: null,
+    speedKmh: null,
+    clientName: '',
+    actionLabel: 'Prospection CRM',
+    lastClientActivityMs: 0,
+    lastMoveActivityMs: 0,
+  });
+
+  const recordLiveClientActivity = useCallback(
+    (societe: string, ville: string, actionLabel: string) => {
+      const cleanSoc = (societe || '').trim();
+      const cleanVille = (ville || '').trim();
+      const label = cleanSoc
+        ? cleanVille
+          ? `${cleanSoc} (${cleanVille})`
+          : cleanSoc
+        : '';
+      liveFieldContextRef.current.clientName = label;
+      liveFieldContextRef.current.actionLabel = (actionLabel || 'RDV / Action Client').trim();
+      liveFieldContextRef.current.lastClientActivityMs = Date.now();
+
+      const cur = activeAttendanceRef.current;
+      if (!cur || cur.closed || navigator.onLine === false) return;
+      const ctx = liveFieldContextRef.current;
+      const status: FieldActivityStatus = label ? 'en_rdv_client' : 'au_travail';
+      const encodedDevice = encodeLiveFieldTelemetry({
+        baseDeviceLabel: cur.baseDeviceLabel || cur.deviceLabel,
+        status,
+        lat: ctx.lat,
+        lng: ctx.lng,
+        accuracyMeters: ctx.accuracyMeters,
+        speedKmh: ctx.speedKmh,
+        clientName: ctx.clientName,
+        actionLabel: ctx.actionLabel,
+      });
+      cur.deviceLabel = encodedDevice;
+      heartbeatAttendanceSession({
+        uid: cur.uid,
+        sessionId: cur.sessionId,
+        nowIso: new Date().toISOString(),
+        dateKey: cur.dateKey,
+        todayWorkedSeconds: cur.todayBaseSeconds,
+        totalWorkedSeconds: cur.totalBaseSeconds,
+        sessionWorkedSeconds: cur.sessionSeconds,
+        deviceLabel: encodedDevice,
+      }).catch(() => {});
+    },
+    []
+  );
   const latestLocalStateRef = useRef({
     fiches,
     villesState,
@@ -3434,6 +3498,39 @@ export default function App() {
       localSnap.villesState.defaultVille ||
       'Meknès';
 
+    const computeLiveTelemetryLabel = () => {
+      const ctx = liveFieldContextRef.current;
+      const now = Date.now();
+      const hasRecentClient =
+        Boolean(ctx.clientName) && now - ctx.lastClientActivityMs <= 12 * 60 * 1000;
+      const isMoving =
+        (typeof ctx.speedKmh === 'number' && ctx.speedKmh >= 4) ||
+        now - ctx.lastMoveActivityMs <= 2 * 60 * 1000;
+
+      const status: FieldActivityStatus = hasRecentClient
+        ? 'en_rdv_client'
+        : isMoving
+          ? 'en_deplacement'
+          : 'au_travail';
+
+      return encodeLiveFieldTelemetry({
+        baseDeviceLabel: deviceInfo.label,
+        status,
+        lat: ctx.lat,
+        lng: ctx.lng,
+        accuracyMeters: ctx.accuracyMeters,
+        speedKmh: ctx.speedKmh,
+        clientName: hasRecentClient ? ctx.clientName : '',
+        actionLabel: hasRecentClient
+          ? ctx.actionLabel
+          : isMoving
+            ? 'Déplacement Terrain'
+            : 'Prospection CRM',
+      });
+    };
+
+    const initialTelemetryLabel = computeLiveTelemetryLabel();
+
     startAttendanceSession({
       uid,
       email,
@@ -3442,7 +3539,7 @@ export default function App() {
       avatarDataUrl: localSnap.userProfile.avatarDataUrl || '',
       role: currentUserRole,
       zone: initZone,
-      deviceLabel: deviceInfo.label,
+      deviceLabel: initialTelemetryLabel,
       deviceType: deviceInfo.deviceType,
       sessionId,
       loginAtIso: nowIso,
@@ -3464,7 +3561,8 @@ export default function App() {
           todayBaseSeconds: res.todayWorkedSeconds,
           totalBaseSeconds: res.totalWorkedSeconds,
           sessionSeconds: 0,
-          deviceLabel: deviceInfo.label,
+          deviceLabel: computeLiveTelemetryLabel(),
+          baseDeviceLabel: deviceInfo.label,
           closed: false,
         };
       })
@@ -3488,6 +3586,7 @@ export default function App() {
         cur.sessionSeconds += delta;
       }
       cur.lastTickMs = tickMs;
+      cur.deviceLabel = computeLiveTelemetryLabel();
 
       if (commitNetwork && navigator.onLine !== false) {
         heartbeatAttendanceSession({
@@ -3503,9 +3602,51 @@ export default function App() {
       }
     };
 
+    // Suivi GPS temps réel silencieux en arrière-plan (lorsque disponible sur l'appareil)
+    let geoWatchId: number | null = null;
+    if (typeof navigator !== 'undefined' && 'geolocation' in navigator) {
+      try {
+        geoWatchId = navigator.geolocation.watchPosition(
+          (pos) => {
+            if (cancelled) return;
+            const prevLat = liveFieldContextRef.current.lat;
+            const prevLng = liveFieldContextRef.current.lng;
+            const nextLat = pos.coords.latitude;
+            const nextLng = pos.coords.longitude;
+            const spdKmh =
+              typeof pos.coords.speed === 'number' && Number.isFinite(pos.coords.speed) && pos.coords.speed > 0
+                ? Math.round(pos.coords.speed * 3.6)
+                : 0;
+            if (
+              prevLat !== null &&
+              prevLng !== null &&
+              (Math.abs(nextLat - prevLat) > 0.0005 || Math.abs(nextLng - prevLng) > 0.0005 || spdKmh >= 4)
+            ) {
+              liveFieldContextRef.current.lastMoveActivityMs = Date.now();
+            }
+            liveFieldContextRef.current.lat = nextLat;
+            liveFieldContextRef.current.lng = nextLng;
+            liveFieldContextRef.current.accuracyMeters = Math.round(pos.coords.accuracy || 20);
+            liveFieldContextRef.current.speedKmh = spdKmh;
+            accumulateElapsed(true);
+          },
+          () => {
+            // Silencieux : repli automatique sur la coordonnée réseau de la zone / ville du collaborateur
+          },
+          {
+            enableHighAccuracy: true,
+            maximumAge: 30_000,
+            timeout: 15_000,
+          }
+        );
+      } catch {
+        // Ignore geolocation errors silently
+      }
+    }
+
     const heartbeatTimer = window.setInterval(() => {
       accumulateElapsed(true);
-    }, 60_000);
+    }, 30_000);
 
     const handleVisibilityChange = () => {
       const cur = activeAttendanceRef.current;
@@ -3517,6 +3658,7 @@ export default function App() {
         cur.totalBaseSeconds += delta;
         cur.sessionSeconds += delta;
         cur.lastTickMs = tickMs;
+        cur.deviceLabel = computeLiveTelemetryLabel();
         if (navigator.onLine !== false) {
           heartbeatAttendanceSession({
             uid: cur.uid,
@@ -3583,7 +3725,7 @@ export default function App() {
               avatarDataUrl: snapNow.userProfile.avatarDataUrl || '',
               role: currentUserRole,
               zone: snapNow.userProfile.zone || cur.zone,
-              deviceLabel: deviceInfo.label,
+              deviceLabel: computeLiveTelemetryLabel(),
               deviceType: deviceInfo.deviceType,
               sessionId: newSessId,
               loginAtIso: newNowIso,
@@ -3681,6 +3823,13 @@ export default function App() {
     return () => {
       cancelled = true;
       window.clearInterval(heartbeatTimer);
+      if (geoWatchId !== null && typeof navigator !== 'undefined' && 'geolocation' in navigator) {
+        try {
+          navigator.geolocation.clearWatch(geoWatchId);
+        } catch {
+          // Ignore
+        }
+      }
       document.removeEventListener('visibilitychange', handleVisibilityChange);
       window.removeEventListener('offline', handleOffline);
       window.removeEventListener('online', handleOnline);
@@ -6580,6 +6729,7 @@ ${assistPasteText.slice(0, 6000)}`;
   const startEdit = (f: FicheEntreprise, field: keyof FicheEntreprise) => {
     setEditingCell({ id: f.id, field });
     setEditDraft(String(f[field] ?? ''));
+    recordLiveClientActivity(f.societe, f.ville, 'Édition fiche client');
   };
 
   const commitEdit = () => {
@@ -6640,6 +6790,7 @@ ${assistPasteText.slice(0, 6000)}`;
     const draft = generatePersonalizedEmail(f, defaultCycle, emailTon, emailSignature, activeSkill);
     setEmailObjet(draft.objet);
     setEmailCorps(draft.corps);
+    recordLiveClientActivity(f.societe, f.ville, 'Studio Email IA');
   };
 
   const regenerateLocalEmail = (
@@ -6728,6 +6879,7 @@ ${assistPasteText.slice(0, 6000)}`;
       suggestedTier: reco.tier,
       suggestedProduit: reco.offre,
     });
+    recordLiveClientActivity(f.societe, f.ville, 'Signature contrat');
   };
 
   const handleConfirmSignContract = async (payload: {
@@ -6837,12 +6989,14 @@ ${assistPasteText.slice(0, 6000)}`;
     const result = moveFicheToStatut(fiches, ficheId, targetStatut);
     if (!result.changed || !result.movedFiche) return;
     setFiches(result.updated);
+    recordLiveClientActivity(result.movedFiche.societe, result.movedFiche.ville, `Statut: ${targetStatut}`);
     notify(`« ${result.movedFiche.societe} » déplacé vers ${targetStatut}.`);
   };
 
   const handleOpenAiBrief = (f: FicheEntreprise) => {
     setCopilotFiche(f);
     setShowAiCopilot(true);
+    recordLiveClientActivity(f.societe, f.ville, 'Brief & Diagnostic Client');
   };
 
   const handleGenerateEmailWithAI = async () => {
@@ -9468,6 +9622,14 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
             onExportBackup={handleExportFullBackup}
             onSignOut={handleGoogleSignOut}
             onJumpToBadges={() => setActiveTab('badges')}
+            onJumpToAdminSection={
+              isSuperAdmin
+                ? (section) => {
+                    setAdminSubSection(section);
+                    setActiveTab(section === 'vault' ? 'vault' : 'admin');
+                  }
+                : undefined
+            }
             onTestBadgeAlert={handleTestBadgeAlert}
             onNotify={notify}
           />

@@ -55,6 +55,58 @@ export interface UserProfileSettings {
   compactUi: boolean;
 }
 
+export interface AdvancedAccountPreferences {
+  monthlyGoalPayoutMad: number;
+  preferredContactChannel: 'whatsapp' | 'phone' | 'email';
+  ficheNumberPrefix: 'OP-' | 'DIV-' | 'B2B-';
+  followUpAlertDelay: '24h' | '48h' | '72h' | '7d';
+  targetMaturityPct: 75 | 85 | 95;
+  defaultEmailTone: 'terrain' | 'executif' | 'court';
+  defaultEmailCycle:
+    | 'premier_contact'
+    | 'suite_passage'
+    | 'diagnostic'
+    | 'relance_devis'
+    | 'fin_contrat'
+    | 'renouvellement'
+    | 'reactivation';
+  preferredAiProvider: 'auto' | 'mistral' | 'groq' | 'gemini' | 'openrouter';
+  autoAppendPhoneInEmail: boolean;
+  csvDelimiter: ';' | ',';
+  workHoursSchedule: 'standard_maroc' | 'continu_08_20' | 'terrain_etendu';
+  autoSaveIntervalSec: 15 | 30 | 60;
+}
+
+const DEFAULT_ADVANCED_PREFS: AdvancedAccountPreferences = {
+  monthlyGoalPayoutMad: 15000,
+  preferredContactChannel: 'whatsapp',
+  ficheNumberPrefix: 'DIV-',
+  followUpAlertDelay: '48h',
+  targetMaturityPct: 85,
+  defaultEmailTone: 'terrain',
+  defaultEmailCycle: 'premier_contact',
+  preferredAiProvider: 'auto',
+  autoAppendPhoneInEmail: true,
+  csvDelimiter: ';',
+  workHoursSchedule: 'standard_maroc',
+  autoSaveIntervalSec: 30,
+};
+
+function loadAdvancedAccountPrefs(uid: string): AdvancedAccountPreferences {
+  if (typeof window === 'undefined') return DEFAULT_ADVANCED_PREFS;
+  try {
+    const raw = window.localStorage.getItem(`op_advanced_account_prefs_${uid}`);
+    if (!raw) return DEFAULT_ADVANCED_PREFS;
+    const parsed = JSON.parse(raw);
+    return {
+      ...DEFAULT_ADVANCED_PREFS,
+      ...(parsed && typeof parsed === 'object' ? parsed : {}),
+    };
+  } catch {
+    return DEFAULT_ADVANCED_PREFS;
+  }
+}
+
 interface AccountSettingsPanelProps {
   uid: string;
   email: string;
@@ -73,6 +125,7 @@ interface AccountSettingsPanelProps {
   onExportBackup: () => void;
   onSignOut: () => void;
   onJumpToBadges: () => void;
+  onJumpToAdminSection?: (section: 'all' | 'users' | 'attendance' | 'vault') => void;
   onTestBadgeAlert?: () => void;
   onNotify: (msg: string, type?: 'ok' | 'warn' | 'err') => void;
 }
@@ -95,6 +148,7 @@ export const AccountSettingsPanel: React.FC<AccountSettingsPanelProps> = ({
   onExportBackup,
   onSignOut,
   onJumpToBadges,
+  onJumpToAdminSection,
   onTestBadgeAlert,
   onNotify,
 }) => {
@@ -108,6 +162,9 @@ export const AccountSettingsPanel: React.FC<AccountSettingsPanelProps> = ({
   const [notifyBadges, setNotifyBadges] = useState(profile.notifyBadges);
   const [notifySound, setNotifySound] = useState(profile.notifySound);
   const [compactUi, setCompactUi] = useState(profile.compactUi);
+  const [advPrefs, setAdvPrefs] = useState<AdvancedAccountPreferences>(() =>
+    loadAdvancedAccountPrefs(uid)
+  );
 
   const [uploadingPhoto, setUploadingPhoto] = useState(false);
   const [savingProfile, setSavingProfile] = useState(false);
@@ -176,6 +233,20 @@ export const AccountSettingsPanel: React.FC<AccountSettingsPanelProps> = ({
     onNotify('Photo de profil retirée.');
   };
 
+  const persistAdvancedPrefs = (nextPrefs: AdvancedAccountPreferences) => {
+    setAdvPrefs(nextPrefs);
+    try {
+      window.localStorage.setItem(`op_advanced_account_prefs_${uid}`, JSON.stringify(nextPrefs));
+    } catch {
+      // Ignore quota
+    }
+  };
+
+  const handleResetAdvancedPrefs = () => {
+    persistAdvancedPrefs(DEFAULT_ADVANCED_PREFS);
+    onNotify('Paramètres avancés du compte réinitialisés aux valeurs recommandées DIVERSIFIA.');
+  };
+
   const handleSaveProfileForm = async (e: React.FormEvent) => {
     e.preventDefault();
     const cleanName = displayName.trim();
@@ -189,6 +260,7 @@ export const AccountSettingsPanel: React.FC<AccountSettingsPanelProps> = ({
     } catch {
       // Non-fatal; profile is still saved to Firestore workspace & team_stats
     } finally {
+      persistAdvancedPrefs(advPrefs);
       onSaveProfile(
         {
           displayName: cleanName,
@@ -204,7 +276,7 @@ export const AccountSettingsPanel: React.FC<AccountSettingsPanelProps> = ({
         signature
       );
       setSavingProfile(false);
-      onNotify('Paramètres du compte et préférences enregistrés.');
+      onNotify('Tous les paramètres du compte et préférences avancées ont été enregistrés.');
     }
   };
 
@@ -638,6 +710,264 @@ export const AccountSettingsPanel: React.FC<AccountSettingsPanelProps> = ({
             </label>
           </div>
 
+          {/* Centre Complet de Paramètres Avancés du Compte (Prospection, Studio IA, Export & Horaires) */}
+          <div
+            data-testid="advanced-account-settings-suite"
+            className="rounded-xl border border-stone-200 bg-stone-50/70 p-4 space-y-4"
+          >
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <div className="text-xs font-bold text-stone-900 flex items-center gap-1.5">
+                  <SlidersHorizontal className="w-3.5 h-3.5 text-orange-600" />
+                  Suite Complète des Paramètres Avancés du Compte (Prospection, IA &amp; Gouvernance)
+                </div>
+                <p className="text-[11px] text-stone-500">
+                  Personnalisez vos seuils commerciaux, votre Studio Email IA, vos formats d’export et vos horaires terrain.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={handleResetAdvancedPrefs}
+                className="px-2.5 py-1 rounded-lg border border-stone-300 bg-white hover:bg-stone-100 text-[11px] font-semibold text-stone-700"
+              >
+                Valeurs recommandées
+              </button>
+            </div>
+
+            {/* 1. Paramètres Commerciaux & Prospection Terrain */}
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <div className="space-y-1">
+                <label htmlFor="adv-payout-goal" className="block text-[11px] font-semibold text-stone-700">
+                  Objectif Payout mensuel (MAD)
+                </label>
+                <input
+                  id="adv-payout-goal"
+                  type="number"
+                  min={1000}
+                  max={500000}
+                  step={500}
+                  value={advPrefs.monthlyGoalPayoutMad}
+                  onChange={(e) =>
+                    persistAdvancedPrefs({
+                      ...advPrefs,
+                      monthlyGoalPayoutMad: Math.max(500, Number(e.target.value) || 15000),
+                    })
+                  }
+                  className="w-full px-2.5 py-1.5 rounded-lg border border-stone-300 bg-white text-xs font-bold tabular-nums focus:outline-none focus:border-orange-600"
+                />
+              </div>
+
+              <div className="space-y-1">
+                <label htmlFor="adv-channel" className="block text-[11px] font-semibold text-stone-700">
+                  Canal de contact prioritaire
+                </label>
+                <select
+                  id="adv-channel"
+                  value={advPrefs.preferredContactChannel}
+                  onChange={(e) =>
+                    persistAdvancedPrefs({
+                      ...advPrefs,
+                      preferredContactChannel: e.target.value as AdvancedAccountPreferences['preferredContactChannel'],
+                    })
+                  }
+                  className="w-full px-2.5 py-1.5 rounded-lg border border-stone-300 bg-white text-xs font-medium text-stone-800"
+                >
+                  <option value="whatsapp">WhatsApp Business (+212)</option>
+                  <option value="phone">Appel téléphonique direct</option>
+                  <option value="email">Studio Email IA B2B</option>
+                </select>
+              </div>
+
+              <div className="space-y-1">
+                <label htmlFor="adv-prefix" className="block text-[11px] font-semibold text-stone-700">
+                  Préfixe numérotation fiches
+                </label>
+                <select
+                  id="adv-prefix"
+                  value={advPrefs.ficheNumberPrefix}
+                  onChange={(e) =>
+                    persistAdvancedPrefs({
+                      ...advPrefs,
+                      ficheNumberPrefix: e.target.value as AdvancedAccountPreferences['ficheNumberPrefix'],
+                    })
+                  }
+                  className="w-full px-2.5 py-1.5 rounded-lg border border-stone-300 bg-white text-xs font-mono font-bold text-stone-800"
+                >
+                  <option value="DIV-">DIV- (DIVERSIFIA Officiel)</option>
+                  <option value="OP-">OP- (Orange Pro)</option>
+                  <option value="B2B-">B2B- (Entreprise)</option>
+                </select>
+              </div>
+
+              <div className="space-y-1">
+                <label htmlFor="adv-followup" className="block text-[11px] font-semibold text-stone-700">
+                  Délai d’alerte relance prospect
+                </label>
+                <select
+                  id="adv-followup"
+                  value={advPrefs.followUpAlertDelay}
+                  onChange={(e) =>
+                    persistAdvancedPrefs({
+                      ...advPrefs,
+                      followUpAlertDelay: e.target.value as AdvancedAccountPreferences['followUpAlertDelay'],
+                    })
+                  }
+                  className="w-full px-2.5 py-1.5 rounded-lg border border-stone-300 bg-white text-xs font-medium text-stone-800"
+                >
+                  <option value="24h">Relance intensive (24h)</option>
+                  <option value="48h">Standard B2B (48h)</option>
+                  <option value="72h">Cycle Grand Compte (72h)</option>
+                  <option value="7d">Suivi hebdomadaire (7 jours)</option>
+                </select>
+              </div>
+
+              <div className="space-y-1">
+                <label htmlFor="adv-maturity" className="block text-[11px] font-semibold text-stone-700">
+                  Seuil de maturité fiche cible
+                </label>
+                <select
+                  id="adv-maturity"
+                  value={advPrefs.targetMaturityPct}
+                  onChange={(e) =>
+                    persistAdvancedPrefs({
+                      ...advPrefs,
+                      targetMaturityPct: Number(e.target.value) as AdvancedAccountPreferences['targetMaturityPct'],
+                    })
+                  }
+                  className="w-full px-2.5 py-1.5 rounded-lg border border-stone-300 bg-white text-xs font-medium text-stone-800"
+                >
+                  <option value={75}>75% (Qualification rapide)</option>
+                  <option value={85}>85% (Standard DIVERSIFIA)</option>
+                  <option value={95}>95% (Audit Grand Compte complet)</option>
+                </select>
+              </div>
+
+              <div className="space-y-1">
+                <label htmlFor="adv-schedule" className="block text-[11px] font-semibold text-stone-700">
+                  Cadence &amp; Horaires de travail
+                </label>
+                <select
+                  id="adv-schedule"
+                  value={advPrefs.workHoursSchedule}
+                  onChange={(e) =>
+                    persistAdvancedPrefs({
+                      ...advPrefs,
+                      workHoursSchedule: e.target.value as AdvancedAccountPreferences['workHoursSchedule'],
+                    })
+                  }
+                  className="w-full px-2.5 py-1.5 rounded-lg border border-stone-300 bg-white text-xs font-medium text-stone-800"
+                >
+                  <option value="standard_maroc">Lun–Ven 08h30–18h30 · Sam 09h–13h</option>
+                  <option value="continu_08_20">Continu 08h00–20h00 (6j/7)</option>
+                  <option value="terrain_etendu">Terrain étendu &amp; RDV Grands Comptes</option>
+                </select>
+              </div>
+            </div>
+
+            {/* 2. Paramètres Studio Email IA, Moteur Multi-LLM & Export CSV */}
+            <div className="pt-3 border-t border-stone-200/80 grid grid-cols-1 sm:grid-cols-4 gap-3">
+              <div className="space-y-1">
+                <label htmlFor="adv-email-tone" className="block text-[11px] font-semibold text-stone-700">
+                  Ton Studio Email IA par défaut
+                </label>
+                <select
+                  id="adv-email-tone"
+                  value={advPrefs.defaultEmailTone}
+                  onChange={(e) =>
+                    persistAdvancedPrefs({
+                      ...advPrefs,
+                      defaultEmailTone: e.target.value as AdvancedAccountPreferences['defaultEmailTone'],
+                    })
+                  }
+                  className="w-full px-2.5 py-1.5 rounded-lg border border-stone-300 bg-white text-xs font-medium text-stone-800"
+                >
+                  <option value="terrain">Direct terrain (PME / TPE)</option>
+                  <option value="executif">Exécutif Direction / Grand Compte</option>
+                  <option value="court">Relance éclair (4 lignes)</option>
+                </select>
+              </div>
+
+              <div className="space-y-1">
+                <label htmlFor="adv-ai-provider" className="block text-[11px] font-semibold text-stone-700">
+                  Moteur IA prioritaire
+                </label>
+                <select
+                  id="adv-ai-provider"
+                  value={advPrefs.preferredAiProvider}
+                  onChange={(e) =>
+                    persistAdvancedPrefs({
+                      ...advPrefs,
+                      preferredAiProvider: e.target.value as AdvancedAccountPreferences['preferredAiProvider'],
+                    })
+                  }
+                  className="w-full px-2.5 py-1.5 rounded-lg border border-stone-300 bg-white text-xs font-medium text-stone-800"
+                >
+                  <option value="auto">Routeur Auto (Mistral → Groq → Gemini)</option>
+                  <option value="mistral">Mistral AI Prioritaire</option>
+                  <option value="groq">Groq Llama 3.3 Ultra-Rapide</option>
+                  <option value="gemini">Google Gemini 2.5 Flash</option>
+                  <option value="openrouter">OpenRouter Multi-Modèles</option>
+                </select>
+              </div>
+
+              <div className="space-y-1">
+                <label htmlFor="adv-csv-delim" className="block text-[11px] font-semibold text-stone-700">
+                  Format d’export CSV
+                </label>
+                <select
+                  id="adv-csv-delim"
+                  value={advPrefs.csvDelimiter}
+                  onChange={(e) =>
+                    persistAdvancedPrefs({
+                      ...advPrefs,
+                      csvDelimiter: e.target.value as AdvancedAccountPreferences['csvDelimiter'],
+                    })
+                  }
+                  className="w-full px-2.5 py-1.5 rounded-lg border border-stone-300 bg-white text-xs font-medium text-stone-800"
+                >
+                  <option value=";">Excel Maroc / FR (Point-virgule ; UTF-8 BOM)</option>
+                  <option value=",">Standard International (Virgule ,)</option>
+                </select>
+              </div>
+
+              <div className="space-y-1">
+                <label htmlFor="adv-autosave" className="block text-[11px] font-semibold text-stone-700">
+                  Cadence Sync Cloud Firestore
+                </label>
+                <select
+                  id="adv-autosave"
+                  value={advPrefs.autoSaveIntervalSec}
+                  onChange={(e) =>
+                    persistAdvancedPrefs({
+                      ...advPrefs,
+                      autoSaveIntervalSec: Number(e.target.value) as AdvancedAccountPreferences['autoSaveIntervalSec'],
+                    })
+                  }
+                  className="w-full px-2.5 py-1.5 rounded-lg border border-stone-300 bg-white text-xs font-medium text-stone-800"
+                >
+                  <option value={15}>Temps réel rapide (15 sec)</option>
+                  <option value={30}>Équilibré (30 sec)</option>
+                  <option value={60}>Économie bande passante (60 sec)</option>
+                </select>
+              </div>
+            </div>
+
+            <label className="flex items-center justify-between gap-3 cursor-pointer text-xs text-stone-700 pt-1">
+              <span>Insérer automatiquement mon numéro professionnel ({phonePro || '06...'}) au bas des emails IA</span>
+              <input
+                type="checkbox"
+                checked={advPrefs.autoAppendPhoneInEmail}
+                onChange={(e) =>
+                  persistAdvancedPrefs({
+                    ...advPrefs,
+                    autoAppendPhoneInEmail: e.target.checked,
+                  })
+                }
+                className="h-4 w-4 rounded border-stone-300 text-orange-600 focus:ring-orange-500"
+              />
+            </label>
+          </div>
+
           <button
             type="submit"
             disabled={savingProfile}
@@ -648,8 +978,55 @@ export const AccountSettingsPanel: React.FC<AccountSettingsPanelProps> = ({
           </button>
         </form>
 
-        {/* Colonne Sécurité, Mot de passe & Session */}
+        {/* Colonne Sécurité, Mot de passe, Raccourcis Super-Admin & Session */}
         <div className="lg:col-span-5 space-y-4">
+          {role === 'super_admin' && onJumpToAdminSection && (
+            <div
+              data-testid="superadmin-quick-console-card"
+              className="rounded-2xl border border-orange-200 bg-orange-50/70 p-5 shadow-xs space-y-3"
+            >
+              <div className="flex items-center justify-between gap-2">
+                <h3 className="text-sm font-bold text-stone-900 flex items-center gap-2">
+                  <ShieldCheck className="w-4 h-4 text-orange-600" />
+                  Console Direction &amp; Accès Super-Admin
+                </h3>
+                <span className="text-[11px] font-bold text-orange-800">Contrôle Total</span>
+              </div>
+              <p className="text-xs text-stone-600 leading-relaxed">
+                Accédez en 1 clic au Radar Dispatch GPS temps réel (invisible pour les collaborateurs), à la délégation d’accès Superviseur Élite et au Coffre Cloud de clés API.
+              </p>
+              <div className="grid grid-cols-1 gap-2">
+                <button
+                  type="button"
+                  data-testid="jump-radar-dispatch-btn"
+                  onClick={() => onJumpToAdminSection('attendance')}
+                  className="w-full py-2 px-3 rounded-xl bg-stone-900 hover:bg-stone-800 text-white text-xs font-bold flex items-center justify-between"
+                >
+                  <span>Radar Dispatch GPS &amp; Suivi Temps Réel</span>
+                  <span className="text-orange-400">Ouvrir →</span>
+                </button>
+                <button
+                  type="button"
+                  data-testid="jump-users-access-btn"
+                  onClick={() => onJumpToAdminSection('users')}
+                  className="w-full py-2 px-3 rounded-xl border border-orange-300 bg-white hover:bg-orange-100/60 text-stone-900 text-xs font-bold flex items-center justify-between"
+                >
+                  <span>Gérer Comptes &amp; Accès Superviseur Élite</span>
+                  <span className="text-orange-700">Gérer →</span>
+                </button>
+                <button
+                  type="button"
+                  data-testid="jump-api-vault-btn"
+                  onClick={() => onJumpToAdminSection('vault')}
+                  className="w-full py-2 px-3 rounded-xl border border-stone-300 bg-white hover:bg-stone-50 text-stone-800 text-xs font-semibold flex items-center justify-between"
+                >
+                  <span>Coffre Clés API Cloud (/api_keys)</span>
+                  <span className="text-stone-500">Configurer →</span>
+                </button>
+              </div>
+            </div>
+          )}
+
           <div className="rounded-2xl border border-stone-200 bg-white p-5 shadow-xs space-y-3.5">
             <h3 className="text-sm font-bold text-stone-900 flex items-center gap-2">
               <Lock className="w-4 h-4 text-orange-600" />
