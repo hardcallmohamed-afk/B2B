@@ -260,8 +260,8 @@ export function getTeamStatsQuery() {
   return query(collection(db, 'team_stats'), where('orgScope', '==', 'orange_pro_team'));
 }
 
-export function getSignedContractsQuery(uid: string, isSuperAdmin: boolean) {
-  if (isSuperAdmin) {
+export function getSignedContractsQuery(uid: string, canSuperviseTeam: boolean) {
+  if (canSuperviseTeam) {
     return query(collection(db, 'signed_contracts'), where('orgScope', '==', 'orange_pro_team'));
   }
   return query(collection(db, 'signed_contracts'), where('ownerId', '==', uid));
@@ -596,9 +596,21 @@ export async function syncMyTeamStat(
   try {
     const snap = await getDoc(ref);
     if (!snap.exists()) {
+      const createPayload = isSuperAdmin
+        ? clean
+        : {
+            ...clean,
+            totalProspects: 0,
+            totalQualified: 0,
+            totalContracts: 0,
+            totalPayoutMad: 0,
+            xp: 0,
+            unlockedCount: 0,
+            manualBadges: [],
+            monthlyHistory: [],
+          };
       await setDoc(ref, {
-        ...clean,
-        manualBadges: isSuperAdmin ? clean.manualBadges : [],
+        ...createPayload,
         createdAt: serverTimestamp(),
         updatedAt: serverTimestamp(),
       });
@@ -1639,7 +1651,11 @@ export async function fetchFicheActivites(
 ): Promise<SanitizedActiviteDoc[]> {
   const actPath = `users/${uid}/fiches/${ficheId}/activites`;
   try {
-    const snap = await getDocs(collection(db, 'users', uid, 'fiches', ficheId, 'activites'));
+    const q = query(
+      collection(db, 'users', uid, 'fiches', ficheId, 'activites'),
+      where('ownerId', '==', uid)
+    );
+    const snap = await getDocs(q);
     const list: SanitizedActiviteDoc[] = [];
     snap.forEach((docSnap) => {
       const d = docSnap.data();

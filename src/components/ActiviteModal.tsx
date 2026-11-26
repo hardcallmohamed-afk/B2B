@@ -33,6 +33,13 @@ interface ActiviteModalProps {
   onNotify: (msg: string, type?: 'ok' | 'err' | 'warn' | 'info') => void;
 }
 
+function toLocalDateTimeInput(iso?: string): string {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '';
+  return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+}
+
 export const ActiviteModal: React.FC<ActiviteModalProps> = ({
   isOpen,
   onClose,
@@ -55,26 +62,36 @@ export const ActiviteModal: React.FC<ActiviteModalProps> = ({
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   useEffect(() => {
-    if (isOpen && fiche) {
-      setType('appel');
-      setResultat('joint');
-      setTexte('');
-      setProchaineRelanceAt('');
-      setRdvAt(fiche.rdvAt ? fiche.rdvAt.slice(0, 16) : '');
-      setRdvLieu(fiche.rdvLieu || fiche.ville || '');
-      setErrorMessage(null);
-      setIsLoadingHistory(true);
-      fetchFicheActivites(currentUserUid, fiche.id)
-        .then((items) => {
+    if (!isOpen || !fiche) return;
+    let cancelled = false;
+    setType('appel');
+    setResultat('joint');
+    setTexte('');
+    setProchaineRelanceAt('');
+    setRdvAt(toLocalDateTimeInput(fiche.rdvAt));
+    setRdvLieu(fiche.rdvLieu || fiche.ville || '');
+    setErrorMessage(null);
+    setHistory([]);
+    setIsLoadingHistory(true);
+    fetchFicheActivites(currentUserUid, fiche.id)
+      .then((items) => {
+        if (!cancelled) {
           setHistory(items || []);
-        })
-        .catch(() => {
-          // Non bloquant
-        })
-        .finally(() => {
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setHistory([]);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
           setIsLoadingHistory(false);
-        });
-    }
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [isOpen, fiche, currentUserUid]);
 
   if (!isOpen || !fiche) return null;

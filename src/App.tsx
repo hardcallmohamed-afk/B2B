@@ -163,7 +163,6 @@ import {
   getUserSkillsCollection,
   fetchAppUserProfile,
   getAppUsersQuery,
-  getAdminApiKeysQuery,
   getTeamStatsQuery,
   getSignedContractsQuery,
   getUserPresenceListQuery,
@@ -3980,40 +3979,52 @@ export default function App() {
     };
   }, [authReady, cloudUser, cloudSynced, canAccessWorkspace, currentUserRole]);
 
-  // Liste temps réel /api_keys réservée exclusivement au Super-Admin (filtrée par updatedBy == adminUid)
+  // Chargement sécurisé du coffre /api_keys via le backend Express (Admin SDK — client Firestore fermé par rules)
+  const refreshCloudApiKeys = useCallback(async () => {
+    if (!authReady || !cloudUser || !isSuperAdmin || isStaticHostingEnvironment()) {
+      setCloudApiKeys([]);
+      return;
+    }
+    try {
+      const idToken = await getCurrentUserIdToken();
+      const res = await fetch('/api/admin/api-keys', {
+        method: 'GET',
+        headers: {
+          Accept: 'application/json',
+          Authorization: `Bearer ${idToken}`,
+        },
+      });
+      if (!res.ok) return;
+      const data = await res.json().catch(() => ({}));
+      const rawKeys = Array.isArray(data?.keys) ? data.keys : [];
+      const list: CloudApiKeyRecord[] = rawKeys
+        .filter((k: unknown): k is Record<string, unknown> => Boolean(k && typeof k === 'object'))
+        .map((k: Record<string, unknown>) => {
+          const provider = typeof k.provider === 'string' ? k.provider : '';
+          return {
+            provider,
+            label: typeof k.label === 'string' ? k.label : provider.toUpperCase(),
+            key: typeof k.key === 'string' ? k.key : '',
+            active: typeof k.active === 'boolean' ? k.active : true,
+            updatedBy: typeof k.updatedBy === 'string' ? k.updatedBy : '',
+            updatedAt: typeof k.updatedAt === 'string' ? k.updatedAt : undefined,
+          };
+        })
+        .filter((k: CloudApiKeyRecord) => Boolean(k.provider))
+        .sort((a: CloudApiKeyRecord, b: CloudApiKeyRecord) => a.provider.localeCompare(b.provider));
+      setCloudApiKeys(list);
+    } catch {
+      // Non-fatal: le coffre reste accessible dès que le serveur backend répond
+    }
+  }, [authReady, cloudUser, isSuperAdmin]);
+
   useEffect(() => {
     if (!authReady || !cloudUser || !isSuperAdmin) {
       setCloudApiKeys([]);
       return;
     }
-    const unsub = onSnapshot(
-      getAdminApiKeysQuery(cloudUser.uid),
-      (snap) => {
-        const list: CloudApiKeyRecord[] = [];
-        snap.forEach((docSnap) => {
-          const d = docSnap.data();
-          list.push({
-            provider: docSnap.id,
-            label: typeof d.label === 'string' ? d.label : docSnap.id.toUpperCase(),
-            key: typeof d.key === 'string' ? d.key : '',
-            active: typeof d.active === 'boolean' ? d.active : true,
-            updatedBy: typeof d.updatedBy === 'string' ? d.updatedBy : '',
-            updatedAt: d.updatedAt?.toDate ? d.updatedAt.toDate().toISOString() : undefined,
-          });
-        });
-        list.sort((a, b) => a.provider.localeCompare(b.provider));
-        setCloudApiKeys(list);
-      },
-      (err) => {
-        try {
-          handleFirestoreError(err, OperationType.LIST, 'api_keys');
-        } catch {
-          // Non-fatal fallback
-        }
-      }
-    );
-    return () => unsub();
-  }, [authReady, cloudUser, isSuperAdmin]);
+    void refreshCloudApiKeys();
+  }, [authReady, cloudUser, isSuperAdmin, refreshCloudApiKeys]);
 
   // Liste temps réel /team_stats (classement équipe, XP, badges, évolution mensuelle)
   useEffect(() => {
@@ -4060,14 +4071,16 @@ export default function App() {
     return () => unsub();
   }, [authReady, cloudUser, canAccessWorkspace]);
 
-  // Liste temps réel /signed_contracts (Super-Admin: toute l'équipe; Collaborateur: ses contrats + payouts sans PII)
+  // Liste temps réel /signed_contracts (Super-Admin / Manager / Team-Lead: toute l'équipe; Collaborateur: ses contrats + payouts sans PII)
   useEffect(() => {
     if (!authReady || !cloudUser || !canAccessWorkspace) {
       setSignedContracts([]);
       return;
     }
+    const canSuperviseTeam =
+      isSuperAdmin || currentUserRole === 'manager' || currentUserRole === 'team_lead';
     const unsub = onSnapshot(
-      getSignedContractsQuery(cloudUser.uid, isSuperAdmin),
+      getSignedContractsQuery(cloudUser.uid, canSuperviseTeam),
       (snap) => {
         const list: SignedContractRecord[] = [];
         snap.forEach((docSnap) => {
@@ -4088,10 +4101,20 @@ export default function App() {
             effectif: typeof d.effectif === 'string' ? d.effectif : '',
             payoutMad: Number(d.payoutMad) || 0,
             payoutStatus:
-              d.payoutStatus === 'Validé' || d.payoutStatus === 'Versé'
+              d.payoutStatus === 'Validé' ||
+              d.payoutStatus === 'Versé' ||
+              d.payoutStatus === 'Refusé'
                 ? d.payoutStatus
                 : 'En attente',
             signedAt: typeof d.signedAt === 'string' ? d.signedAt : '',
+            referenceVirement:
+              typeof d.referenceVirement === 'string' && d.referenceVirement.trim()
+                ? d.referenceVirement.trim()
+                : undefined,
+            refusMotif:
+              typeof d.refusMotif === 'string' && d.refusMotif.trim()
+                ? d.refusMotif.trim()
+                : undefined,
           });
         });
         setSignedContracts(list);
@@ -4105,7 +4128,7 @@ export default function App() {
       }
     );
     return () => unsub();
-  }, [authReady, cloudUser, canAccessWorkspace, isSuperAdmin]);
+  }, [authReady, cloudUser, canAccessWorkspace, isSuperAdmin, currentUserRole]);
 
   useEffect(() => {
     if (!authReady || !cloudUser || !canAccessWorkspace) return;
@@ -7106,36 +7129,35 @@ ${assistPasteText.slice(0, 6000)}`;
       refusMotif?: string;
     }
   ) => {
-    let refVirement = updates.referenceVirement;
-    let refusMotif = updates.refusMotif;
+    const refVirement =
+      typeof updates.referenceVirement === 'string'
+        ? updates.referenceVirement.trim().slice(0, 80)
+        : undefined;
+    const refusMotif =
+      typeof updates.refusMotif === 'string'
+        ? updates.refusMotif.trim().slice(0, 200)
+        : undefined;
+
     if (updates.payoutStatus === 'Versé' && !refVirement) {
-      const inputRef = window.prompt(
-        'Veuillez saisir la référence de virement bancaire (ex: VIR-2026-98124) pour valider le versement :',
-        ''
+      notify(
+        'Mise à jour annulée : la référence de virement bancaire est obligatoire pour le statut « Versé ».',
+        'warn'
       );
-      if (!inputRef || !inputRef.trim()) {
-        notify('Mise à jour annulée : la référence de virement est obligatoire pour le statut « Versé ».', 'warn');
-        return;
-      }
-      refVirement = inputRef.trim().slice(0, 80);
+      return;
     }
     if (updates.payoutStatus === 'Refusé' && !refusMotif) {
-      const inputMotif = window.prompt(
-        'Veuillez saisir le motif de refus du contrat :',
-        ''
+      notify(
+        'Mise à jour annulée : le motif de refus est obligatoire pour le statut « Refusé ».',
+        'warn'
       );
-      if (!inputMotif || !inputMotif.trim()) {
-        notify('Mise à jour annulée : le motif de refus est obligatoire pour le statut « Refusé ».', 'warn');
-        return;
-      }
-      refusMotif = inputMotif.trim().slice(0, 200);
+      return;
     }
 
     try {
       await managerUpdateSignedContract(contractId, {
         ...updates,
-        referenceVirement: refVirement,
-        refusMotif,
+        referenceVirement: updates.payoutStatus === 'Versé' ? refVirement : undefined,
+        refusMotif: updates.payoutStatus === 'Refusé' ? refusMotif : undefined,
       });
       notify('Payout, statut de paiement et références mis à jour avec succès.');
     } catch (err) {
@@ -10325,6 +10347,7 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
             adminHasPasswordProvider={cloudUser.providerData.some((p) => p.providerId === 'password')}
             users={managedUsers}
             cloudApiKeys={cloudApiKeys}
+            onRefreshCloudApiKeys={refreshCloudApiKeys}
             teamStats={teamStats}
             userPresences={userPresences}
             villesOptions={villesState.all}

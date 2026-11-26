@@ -19,6 +19,7 @@ import {
   checkAndIncrementCrawlUsage,
   CRAWL_HOURLY_LIMIT_PER_UID,
   validatePublicHttpUrl,
+  isPrivateOrReservedIp,
   extractVisibleTextFromHtml,
 } from './src/utils/aiRateLimiter.ts';
 
@@ -218,9 +219,10 @@ interface AuthenticatedCaller {
   isSuperAdmin: boolean;
 }
 
-async function authenticateAndRateLimitAiCaller(
+async function authenticateVerifiedCaller(
   req: express.Request,
-  res: express.Response
+  res: express.Response,
+  serviceLabel = 'ce service'
 ): Promise<AuthenticatedCaller | null> {
   const services = getFirebaseAdminServices();
   if (!services) {
@@ -253,7 +255,7 @@ async function authenticateAndRateLimitAiCaller(
   const isSuperAdmin = decoded.email_verified === true && callerEmail === SUPER_ADMIN_EMAIL;
 
   if (!decoded.email_verified) {
-    res.status(403).json({ error: 'Veuillez vérifier votre adresse e-mail avant d’utiliser le service IA.' });
+    res.status(403).json({ error: `Veuillez vérifier votre adresse e-mail avant d’utiliser ${serviceLabel}.` });
     return null;
   }
 
@@ -278,7 +280,21 @@ async function authenticateAndRateLimitAiCaller(
     }
   }
 
-  const rateLimit = checkAndIncrementAiUsage(decoded.uid, AI_DAILY_LIMIT_PER_UID);
+  return {
+    uid: decoded.uid,
+    email: callerEmail,
+    isSuperAdmin,
+  };
+}
+
+async function authenticateAndRateLimitAiCaller(
+  req: express.Request,
+  res: express.Response
+): Promise<AuthenticatedCaller | null> {
+  const caller = await authenticateVerifiedCaller(req, res, 'le service IA');
+  if (!caller) return null;
+
+  const rateLimit = checkAndIncrementAiUsage(caller.uid, AI_DAILY_LIMIT_PER_UID);
   if (!rateLimit.allowed) {
     res.status(429).json({
       error: `Plafond d'appels IA atteint : 40 requêtes autorisées par jour calendaire (fuseau Afrique/Casablanca, date du jour : ${rateLimit.dateKey}). Veuillez réessayer demain.`,
@@ -289,74 +305,17 @@ async function authenticateAndRateLimitAiCaller(
     return null;
   }
 
-  return {
-    uid: decoded.uid,
-    email: callerEmail,
-    isSuperAdmin,
-  };
+  return caller;
 }
 
 async function authenticateAndRateLimitCrawlCaller(
   req: express.Request,
   res: express.Response
 ): Promise<AuthenticatedCaller | null> {
-  const services = getFirebaseAdminServices();
-  if (!services) {
-    res.status(503).json({
-      error: 'Configuration Firebase Admin introuvable sur le serveur.',
-    });
-    return null;
-  }
+  const caller = await authenticateVerifiedCaller(req, res, 'le service de crawl');
+  if (!caller) return null;
 
-  const authHeader = typeof req.headers.authorization === 'string' ? req.headers.authorization : '';
-  if (!authHeader.startsWith('Bearer ')) {
-    res.status(401).json({ error: 'Authentification requise (jeton Bearer manquant). Reconnectez-vous.' });
-    return null;
-  }
-  const idToken = authHeader.slice('Bearer '.length).trim();
-  if (!idToken || idToken.length > 8192) {
-    res.status(401).json({ error: 'Jeton d’authentification invalide.' });
-    return null;
-  }
-
-  let decoded: Awaited<ReturnType<typeof services.adminAuth.verifyIdToken>>;
-  try {
-    decoded = await services.adminAuth.verifyIdToken(idToken);
-  } catch {
-    res.status(401).json({ error: 'Session Firebase invalide ou expirée. Reconnectez-vous.' });
-    return null;
-  }
-
-  const callerEmail = (decoded.email || '').toLowerCase();
-  const isSuperAdmin = decoded.email_verified === true && callerEmail === SUPER_ADMIN_EMAIL;
-
-  if (!decoded.email_verified) {
-    res.status(403).json({ error: 'Veuillez vérifier votre adresse e-mail avant d’utiliser le service de crawl.' });
-    return null;
-  }
-
-  if (!isSuperAdmin) {
-    try {
-      const memberSnap = await services.adminDb.doc(`app_users/${decoded.uid}`).get();
-      if (!memberSnap.exists || memberSnap.data()?.active !== true) {
-        res.status(403).json({ error: 'Accès refusé : compte non autorisé ou désactivé.' });
-        return null;
-      }
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      if (/PERMISSION_DENIED|7 PERMISSION_DENIED|Could not load the default credentials/i.test(msg)) {
-        res.status(503).json({
-          error:
-            'Droits IAM Firestore manquants sur le serveur. Accordez le rôle roles/datastore.viewer au compte de service d’aperçu dans Google Cloud IAM.',
-        });
-        return null;
-      }
-      res.status(500).json({ error: 'Impossible de vérifier les autorisations utilisateur côté serveur.' });
-      return null;
-    }
-  }
-
-  const rateLimit = checkAndIncrementCrawlUsage(decoded.uid, CRAWL_HOURLY_LIMIT_PER_UID);
+  const rateLimit = checkAndIncrementCrawlUsage(caller.uid, CRAWL_HOURLY_LIMIT_PER_UID);
   if (!rateLimit.allowed) {
     res.status(429).json({
       error: `Plafond de crawl atteint : 30 pages autorisées par heure et par utilisateur. Veuillez patienter avant la prochaine session d'extraction.`,
@@ -366,11 +325,7 @@ async function authenticateAndRateLimitCrawlCaller(
     return null;
   }
 
-  return {
-    uid: decoded.uid,
-    email: callerEmail,
-    isSuperAdmin,
-  };
+  return caller;
 }
 
 async function startServer() {
@@ -989,7 +944,7 @@ Produis un audit structuré, actionnable immédiatement sur le terrain (Meknès 
   // 9. Détection automatique du distributeur d'une clé API (sans jamais logger ni renvoyer la clé)
   // Utilise uniquement des URL officielles codées en dur (aucune URL client acceptée)
   app.post('/api/ai/detect-provider', async (req, res) => {
-    const caller = await authenticateAndRateLimitAiCaller(req, res);
+    const caller = await authenticateVerifiedCaller(req, res, 'la détection de clé API');
     if (!caller) return;
 
     const rawKey = clampString(req.body?.apiKey, 512);
@@ -1175,7 +1130,7 @@ Produis un audit structuré, actionnable immédiatement sur le terrain (Meknès 
 
   // 11. LOT 3: Envoi d'email serveur sécurisé (uniquement si les 5 variables SMTP sont présentes)
   app.post('/api/email/send', async (req, res) => {
-    const caller = await authenticateAndRateLimitAiCaller(req, res);
+    const caller = await authenticateVerifiedCaller(req, res, 'l’envoi d’e-mails');
     if (!caller) return;
 
     const required = ['SMTP_HOST', 'SMTP_PORT', 'SMTP_USER', 'SMTP_PASS', 'SMTP_FROM'] as const;
@@ -1189,10 +1144,11 @@ Produis un audit structuré, actionnable immédiatement sur le terrain (Meknès 
     }
 
     const to = clampString(req.body?.to, 160);
-    const subject = clampString(req.body?.subject, 200);
+    const subject = clampString(req.body?.subject, 200).replace(/[\r\n]+/g, ' ').trim();
     const body = clampString(req.body?.body, 10000);
 
-    if (!to || !to.includes('@') || !to.includes('.')) {
+    const strictEmailRe = /^[^\s@<>(),;:"\\[\]\r\n]+@[^\s@<>(),;:"\\[\]\r\n]+\.[^\s@<>(),;:"\\[\]\r\n]{2,}$/;
+    if (!to || /[\r\n]/.test(to) || !strictEmailRe.test(to)) {
       res.status(400).json({ error: 'Adresse email destinataire invalide.' });
       return;
     }
@@ -1253,10 +1209,8 @@ Produis un audit structuré, actionnable immédiatement sur le terrain (Meknès 
     const parsedUrl = new URL(targetUrl);
 
     try {
-      const lookup = await dns.promises.lookup(parsedUrl.hostname);
-      const ip = lookup.address;
-      const ipValidation = validatePublicHttpUrl(`${parsedUrl.protocol}//${ip}${parsedUrl.pathname}${parsedUrl.search}`);
-      if (!ipValidation.valid) {
+      const lookups = await dns.promises.lookup(parsedUrl.hostname, { all: true });
+      if (!lookups.length || lookups.some((entry) => isPrivateOrReservedIp(entry.address))) {
         res.status(400).json({ error: 'Accès interdit : résolution DNS sur une adresse IP privée ou interne (anti-SSRF).' });
         return;
       }
@@ -1332,9 +1286,12 @@ Produis un audit structuré, actionnable immédiatement sur le terrain (Meknès 
   });
 
   // 13. API Keys Vault Server-Side Management (Super-Admin Only via Firebase Admin SDK)
+  const VALID_PROVIDER_ID_RE = /^[a-z0-9_-]{1,64}$/;
+
   app.get('/api/admin/api-keys', async (req, res) => {
-    const caller = await authenticateAndRateLimitAiCaller(req, res);
-    if (!caller || !caller.isSuperAdmin) {
+    const caller = await authenticateVerifiedCaller(req, res, 'le coffre des clés API');
+    if (!caller) return;
+    if (!caller.isSuperAdmin) {
       res.status(403).json({ error: 'Accès réservé au Super-Admin.' });
       return;
     }
@@ -1361,33 +1318,42 @@ Produis un audit structuré, actionnable immédiatement sur le terrain (Meknès 
   });
 
   app.post('/api/admin/api-keys', async (req, res) => {
-    const caller = await authenticateAndRateLimitAiCaller(req, res);
-    if (!caller || !caller.isSuperAdmin) {
+    const caller = await authenticateVerifiedCaller(req, res, 'le coffre des clés API');
+    if (!caller) return;
+    if (!caller.isSuperAdmin) {
       res.status(403).json({ error: 'Accès réservé au Super-Admin.' });
       return;
     }
     const services = getFirebaseAdminServices()!;
-    const provider = clampString(req.body?.provider, 40).toLowerCase();
+    const provider = clampString(req.body?.provider, 64).toLowerCase();
     const label = clampString(req.body?.label, 120);
     const key = clampString(req.body?.key, 512);
-    const active = Boolean(req.body?.active);
+    const active = req.body?.active !== false;
 
-    if (!provider || !key) {
-      res.status(400).json({ error: 'Fournisseur et clé API requis.' });
+    if (!provider || !VALID_PROVIDER_ID_RE.test(provider)) {
+      res.status(400).json({ error: 'Identifiant fournisseur invalide (lettres, chiffres, tirets et underscores uniquement).' });
+      return;
+    }
+    if (!key) {
+      res.status(400).json({ error: 'Clé API requise.' });
       return;
     }
 
     try {
       const ref = services.adminDb.doc(`api_keys/${provider}`);
-      await ref.set({
+      const existingSnap = await ref.get();
+      const payload: Record<string, unknown> = {
         provider,
         label: label || provider,
         key,
         active,
         updatedBy: caller.uid,
-        createdAt: FieldValue.serverTimestamp() || new Date(),
-        updatedAt: FieldValue.serverTimestamp() || new Date(),
-      }, { merge: true });
+        updatedAt: FieldValue.serverTimestamp(),
+      };
+      if (!existingSnap.exists) {
+        payload.createdAt = FieldValue.serverTimestamp();
+      }
+      await ref.set(payload, { merge: true });
 
       res.json({ success: true, provider });
     } catch {
@@ -1396,15 +1362,16 @@ Produis un audit structuré, actionnable immédiatement sur le terrain (Meknès 
   });
 
   app.delete('/api/admin/api-keys/:provider', async (req, res) => {
-    const caller = await authenticateAndRateLimitAiCaller(req, res);
-    if (!caller || !caller.isSuperAdmin) {
+    const caller = await authenticateVerifiedCaller(req, res, 'le coffre des clés API');
+    if (!caller) return;
+    if (!caller.isSuperAdmin) {
       res.status(403).json({ error: 'Accès réservé au Super-Admin.' });
       return;
     }
     const services = getFirebaseAdminServices()!;
-    const provider = clampString(req.params.provider, 40).toLowerCase();
-    if (!provider) {
-      res.status(400).json({ error: 'Fournisseur requis.' });
+    const provider = clampString(req.params.provider, 64).toLowerCase();
+    if (!provider || !VALID_PROVIDER_ID_RE.test(provider)) {
+      res.status(400).json({ error: 'Identifiant fournisseur invalide.' });
       return;
     }
 

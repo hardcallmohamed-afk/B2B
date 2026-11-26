@@ -1402,8 +1402,9 @@ export function buildTeamMonthlyEvolution(
     monthMap.set(ym, point);
   }
 
-  const relevantContracts =
-    selectedUid === 'all' ? contracts : contracts.filter((c) => c.ownerId === selectedUid);
+  const relevantContracts = (
+    selectedUid === 'all' ? contracts : contracts.filter((c) => c.ownerId === selectedUid)
+  ).filter((c) => c.payoutStatus !== 'Refusé');
 
   if (relevantContracts.length > 0) {
     for (const c of relevantContracts) {
@@ -1459,6 +1460,7 @@ export function buildTeamLeaderboard(
   // Overlay live contract sums when available (Admin has full contracts ledger)
   const contractsByOwner = new Map<string, { count: number; payout: number }>();
   for (const c of contracts) {
+    if (c.payoutStatus === 'Refusé') continue;
     const prev = contractsByOwner.get(c.ownerId) || { count: 0, payout: 0 };
     prev.count += 1;
     prev.payout += Number(c.payoutMad) || 0;
@@ -1545,6 +1547,7 @@ export function computeCurrentMonthPayoutSummary(
 
   const scopedContracts =
     selectedUid === 'all' ? contracts : contracts.filter((c) => c.ownerId === selectedUid);
+  const activeContracts = scopedContracts.filter((c) => c.payoutStatus !== 'Refusé');
   const scopedMembers =
     selectedUid === 'all' ? members : members.filter((m) => m.uid === selectedUid);
 
@@ -1557,7 +1560,7 @@ export function computeCurrentMonthPayoutSummary(
   let enAttenteMad = 0;
 
   let contractsTotalPayoutMad = 0;
-  for (const c of scopedContracts) {
+  for (const c of activeContracts) {
     const amount = Math.max(0, Number(c.payoutMad) || 0);
     contractsTotalPayoutMad += amount;
     if (c.payoutStatus === 'Versé') verseMad += amount;
@@ -1598,7 +1601,7 @@ export function computeCurrentMonthPayoutSummary(
   );
 
   const totalSignedPayoutMad = Math.max(contractsTotalPayoutMad, membersTotalPayoutMad);
-  const totalSignedContractsCount = Math.max(scopedContracts.length, membersTotalContracts);
+  const totalSignedContractsCount = Math.max(activeContracts.length, membersTotalContracts);
 
   // If no contracts carry a dated entry for the current month yet, fall back to totalSignedPayoutMad so the cumulative indicator always reflects TotalPayoutMad of signed contracts
   const effectiveDisplayPayoutMad =

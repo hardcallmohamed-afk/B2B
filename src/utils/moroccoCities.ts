@@ -366,6 +366,7 @@ export function resolveCityAndRegionFromZoneString(rawZoneOrCity?: string): {
   regionalCities: string[];
   formattedZone: string;
   availabilityBadgeLabel: string;
+  matched: boolean;
 } {
   const raw = (rawZoneOrCity || '').trim();
   const firstSegment = raw.split('·')[0]?.trim() || raw;
@@ -419,6 +420,7 @@ export function resolveCityAndRegionFromZoneString(rawZoneOrCity?: string): {
     regionalCities,
     formattedZone: `${cityLabel} · ${fallback.regionLabel}`.slice(0, 100),
     availabilityBadgeLabel: `${cityLabel} (${fallback.regionShortLabel}) — Disponible Services Orange Pro`,
+    matched: Boolean(matched),
   };
 }
 
@@ -459,7 +461,7 @@ export function filterCitiesByRegion(
     const k = normalizeCityKey(trimmed);
     if (seen.has(k)) continue;
     const resolved = resolveCityAndRegionFromZoneString(trimmed);
-    if (resolved.regionId === regionId) {
+    if (resolved.matched && resolved.regionId === regionId) {
       seen.add(k);
       extras.push(trimmed);
     }
@@ -475,7 +477,7 @@ export function doesCityBelongToRegion(cityName: string, regionId: string): bool
   const trimmed = (cityName || '').trim();
   if (!trimmed) return false;
   const resolved = resolveCityAndRegionFromZoneString(trimmed);
-  return resolved.regionId === regionId;
+  return resolved.matched && resolved.regionId === regionId;
 }
 
 /**

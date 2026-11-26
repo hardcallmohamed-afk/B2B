@@ -64,7 +64,7 @@ export const QuoteModal: React.FC<QuoteModalProps> = ({
       setQuantiteMobile(reco.tier === 'Grand Compte' ? 20 : reco.tier === 'PME' ? 8 : 3);
       setPrixMensuelMad('');
       setValidityDays(15);
-      setPassToDevisEnvoye(true);
+      setPassToDevisEnvoye(fiche.statut !== 'Signé Orange Pro');
       setErrorMessage(null);
     }
   }, [isOpen, fiche]);
@@ -85,11 +85,14 @@ export const QuoteModal: React.FC<QuoteModalProps> = ({
 
     setIsGenerating(true);
     try {
+      const selectedProductMeta = ORANGE_PRO_PRODUCTS.find((p) => p.label === selectedProduct);
+      const effectiveTier: OrangeProTier = selectedProductMeta?.tier || reco.tier;
+
       // 1. Générer et télécharger le PDF client (Zero commission)
       generateClientQuotePdf({
         fiche,
         produitOrangePro: selectedProduct,
-        tier: reco.tier,
+        tier: effectiveTier,
         quantiteFixe,
         quantiteMobile,
         prixMensuelMad: monthlyPrice,
@@ -115,9 +118,13 @@ export const QuoteModal: React.FC<QuoteModalProps> = ({
         auteurNom: auteur,
       });
 
-      // 3. Mettre à jour éventuellement la fiche en 'Devis envoyé' si demandé
+      // 3. Mettre à jour éventuellement la fiche en 'Devis envoyé' si demandé (sans jamais rétrograder un contrat signé)
       let updatedFiche = { ...fiche };
-      if (passToDevisEnvoye && fiche.statut !== 'Devis envoyé') {
+      if (
+        passToDevisEnvoye &&
+        fiche.statut !== 'Devis envoyé' &&
+        fiche.statut !== 'Signé Orange Pro'
+      ) {
         updatedFiche = {
           ...fiche,
           statut: 'Devis envoyé' as StatutCRM,

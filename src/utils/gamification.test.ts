@@ -249,3 +249,80 @@ test('DIVERSIFIA commission grid and sector+headcount forecast calculator comput
   assert.equal(customCalc.firstInvoiceMad, 275);
   assert.equal(customCalc.fourthInvoiceMad, 275);
 });
+
+test('Refusé contracts are excluded from leaderboard, monthly evolution, and payout summary totals', () => {
+  const now = new Date('2026-06-15T10:00:00Z');
+  const members: TeamStatRecord[] = [
+    {
+      uid: 'u1',
+      orgScope: 'orange_pro_team',
+      displayName: 'Sara Benali',
+      role: 'commercial',
+      zone: 'Meknès',
+      active: true,
+      totalProspects: 10,
+      totalQualified: 4,
+      totalContracts: 0,
+      totalPayoutMad: 0,
+      xp: 200,
+      unlockedCount: 2,
+      manualBadges: [],
+      monthlyHistory: [],
+    },
+  ];
+  const contracts: SignedContractRecord[] = [
+    {
+      id: 'c_ok',
+      orgScope: 'orange_pro_team',
+      ownerId: 'u1',
+      ownerName: 'Sara Benali',
+      ficheId: 'f1',
+      numeroFiche: 'MK-001',
+      societe: 'Clinique Atlas',
+      ville: 'Meknès',
+      secteur: 'clinique',
+      produitOrangePro: 'Fibre Pro 200M',
+      tier: 'Grand Compte',
+      effectif: '40',
+      payoutMad: 1500,
+      payoutStatus: 'Validé',
+      signedAt: '2026-06-10T10:00:00Z',
+    },
+    {
+      id: 'c_refused',
+      orgScope: 'orange_pro_team',
+      ownerId: 'u1',
+      ownerName: 'Sara Benali',
+      ficheId: 'f2',
+      numeroFiche: 'MK-002',
+      societe: 'Dossier Rejeté SARL',
+      ville: 'Meknès',
+      secteur: 'pme',
+      produitOrangePro: 'Pack PME',
+      tier: 'PME',
+      effectif: '10',
+      payoutMad: 900,
+      payoutStatus: 'Refusé',
+      refusMotif: 'Dossier incomplet',
+      signedAt: '2026-06-12T10:00:00Z',
+    },
+  ];
+
+  const leaderboard = buildTeamLeaderboard(members, contracts);
+  assert.equal(leaderboard[0].contractsCount, 1);
+  assert.equal(leaderboard[0].payoutMad, 1500);
+
+  const evolution = buildTeamMonthlyEvolution(members, contracts, 'all', now);
+  const june = evolution.find((pt) => pt.ym === '2026-06');
+  assert.equal(june?.contracts, 1);
+  assert.equal(june?.payoutMad, 1500);
+
+  const summary = computeCurrentMonthPayoutSummary(contracts, members, 'all', now);
+  assert.equal(summary.currentMonthContractsCount, 1);
+  assert.equal(summary.currentMonthPayoutMad, 1500);
+  assert.equal(summary.valideMad, 1500);
+  assert.equal(summary.enAttenteMad, 0);
+  assert.equal(summary.totalSignedContractsCount, 1);
+  assert.equal(summary.totalSignedPayoutMad, 1500);
+});
+

@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { Check, Lock, Sparkles } from 'lucide-react';
 import {
   ADMIN_DISTINCTION_BADGES,
@@ -41,6 +41,11 @@ export const AchievementsPanel: React.FC<AchievementsPanelProps> = ({
   const [selectedUid, setSelectedUid] = useState<string>(
     initialSelectedUid || currentUserUid
   );
+  useEffect(() => {
+    if (initialSelectedUid) {
+      setSelectedUid(initialSelectedUid);
+    }
+  }, [initialSelectedUid]);
   const [roleFilter, setRoleFilter] = useState<'all' | TeamRole>('all');
   const [hideUnlocked, setHideUnlocked] = useState(false);
   const [hideLocked, setHideLocked] = useState(false);

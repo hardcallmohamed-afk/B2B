@@ -46,8 +46,6 @@ import {
   adminUpdateManagedUser,
   adminDeleteManagedUser,
   adminUpdateUserManualBadges,
-  adminUpsertApiKey,
-  adminDeleteApiKey,
   fetchUserAttendanceSessions,
   getCurrentUserIdToken,
   requestPasswordReset,
@@ -127,6 +125,7 @@ interface AdminUsersPanelProps {
   teamStats?: TeamStatRecord[];
   userPresences?: UserPresenceRecord[];
   cloudApiKeys?: CloudApiKeyRecord[];
+  onRefreshCloudApiKeys?: () => Promise<void> | void;
   villesOptions: string[];
   activeSection?: AdminPanelSection;
   onSectionChange?: (section: AdminPanelSection) => void;
@@ -141,6 +140,7 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
   teamStats = [],
   userPresences = [],
   cloudApiKeys = [],
+  onRefreshCloudApiKeys,
   villesOptions,
   activeSection,
   onSectionChange,
@@ -828,20 +828,38 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
       }
 
       const providerMeta = CLOUD_API_PROVIDERS.find((p) => p.id === resolvedProvider);
-      await adminUpsertApiKey(adminUid, {
-        provider: resolvedProvider,
-        label: providerMeta?.label || resolvedProvider.toUpperCase(),
-        key: trimmedKey,
-        active: true,
+      const idToken = await getCurrentUserIdToken();
+      const saveRes = await fetch('/api/admin/api-keys', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'application/json',
+          Authorization: `Bearer ${idToken}`,
+        },
+        body: JSON.stringify({
+          provider: resolvedProvider,
+          label: providerMeta?.label || resolvedProvider.toUpperCase(),
+          key: trimmedKey,
+          active: true,
+        }),
       });
+      const saveData = await saveRes.json().catch(() => ({}));
+      if (!saveRes.ok) {
+        throw new Error(saveData?.error || `Erreur serveur (HTTP ${saveRes.status}).`);
+      }
+      await onRefreshCloudApiKeys?.();
       setApiProvider(resolvedProvider);
       setApiKeyInput('');
       setVaultDetectedInfo(null);
       onNotify(
-        `Clé "${providerMeta?.label || resolvedProvider}" détectée et sauvegardée dans Firestore (/api_keys/${resolvedProvider}).`
+        `Clé "${providerMeta?.label || resolvedProvider}" détectée et sauvegardée dans le Coffre Cloud sécurisé.`
       );
-    } catch {
-      onNotify('Échec de sauvegarde de la clé API dans /api_keys (accès Super-Admin requis).', 'err');
+    } catch (err) {
+      const msg =
+        err instanceof Error
+          ? err.message
+          : 'Échec de sauvegarde de la clé API dans le Coffre Cloud (accès Super-Admin requis).';
+      onNotify(msg, 'err');
     } finally {
       setApiKeyBusy(false);
     }
@@ -850,10 +868,23 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
   const handleDeleteCloudApiKey = async (provider: string) => {
     setApiKeyBusy(true);
     try {
-      await adminDeleteApiKey(provider);
-      onNotify(`Clé API "${provider}" supprimée de Firestore.`);
-    } catch {
-      onNotify('Impossible de supprimer cette clé API.', 'err');
+      const idToken = await getCurrentUserIdToken();
+      const delRes = await fetch(`/api/admin/api-keys/${encodeURIComponent(provider)}`, {
+        method: 'DELETE',
+        headers: {
+          Accept: 'application/json',
+          Authorization: `Bearer ${idToken}`,
+        },
+      });
+      const delData = await delRes.json().catch(() => ({}));
+      if (!delRes.ok) {
+        throw new Error(delData?.error || `Erreur serveur (HTTP ${delRes.status}).`);
+      }
+      await onRefreshCloudApiKeys?.();
+      onNotify(`Clé API "${provider}" supprimée du Coffre Cloud.`);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Impossible de supprimer cette clé API.';
+      onNotify(msg, 'err');
     } finally {
       setApiKeyBusy(false);
     }
@@ -872,6 +903,14 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
         ok: false,
         model: normalized,
         message: `Aucune clé enregistrée pour « ${normalized} » dans le Coffre Cloud.`,
+      };
+    }
+    if (secret.startsWith('••••')) {
+      return {
+        ok: false,
+        model: normalized,
+        message:
+          'Test direct navigateur désactivé : les clés du Coffre Cloud sont strictement protégées côté serveur et testées via le proxy sécurisé.',
       };
     }
 

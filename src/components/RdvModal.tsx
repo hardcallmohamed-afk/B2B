@@ -47,7 +47,17 @@ export const RdvModal: React.FC<RdvModalProps> = ({
         .toISOString()
         .slice(0, 16);
 
-      setRdvAt(fiche.rdvAt ? fiche.rdvAt.slice(0, 16) : isoLocal);
+      let initialRdvLocal = isoLocal;
+      if (fiche.rdvAt) {
+        const parsed = new Date(fiche.rdvAt);
+        if (!Number.isNaN(parsed.getTime())) {
+          initialRdvLocal = new Date(parsed.getTime() - parsed.getTimezoneOffset() * 60000)
+            .toISOString()
+            .slice(0, 16);
+        }
+      }
+
+      setRdvAt(initialRdvLocal);
       setRdvLieu(fiche.rdvLieu || (fiche.ville ? `Siège de l'entreprise à ${fiche.ville}` : ''));
       setNote('');
       setErrorMessage(null);

@@ -525,17 +525,17 @@ service cloud.firestore {
         && isValidTeamStat(incoming(), userId)
         && incoming().createdAt == request.time
         && incoming().updatedAt == request.time
-        && incoming().xp == 0
-        && incoming().totalContracts == 0
-        && incoming().totalPayoutMad == 0
-        && incoming().unlockedCount == 0
-        && incoming().totalProspects == 0
-        && incoming().totalQualified == 0
         && (
           isSuperAdmin()
           || (
             isApprovedMember(userId)
             && incoming().uid == request.auth.uid
+            && incoming().xp == 0
+            && incoming().totalContracts == 0
+            && incoming().totalPayoutMad == 0
+            && incoming().unlockedCount == 0
+            && incoming().totalProspects == 0
+            && incoming().totalQualified == 0
             && incoming().manualBadges.size() == 0
             && incoming().role == get(/databases/$(database)/documents/app_users/$(userId)).data.role
             && incoming().active == true
@@ -597,6 +597,8 @@ service cloud.firestore {
 
       allow create: if isValidId(contractId)
         && isValidSignedContract(incoming(), contractId)
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
         && (
           isSuperAdmin()
           || isTeamLeadOrManager()
@@ -609,47 +611,49 @@ service cloud.firestore {
         );
 
       // Payout amounts, products, and statuses are controlled by Super-Admin, Managers and Team Leads.
+      // Immutable identity/client/timestamp fields cannot be modified (enforced via affectedKeys).
       // Transition to 'Versé' strictly requires a non-empty referenceVirement (max 80).
-      // Transition to 'Refusé' requires a non-empty refusMotif (max 200).
+      // Transition to 'Refusé' strictly requires a non-empty refusMotif (max 200).
       allow update: if isValidId(contractId)
         && (isSuperAdmin() || isTeamLeadOrManager())
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'produitOrangePro', 'tier', 'payoutMad', 'payoutStatus',
+          'referenceVirement', 'refusMotif', 'updatedAt'
+        ])
+        && incoming().produitOrangePro is string
+        && incoming().produitOrangePro.size() >= 1
+        && incoming().produitOrangePro.size() <= 200
+        && isValidOrangeTier(incoming().tier)
+        && incoming().payoutMad is number
+        && incoming().payoutMad >= 0
+        && incoming().payoutMad <= 10000000
+        && isValidPayoutStatus(incoming().payoutStatus)
         && (
-          !('produitOrangePro' in incoming()) || (incoming().produitOrangePro is string && incoming().produitOrangePro.size() >= 1 && incoming().produitOrangePro.size() <= 200)
+          !('referenceVirement' in incoming())
+          || (incoming().referenceVirement is string && incoming().referenceVirement.size() <= 80)
         )
         && (
-          !('tier' in incoming()) || isValidOrangeTier(incoming().tier)
+          !('refusMotif' in incoming())
+          || (incoming().refusMotif is string && incoming().refusMotif.size() <= 200)
         )
         && (
-          !('payoutMad' in incoming()) || (incoming().payoutMad is number && incoming().payoutMad >= 0 && incoming().payoutMad <= 10000000)
-        )
-        && (
-          !('payoutStatus' in incoming()) || isValidPayoutStatus(incoming().payoutStatus)
-        )
-        && (
-          (
-            ('payoutStatus' in incoming() && incoming().payoutStatus == 'Versé')
-            ||
-            (!('payoutStatus' in incoming()) && existing().payoutStatus == 'Versé')
+          incoming().payoutStatus != 'Versé'
+          || (
+            'referenceVirement' in incoming()
+            && incoming().referenceVirement is string
+            && incoming().referenceVirement.size() >= 1
+            && incoming().referenceVirement.size() <= 80
           )
-          ? (
-              ('referenceVirement' in incoming() && incoming().referenceVirement is string && incoming().referenceVirement.size() >= 1 && incoming().referenceVirement.size() <= 80)
-              ||
-              ('referenceVirement' in existing() && existing().referenceVirement is string && existing().referenceVirement.size() >= 1 && existing().referenceVirement.size() <= 80)
-            )
-          : true
         )
         && (
-          (
-            ('payoutStatus' in incoming() && incoming().payoutStatus == 'Refusé')
-            ||
-            (!('payoutStatus' in incoming()) && existing().payoutStatus == 'Refusé')
+          incoming().payoutStatus != 'Refusé'
+          || (
+            'refusMotif' in incoming()
+            && incoming().refusMotif is string
+            && incoming().refusMotif.size() >= 1
+            && incoming().refusMotif.size() <= 200
           )
-          ? (
-              ('refusMotif' in incoming() && incoming().refusMotif is string && incoming().refusMotif.size() >= 1 && incoming().refusMotif.size() <= 200)
-              ||
-              ('refusMotif' in existing() && existing().refusMotif is string && existing().refusMotif.size() >= 1 && existing().refusMotif.size() <= 200)
-            )
-          : true
         );
 
       allow delete: if isSuperAdmin() && isValidId(contractId);
@@ -704,8 +708,18 @@ service cloud.firestore {
             isOwner(userId)
             && incoming().uid == request.auth.uid
             && incoming().role == existing().role
-            && incoming().todayWorkedSeconds >= existing().todayWorkedSeconds
-            && incoming().todayWorkedSeconds <= existing().todayWorkedSeconds + 120
+            && (
+              (
+                incoming().activeDateKey == existing().activeDateKey
+                && incoming().todayWorkedSeconds >= existing().todayWorkedSeconds
+                && incoming().todayWorkedSeconds <= existing().todayWorkedSeconds + 120
+              )
+              || (
+                incoming().activeDateKey != existing().activeDateKey
+                && incoming().todayWorkedSeconds >= 0
+                && incoming().todayWorkedSeconds <= 120
+              )
+            )
             && incoming().todayWorkedSeconds <= 86400
             && incoming().totalWorkedSeconds >= existing().totalWorkedSeconds
             && incoming().totalWorkedSeconds <= existing().totalWorkedSeconds + 120

@@ -85,6 +85,7 @@ export const TeamPerformancePanel: React.FC<TeamPerformancePanelProps> = ({
   const [editStatus, setEditStatus] = useState<PayoutStatus>('En attente');
   const [editRefvirement, setEditRefvirement] = useState<string>('');
   const [editRefusMotif, setEditRefusMotif] = useState<string>('');
+  const [editError, setEditError] = useState<string | null>(null);
   const [savingContractId, setSavingContractId] = useState<string | null>(null);
 
   const roleFilteredStats = useMemo(() => {
@@ -197,22 +198,23 @@ export const TeamPerformancePanel: React.FC<TeamPerformancePanelProps> = ({
   }, [leaderboard, selectedMember]);
 
   // Signed Contracts Ledger:
-  // - Super-Admin sees all (filtered by selectedRole and selectedUid if chosen)
+  // - Super-Admin / Manager / Team-Lead see team contracts (filtered by selectedRole and selectedUid if chosen)
   // - Collaborator sees ONLY their own signed contracts (without client phone/email PII)
   const visibleContracts = useMemo(() => {
-    const base = isSuperAdmin
+    const base = canManageContracts
       ? effectiveSelectedUid === 'all'
         ? roleFilteredContracts
         : roleFilteredContracts.filter((c) => c.ownerId === effectiveSelectedUid)
       : signedContracts.filter((c) => c.ownerId === currentUserUid);
     return [...base].sort((a, b) => (b.signedAt || '').localeCompare(a.signedAt || ''));
-  }, [signedContracts, roleFilteredContracts, isSuperAdmin, effectiveSelectedUid, currentUserUid]);
+  }, [signedContracts, roleFilteredContracts, canManageContracts, effectiveSelectedUid, currentUserUid]);
 
   const payoutBreakdown = useMemo(() => {
     let enAttente = 0;
     let valide = 0;
     let verse = 0;
     for (const c of visibleContracts) {
+      if (c.payoutStatus === 'Refusé') continue;
       if (c.payoutStatus === 'Versé') verse += c.payoutMad;
       else if (c.payoutStatus === 'Validé') valide += c.payoutMad;
       else enAttente += c.payoutMad;
@@ -226,18 +228,20 @@ export const TeamPerformancePanel: React.FC<TeamPerformancePanelProps> = ({
     setEditStatus(c.payoutStatus);
     setEditRefvirement(c.referenceVirement || '');
     setEditRefusMotif(c.refusMotif || '');
+    setEditError(null);
   };
 
   const saveEditContract = async (c: SignedContractRecord) => {
     if (!onAdminUpdateContract) return;
     if (editStatus === 'Versé' && !editRefvirement.trim()) {
-      alert('Référence de virement obligatoire pour valider le versement.');
+      setEditError('Référence de virement obligatoire pour valider le versement.');
       return;
     }
     if (editStatus === 'Refusé' && !editRefusMotif.trim()) {
-      alert('Motif de refus obligatoire pour rejeter un contrat.');
+      setEditError('Motif de refus obligatoire pour rejeter un contrat.');
       return;
     }
+    setEditError(null);
     setSavingContractId(c.id);
     try {
       await onAdminUpdateContract(c.id, {
@@ -786,18 +790,18 @@ export const TeamPerformancePanel: React.FC<TeamPerformancePanelProps> = ({
             <div className="flex items-center gap-2">
               <Package className="h-4 w-4 text-orange-600" />
               <h3 className="text-sm font-bold text-stone-900">
-                {isSuperAdmin
+                {canManageContracts
                   ? `Contrats Signés & Gestion des Payouts (${visibleContracts.length})`
                   : `Mes Contrats Signés & Payouts (${visibleContracts.length})`}
               </h3>
             </div>
             <p className="mt-0.5 text-xs text-stone-500">
-              {isSuperAdmin
+              {canManageContracts
                 ? 'Ajustez les commissions MAD et validez le versement de chaque contrat signé.'
                 : 'Après signature, les fiches clients sont verrouillées. Vous suivez ici votre nombre de contrats, le produit Orange Pro et votre payout.'}
             </p>
           </div>
-          {!isSuperAdmin && (
+          {!canManageContracts && (
             <span className="inline-flex items-center gap-1.5 rounded-lg border border-stone-200 bg-stone-50 px-2.5 py-1 text-[11px] font-semibold text-stone-700">
               <Lock className="h-3.5 w-3.5 text-amber-600" />
               Fiches clients verrouillées après signature
@@ -810,19 +814,19 @@ export const TeamPerformancePanel: React.FC<TeamPerformancePanelProps> = ({
             <thead>
               <tr className="border-b border-stone-200 bg-stone-50 text-[11px] font-semibold uppercase tracking-wide text-stone-500">
                 <th className="px-4 py-3">Date</th>
-                {isSuperAdmin && <th className="px-4 py-3">Collaborateur</th>}
+                {canManageContracts && <th className="px-4 py-3">Collaborateur</th>}
                 <th className="px-4 py-3">Dossier / Entreprise</th>
                 <th className="px-4 py-3">Produit Orange Pro</th>
                 <th className="px-4 py-3">Gamme</th>
                 <th className="px-4 py-3 text-right">Payout (MAD)</th>
                 <th className="px-4 py-3">Statut Paiement</th>
-                {isSuperAdmin && <th className="px-4 py-3 text-right">Admin</th>}
+                {canManageContracts && <th className="px-4 py-3 text-right">Validation</th>}
               </tr>
             </thead>
             <tbody className="divide-y divide-stone-100">
               {visibleContracts.length === 0 ? (
                 <tr>
-                  <td colSpan={isSuperAdmin ? 8 : 6} className="px-4 py-8 text-center text-stone-500">
+                  <td colSpan={canManageContracts ? 8 : 6} className="px-4 py-8 text-center text-stone-500">
                     Aucun contrat signé enregistré pour cette sélection. Passez une fiche en statut{' '}
                     <strong>« Signé Orange Pro »</strong> pour calculer automatiquement le payout.
                   </td>
@@ -838,12 +842,12 @@ export const TeamPerformancePanel: React.FC<TeamPerformancePanelProps> = ({
                       <td className="px-4 py-3 font-medium text-stone-600 tabular-nums">
                         {dateLabel}
                       </td>
-                      {isSuperAdmin && (
+                      {canManageContracts && (
                         <td className="px-4 py-3 font-semibold text-stone-800">{c.ownerName}</td>
                       )}
                       <td className="px-4 py-3">
                         <div className="flex items-center gap-1.5 font-bold text-stone-900">
-                          {!isSuperAdmin && <Lock className="h-3 w-3 text-stone-400" />}
+                          {!canManageContracts && <Lock className="h-3 w-3 text-stone-400" />}
                           <span>{c.societe}</span>
                         </div>
                         <div className="text-[11px] text-stone-500">
@@ -878,7 +882,10 @@ export const TeamPerformancePanel: React.FC<TeamPerformancePanelProps> = ({
                           <div className="space-y-1.5">
                             <select
                               value={editStatus}
-                              onChange={(e) => setEditStatus(e.target.value as PayoutStatus)}
+                              onChange={(e) => {
+                                setEditStatus(e.target.value as PayoutStatus);
+                                setEditError(null);
+                              }}
                               className="rounded-lg border border-orange-400 bg-white px-2 py-1 text-xs font-semibold text-stone-900"
                             >
                               <option value="En attente">En attente</option>
@@ -889,26 +896,35 @@ export const TeamPerformancePanel: React.FC<TeamPerformancePanelProps> = ({
                             {editStatus === 'Versé' && (
                               <input
                                 type="text"
-                                placeholder="Ref virement (ex: VIR-2026-...) *required"
+                                placeholder="Réf. virement (ex: VIR-2026-...)"
                                 value={editRefvirement}
-                                onChange={(e) => setEditRefvirement(e.target.value)}
+                                onChange={(e) => {
+                                  setEditRefvirement(e.target.value);
+                                  setEditError(null);
+                                }}
                                 className="w-full rounded-md border border-emerald-400 px-2 py-1 text-[11px] text-stone-900"
                               />
                             )}
                             {editStatus === 'Refusé' && (
                               <input
                                 type="text"
-                                placeholder="Motif de refus *required"
+                                placeholder="Motif de refus obligatoire"
                                 value={editRefusMotif}
-                                onChange={(e) => setEditRefusMotif(e.target.value)}
+                                onChange={(e) => {
+                                  setEditRefusMotif(e.target.value);
+                                  setEditError(null);
+                                }}
                                 className="w-full rounded-md border border-red-400 px-2 py-1 text-[11px] text-stone-900"
                               />
+                            )}
+                            {editError && (
+                              <p className="text-[11px] font-medium text-red-600">{editError}</p>
                             )}
                           </div>
                         ) : (
                           <div>
                             <span
-                              className={`inline-block rounded-md border px-2 py-0.5 text-[11px] font-semibold ${PAYOUT_STATUS_STYLES[c.payoutStatus]}`}
+                              className={`inline-block rounded-md border px-2 py-0.5 text-[11px] font-semibold ${PAYOUT_STATUS_STYLES[c.payoutStatus] || PAYOUT_STATUS_STYLES['En attente']}`}
                             >
                               {c.payoutStatus}
                             </span>
@@ -936,7 +952,10 @@ export const TeamPerformancePanel: React.FC<TeamPerformancePanelProps> = ({
                               </button>
                               <button
                                 type="button"
-                                onClick={() => setEditingContractId(null)}
+                                onClick={() => {
+                                  setEditingContractId(null);
+                                  setEditError(null);
+                                }}
                                 className="rounded-lg bg-stone-200 p-1.5 text-stone-700 hover:bg-stone-300"
                                 title="Annuler"
                               >

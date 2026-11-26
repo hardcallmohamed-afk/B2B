@@ -23,6 +23,20 @@ export interface QuoteConfig {
   };
 }
 
+/**
+ * Formate un montant en MAD sans espaces insécables Unicode (U+202F / U+00A0)
+ * qui provoquent des glyphes cassés (« / ») avec la police intégrée Helvetica de jsPDF.
+ */
+export function formatPdfMad(amount: number, decimals = 2): string {
+  const safe = Number.isFinite(amount) ? Math.max(0, amount) : 0;
+  return safe
+    .toLocaleString('fr-FR', {
+      minimumFractionDigits: decimals,
+      maximumFractionDigits: decimals,
+    })
+    .replace(/[\u00A0\u202F]/g, ' ');
+}
+
 export function generateClientQuotePdf(config: QuoteConfig): void {
   const doc = new jsPDF({
     orientation: 'portrait',
@@ -50,7 +64,7 @@ export function generateClientQuotePdf(config: QuoteConfig): void {
   validUntilDate.setDate(validUntilDate.getDate() + (validityDays || 15));
   const validUntilStr = validUntilDate.toLocaleDateString('fr-FR');
 
-  const totalMonthly = Math.max(0, prixMensuelMad);
+  const totalMonthly = Math.max(0, Number(prixMensuelMad) || 0);
   const totalAnnual = totalMonthly * 12;
 
   // 1. En-tête DIVERSIFIA (Brand Orange #F96614 & Dark Stone #1C1917)
@@ -71,15 +85,15 @@ export function generateClientQuotePdf(config: QuoteConfig): void {
   doc.text('Partenaire Officiel B2B Orange Maroc — Solutions Entreprises', 15, 26);
 
   doc.setFont('helvetica', 'bold');
-  doc.setFontSize(14);
+  doc.setFontSize(13);
   doc.setTextColor(249, 102, 20);
-  doc.text(`DEVIS PROPOSITIONS COMMERCIALE`, 130, 18, { align: 'left' });
+  doc.text('DEVIS COMMERCIAL', 195, 18, { align: 'right' });
 
   doc.setFont('helvetica', 'normal');
   doc.setFontSize(10);
   doc.setTextColor(255, 255, 255);
-  doc.text(`N° ${quoteNumber}`, 130, 25, { align: 'left' });
-  doc.text(`Date : ${todayStr}`, 130, 31, { align: 'left' });
+  doc.text(`N° ${quoteNumber}`, 195, 25, { align: 'right' });
+  doc.text(`Date : ${todayStr}`, 195, 31, { align: 'right' });
 
   // 2. Coordonnées Émetteur (Workspace Legal ou À compléter)
   doc.setTextColor(60, 60, 60);
@@ -90,12 +104,20 @@ export function generateClientQuotePdf(config: QuoteConfig): void {
   doc.text('ÉMETTEUR :', 15, y);
   doc.setFont('helvetica', 'normal');
   y += 5;
-  doc.text(workspaceLegal?.raisonSociale ? workspaceLegal.raisonSociale : 'DIVERSIFIA (À compléter dans Mon Compte)', 15, y);
-  y += 4;
+  const issuerNameLines = doc.splitTextToSize(
+    workspaceLegal?.raisonSociale ? workspaceLegal.raisonSociale : 'DIVERSIFIA (À compléter dans Mon Compte)',
+    95
+  );
+  doc.text(issuerNameLines, 15, y);
+  y += issuerNameLines.length * 4;
   doc.text(`ICE : ${workspaceLegal?.ice ? workspaceLegal.ice : 'À compléter (ICE)'}`, 15, y);
   y += 4;
-  doc.text(workspaceLegal?.adresse ? workspaceLegal.adresse : 'Adresse du siège social non renseignée', 15, y);
-  y += 4;
+  const issuerAddrLines = doc.splitTextToSize(
+    workspaceLegal?.adresse ? workspaceLegal.adresse : 'Adresse du siège social non renseignée',
+    95
+  );
+  doc.text(issuerAddrLines, 15, y);
+  y += issuerAddrLines.length * 4;
   doc.text(`Tél : ${workspaceLegal?.telephone || commercialPhone || 'Service Commercial B2B'}`, 15, y);
 
   // 3. Coordonnées Prospect / Client
@@ -104,13 +126,24 @@ export function generateClientQuotePdf(config: QuoteConfig): void {
   doc.text('CLIENT / PROSPECT :', 120, yRight);
   doc.setFont('helvetica', 'normal');
   yRight += 5;
-  doc.text(fiche.societe, 120, yRight);
-  yRight += 4;
-  doc.text(`À l’attention de : ${fiche.contact || 'Direction / Responsable'} (${fiche.role || 'Décideur'})`, 120, yRight);
-  yRight += 4;
-  doc.text(`Ville : ${fiche.ville || 'Maroc'}`, 120, yRight);
-  yRight += 4;
-  doc.text(`Tél : ${fiche.telephone || 'Non renseigné'} | Email : ${fiche.email || 'Non renseigné'}`, 120, yRight);
+  const societeLines = doc.splitTextToSize(fiche.societe || 'Client Orange Pro', 75);
+  doc.text(societeLines, 120, yRight);
+  yRight += societeLines.length * 4;
+  const contactLines = doc.splitTextToSize(
+    `À l'attention de : ${fiche.contact || 'Direction / Responsable'} (${fiche.role || 'Décideur'})`,
+    75
+  );
+  doc.text(contactLines, 120, yRight);
+  yRight += contactLines.length * 4;
+  const villeLines = doc.splitTextToSize(`Ville : ${fiche.ville || 'Maroc'}`, 75);
+  doc.text(villeLines, 120, yRight);
+  yRight += villeLines.length * 4;
+  const coordLines = doc.splitTextToSize(
+    `Tél : ${fiche.telephone || 'Non renseigné'} | Email : ${fiche.email || 'Non renseigné'}`,
+    75
+  );
+  doc.text(coordLines, 120, yRight);
+  yRight += Math.max(0, (coordLines.length - 1) * 4);
 
   // 4. Commercial en charge
   y = Math.max(y, yRight) + 12;
@@ -121,9 +154,14 @@ export function generateClientQuotePdf(config: QuoteConfig): void {
   doc.setFont('helvetica', 'bold');
   doc.setFontSize(10);
   doc.setTextColor(28, 25, 23);
-  doc.text('Chargé d’Affaires Orange Pro :', 15, y);
+  doc.text("Chargé d'Affaires Orange Pro :", 15, y);
   doc.setFont('helvetica', 'normal');
-  doc.text(`${commercialName} ${commercialEmail ? `(${commercialEmail})` : ''}`, 75, y);
+  const commercialLines = doc.splitTextToSize(
+    `${commercialName}${commercialEmail ? ` (${commercialEmail})` : ''}`,
+    120
+  );
+  doc.text(commercialLines, 75, y);
+  y += Math.max(0, (commercialLines.length - 1) * 4.5);
 
   // 5. Tableau des offres / prestations
   y += 10;
@@ -132,40 +170,42 @@ export function generateClientQuotePdf(config: QuoteConfig): void {
   doc.setFont('helvetica', 'bold');
   doc.setFontSize(9);
   doc.setTextColor(28, 25, 23);
-  doc.text('Désignation de l’offre Orange Pro', 18, y + 5.5);
-  doc.text('Segment', 110, y + 5.5);
-  doc.text('Qté', 145, y + 5.5);
-  doc.text('Total Mensuel MAD', 165, y + 5.5);
+  doc.text("Désignation de l'offre Orange Pro", 18, y + 5.5);
+  doc.text('Segment', 108, y + 5.5);
+  doc.text('Qté', 138, y + 5.5);
+  doc.text('Total Mensuel', 192, y + 5.5, { align: 'right' });
 
   y += 8;
   doc.setFont('helvetica', 'normal');
   doc.setFontSize(9);
-  doc.rect(15, y, 180, 12);
-  doc.text(produitOrangePro, 18, y + 7.5);
-  doc.text(tier, 110, y + 7.5);
-  doc.text(`${quantiteFixe} fixes / ${quantiteMobile} mob.`, 145, y + 7.5);
-  doc.text(`${totalMonthly.toLocaleString('fr-FR', { minimumFractionDigits: 2 })} MAD`, 165, y + 7.5, { align: 'left' });
+  const productLines = doc.splitTextToSize(produitOrangePro || 'Pack Orange Pro', 86);
+  const rowHeight = Math.max(12, productLines.length * 4.5 + 6);
+  doc.rect(15, y, 180, rowHeight);
+  doc.text(productLines, 18, y + 6);
+  doc.text(tier, 108, y + 6);
+  doc.text(`${quantiteFixe} fix. / ${quantiteMobile} mob.`, 138, y + 6);
+  doc.text(`${formatPdfMad(totalMonthly, 2)} MAD`, 192, y + 6, { align: 'right' });
 
   // 6. Totaux
-  y += 18;
+  y += rowHeight + 8;
   doc.setFillColor(254, 243, 235); // Orange soft bg
-  doc.roundedRect(115, y, 80, 22, 2, 2, 'F');
+  doc.roundedRect(112, y, 83, 22, 2, 2, 'F');
   doc.setFont('helvetica', 'bold');
   doc.setFontSize(10);
   doc.setTextColor(194, 65, 12); // Orange dark
-  doc.text('TOTAL HT MENSUEL :', 120, y + 8);
-  doc.text(`${totalMonthly.toLocaleString('fr-FR', { minimumFractionDigits: 2 })} MAD`, 190, y + 8, { align: 'right' });
+  doc.text('TOTAL HT MENSUEL :', 117, y + 8);
+  doc.text(`${formatPdfMad(totalMonthly, 2)} MAD`, 191, y + 8, { align: 'right' });
 
   doc.setFontSize(9);
   doc.setTextColor(80, 80, 80);
-  doc.text(`Engagement annuel (${totalAnnual.toLocaleString('fr-FR')} MAD)`, 120, y + 16);
+  doc.text(`Engagement annuel (${formatPdfMad(totalAnnual, 0)} MAD)`, 117, y + 16);
 
   // 7. Conditions de validité et mentions légales (AUCUNE COMMISSION IMPRIMÉE)
   y += 32;
   doc.setFont('helvetica', 'bold');
   doc.setFontSize(9);
   doc.setTextColor(28, 25, 23);
-  doc.text('Conditions générales de l’offre :', 15, y);
+  doc.text("Conditions générales de l'offre :", 15, y);
   y += 5;
   doc.setFont('helvetica', 'normal');
   doc.setFontSize(8);
@@ -189,6 +229,6 @@ export function generateClientQuotePdf(config: QuoteConfig): void {
   doc.text('Bon pour accord & Signature Client', 113, y + 5);
 
   // Enregistrer le PDF
-  const safeFilename = `Devis_Orange_Pro_${fiche.societe.replace(/[^a-zA-Z0-9]/g, '_')}_${quoteNumber}.pdf`;
+  const safeFilename = `Devis_Orange_Pro_${(fiche.societe || 'Client').replace(/[^a-zA-Z0-9]/g, '_')}_${quoteNumber}.pdf`;
   doc.save(safeFilename);
 }

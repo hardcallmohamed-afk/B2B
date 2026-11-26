@@ -182,8 +182,101 @@ export interface UrlValidationResult {
 }
 
 /**
+/**
+ * Vérifie si une adresse IPv4 ou IPv6 brute (avec ou sans crochets) appartient à une plage
+ * privée, de boucle locale, link-local, CGNAT, TEST-NET, multicast ou métadonnées cloud.
+ */
+export function isPrivateOrReservedIp(rawIp: string): boolean {
+  if (typeof rawIp !== 'string') return true;
+  let ip = rawIp.trim().toLowerCase();
+  if (!ip) return true;
+
+  // Retirer les crochets IPv6 et l'identifiant de zone (%eth0)
+  if (ip.startsWith('[') && ip.endsWith(']')) {
+    ip = ip.slice(1, -1);
+  }
+  const zoneIdx = ip.indexOf('%');
+  if (zoneIdx !== -1) {
+    ip = ip.slice(0, zoneIdx);
+  }
+
+  // Vérification IPv6
+  if (ip.includes(':')) {
+    if (
+      ip === '::' ||
+      ip === '::1' ||
+      /^0+(?::0+){1,7}$/.test(ip) ||
+      /^0+(?::0+){1,6}:0*1$/.test(ip)
+    ) {
+      return true;
+    }
+    // IPv4-mapped IPv6 (ex: ::ffff:127.0.0.1 ou forme normalisée ::ffff:7f00:1)
+    if (ip.includes('::ffff:') || /^0*:0*:0*:0*:0*:ffff:/i.test(ip)) {
+      return true;
+    }
+    // Unique Local Addresses fc00::/7 (fc00:: - fdff::)
+    if (/^f[cd][0-9a-f]{0,2}:/i.test(ip)) {
+      return true;
+    }
+    // Link-Local fe80::/10 (fe80:: - febf::)
+    if (/^fe[89ab][0-9a-f]?:/i.test(ip)) {
+      return true;
+    }
+    // Multicast ff00::/8
+    if (/^ff[0-9a-f]{0,2}:/i.test(ip)) {
+      return true;
+    }
+    // Documentation 2001:db8::/32
+    if (/^2001:0?db8:/i.test(ip)) {
+      return true;
+    }
+    return false;
+  }
+
+  // Vérification IPv4
+  const ipv4Match = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(ip);
+  if (!ipv4Match) return false;
+
+  const o1 = Number(ipv4Match[1]);
+  const o2 = Number(ipv4Match[2]);
+  const o3 = Number(ipv4Match[3]);
+  const o4 = Number(ipv4Match[4]);
+
+  if (o1 > 255 || o2 > 255 || o3 > 255 || o4 > 255) {
+    return true;
+  }
+
+  // 0.0.0.0/8 (réseau courant)
+  if (o1 === 0) return true;
+  // 10.0.0.0/8 (privé classe A)
+  if (o1 === 10) return true;
+  // 100.64.0.0/10 (CGNAT)
+  if (o1 === 100 && o2 >= 64 && o2 <= 127) return true;
+  // 127.0.0.0/8 (loopback)
+  if (o1 === 127) return true;
+  // 169.254.0.0/16 (link-local & métadonnées cloud)
+  if (o1 === 169 && o2 === 254) return true;
+  // 172.16.0.0/12 (privé classe B)
+  if (o1 === 172 && o2 >= 16 && o2 <= 31) return true;
+  // 192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24 (TEST-NET)
+  if (
+    (o1 === 192 && o2 === 0 && o3 === 2) ||
+    (o1 === 198 && o2 === 51 && o3 === 100) ||
+    (o1 === 203 && o2 === 0 && o3 === 113)
+  ) {
+    return true;
+  }
+  // 192.168.0.0/16 (privé classe C)
+  if (o1 === 192 && o2 === 168) return true;
+  // 224.0.0.0/4 (multicast) et 240.0.0.0/4 (réservé / diffusion)
+  if (o1 >= 224) return true;
+
+  return false;
+}
+
+/**
  * LOT 7: Validation stricte anti-SSRF pour le proxy de crawl serveur.
- * Refuse les IP privées (127.x, 10.x, 172.16-31.x, 192.168.x, 169.254.x, localhost, metadata).
+ * Refuse les IP privées (127.x, 10.x, 172.16-31.x, 192.168.x, 169.254.x, IPv6 privées, localhost, metadata).
  */
 export function validatePublicHttpUrl(rawUrl: unknown): UrlValidationResult {
   if (typeof rawUrl !== 'string' || !rawUrl.trim()) {
@@ -202,24 +295,18 @@ export function validatePublicHttpUrl(rawUrl: unknown): UrlValidationResult {
     return { valid: false, error: 'Protocole non autorisé : seuls http:// et https:// sont supportés.' };
   }
 
-  const host = parsed.hostname.toLowerCase();
+  const rawHost = parsed.hostname.toLowerCase();
+  const host = rawHost.startsWith('[') && rawHost.endsWith(']') ? rawHost.slice(1, -1) : rawHost;
 
   // Reject ambiguous numeric hosts (decimal, octal, hex)
   if (/^(?:0x[0-9a-f]+|0[0-7]+|\d+)$/i.test(host)) {
     return { valid: false, error: 'Accès interdit : format d’hôte numérique ambigu.' };
   }
 
-  // Localhost, IPv6 loopback, unique-local, link-local, et métadonnées cloud
+  // Localhost et domaines internes / métadonnées cloud
   if (
     host === 'localhost' ||
-    host === '127.0.0.1' ||
-    host === '::1' ||
-    host === '[::1]' ||
-    host === '0.0.0.0' ||
     host === 'metadata.google.internal' ||
-    host.startsWith('fc') ||
-    host.startsWith('fd') ||
-    host.startsWith('fe80:') ||
     host.endsWith('.localhost') ||
     host.endsWith('.local') ||
     host.endsWith('.internal')
@@ -227,59 +314,20 @@ export function validatePublicHttpUrl(rawUrl: unknown): UrlValidationResult {
     return { valid: false, error: 'Accès interdit : les adresses locales ou internes sont bloquées (anti-SSRF).' };
   }
 
-  // IPv4-mapped check (e.g. ::ffff:127.0.0.1)
-  if (host.includes('ffff:') || host.includes('::ffff:')) {
-    return { valid: false, error: 'Accès interdit : adresses IPv4 mappées non autorisées.' };
+  // Adresses IPv6 (boucle locale, ULA fc00::/7, link-local fe80::/10, IPv4-mapped ::ffff:, etc.)
+  if (host.includes(':')) {
+    if (isPrivateOrReservedIp(host)) {
+      return { valid: false, error: 'Accès interdit : adresse IPv6 locale, privée ou mappée non autorisée.' };
+    }
+    return {
+      valid: true,
+      normalizedUrl: parsed.toString(),
+    };
   }
 
-  // Vérification des plages IPv4 privées, CGNAT et TEST-NET
-  const ipv4Match = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
-  if (ipv4Match) {
-    const o1 = Number(ipv4Match[1]);
-    const o2 = Number(ipv4Match[2]);
-    const o3 = Number(ipv4Match[3]);
-    const o4 = Number(ipv4Match[4]);
-
-    if (o1 > 255 || o2 > 255 || o3 > 255 || o4 > 255) {
-      return { valid: false, error: 'Adresse IP invalide.' };
-    }
-
-    // 127.0.0.0/8 (Loopback)
-    if (o1 === 127) {
-      return { valid: false, error: 'Accès interdit aux adresses de boucle locale.' };
-    }
-    // 10.0.0.0/8 (Réseau privé classe A)
-    if (o1 === 10) {
-      return { valid: false, error: 'Accès interdit aux adresses réseau privées (10.x.x.x).' };
-    }
-    // 172.16.0.0/12 (Réseau privé classe B: 172.16 - 172.31)
-    if (o1 === 172 && o2 >= 16 && o2 <= 31) {
-      return { valid: false, error: 'Accès interdit aux adresses réseau privées (172.16-31.x.x).' };
-    }
-    // 192.168.0.0/16 (Réseau privé classe C)
-    if (o1 === 192 && o2 === 168) {
-      return { valid: false, error: 'Accès interdit aux adresses réseau privées (192.168.x.x).' };
-    }
-    // 100.64.0.0/10 (CGNAT)
-    if (o1 === 100 && o2 >= 64 && o2 <= 127) {
-      return { valid: false, error: 'Accès interdit aux adresses CGNAT (100.64.x.x).' };
-    }
-    // 192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24 (TEST-NET)
-    if (
-      (o1 === 192 && o2 === 0 && o3 === 2) ||
-      (o1 === 198 && o2 === 51 && o3 === 100) ||
-      (o1 === 203 && o2 === 0 && o3 === 113)
-    ) {
-      return { valid: false, error: 'Accès interdit aux adresses de test (TEST-NET).' };
-    }
-    // 169.254.0.0/16 (Link-local & AWS/GCP metadata)
-    if (o1 === 169 && o2 === 254) {
-      return { valid: false, error: 'Accès interdit aux adresses de liaison locale ou métadonnées cloud.' };
-    }
-    // 0.0.0.0/8 & 255.255.255.255
-    if (o1 === 0 || (o1 === 255 && o2 === 255 && o3 === 255 && o4 === 255)) {
-      return { valid: false, error: 'Accès interdit à l’adresse réseau 0.0.0.0 ou diffusion.' };
-    }
+  // Vérification des plages IPv4 privées, CGNAT, TEST-NET, multicast et métadonnées
+  if (/^\d{1,3}(?:\.\d{1,3}){3}$/.test(host) && isPrivateOrReservedIp(host)) {
+    return { valid: false, error: 'Accès interdit : adresse IPv4 privée, locale ou réservée.' };
   }
 
   return {

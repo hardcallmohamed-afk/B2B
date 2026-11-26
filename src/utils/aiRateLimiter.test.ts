@@ -8,6 +8,7 @@ import {
   resetAiUsageTracker,
   resetCrawlUsageTracker,
   validatePublicHttpUrl,
+  isPrivateOrReservedIp,
   extractVisibleTextFromHtml,
 } from './aiRateLimiter';
 
@@ -86,10 +87,26 @@ test('validatePublicHttpUrl blocks SSRF (localhost, private IPv4, CGNAT, TEST-NE
   assert.equal(validatePublicHttpUrl('ftp://example.com').valid, false);
   assert.equal(validatePublicHttpUrl('file:///etc/passwd').valid, false);
 
-  // Allowed public domains
+  // IPv6 private, link-local, ULA, and IPv4-mapped addresses must be blocked
+  assert.equal(validatePublicHttpUrl('http://[fc00::1]/internal').valid, false);
+  assert.equal(validatePublicHttpUrl('http://[fd12:3456:789a::1]/api').valid, false);
+  assert.equal(validatePublicHttpUrl('http://[fe80::1]/meta').valid, false);
+  assert.equal(validatePublicHttpUrl('http://[::ffff:127.0.0.1]/admin').valid, false);
+  assert.equal(isPrivateOrReservedIp('127.0.0.1'), true);
+  assert.equal(isPrivateOrReservedIp('10.20.30.40'), true);
+  assert.equal(isPrivateOrReservedIp('::1'), true);
+  assert.equal(isPrivateOrReservedIp('fc00::1'), true);
+  assert.equal(isPrivateOrReservedIp('fe80::1'), true);
+  assert.equal(isPrivateOrReservedIp('::ffff:169.254.169.254'), true);
+  assert.equal(isPrivateOrReservedIp('8.8.8.8'), false);
+  assert.equal(isPrivateOrReservedIp('2606:4700:4700::1111'), false);
+
+  // Allowed public domains (including fc* / fd* prefixes that are NOT IPv6 addresses)
   assert.equal(validatePublicHttpUrl('https://www.telecontact.ma/liens/annuaire.php').valid, true);
   assert.equal(validatePublicHttpUrl('https://diversifia.ma').valid, true);
   assert.equal(validatePublicHttpUrl('https://orange.ma/entreprises').valid, true);
+  assert.equal(validatePublicHttpUrl('https://fcmaroc.ma/contact').valid, true);
+  assert.equal(validatePublicHttpUrl('https://fdi.ma/entreprises').valid, true);
 });
 
 test('extractVisibleTextFromHtml strips scripts, styles and extracts readable text', () => {
