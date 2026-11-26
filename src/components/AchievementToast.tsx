@@ -10,6 +10,8 @@ import {
   Eye,
   RotateCcw,
   Pencil,
+  MessageCircle,
+  Headphones,
 } from 'lucide-react';
 import { RARITY_META, formatMad } from '../utils/gamification';
 import type { AppNotification } from '../utils/notifications';
@@ -43,11 +45,15 @@ export const AchievementToast: React.FC<AchievementToastProps> = ({
     notification.kind === 'fiche_accessed' ||
     notification.kind === 'fiche_restored' ||
     notification.kind === 'fiche_updated';
+  const isDirectComm =
+    notification.kind === 'direct_message' || notification.kind === 'coaching_invite';
   const status = notification.contractMeta?.payoutStatus;
   const meta = RARITY_META[notification.rarity] || RARITY_META.rare;
   const resolved = resolveBadgeMeta(notification.badgeId);
   const displayTitle =
-    isContractNotif || isFicheNotif ? notification.title : resolved?.title || notification.title;
+    isContractNotif || isFicheNotif || isDirectComm
+      ? notification.title
+      : resolved?.title || notification.title;
 
   let headerBg = meta.headerBg;
   let headerText = meta.headerText;
@@ -59,7 +65,17 @@ export const AchievementToast: React.FC<AchievementToastProps> = ({
         ? 'Nouvelle Distinction !'
         : 'Succès Débloqué !';
 
-  if (notification.kind === 'fiche_assigned') {
+  if (notification.kind === 'direct_message') {
+    headerBg = 'bg-sky-600';
+    headerText = 'text-white';
+    borderCls = 'border-sky-300';
+    kicker = 'Message Direct Direction';
+  } else if (notification.kind === 'coaching_invite') {
+    headerBg = 'bg-emerald-600';
+    headerText = 'text-white';
+    borderCls = 'border-emerald-300';
+    kicker = 'Coaching Terrain Live';
+  } else if (notification.kind === 'fiche_assigned') {
     headerBg = 'bg-orange-600';
     headerText = 'text-white';
     borderCls = 'border-orange-300';
@@ -152,6 +168,8 @@ export const AchievementToast: React.FC<AchievementToastProps> = ({
             </span>
           ) : isFicheNotif ? (
             <span>{notification.ficheMeta?.numeroFiche || 'CRM'}</span>
+          ) : isDirectComm ? (
+            <span>{notification.kind === 'coaching_invite' ? 'Live' : 'Chat'}</span>
           ) : (
             <span>+{notification.xpBoost} XP</span>
           )}
@@ -159,7 +177,21 @@ export const AchievementToast: React.FC<AchievementToastProps> = ({
       </div>
 
       <div className="p-2.5 sm:p-3.5 flex items-start gap-2.5 sm:gap-3">
-        {isFicheNotif ? (
+        {isDirectComm ? (
+          <div
+            className={`w-10 h-10 rounded-xl border flex items-center justify-center shrink-0 ${
+              notification.kind === 'coaching_invite'
+                ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
+                : 'border-sky-200 bg-sky-50 text-sky-700'
+            }`}
+          >
+            {notification.kind === 'coaching_invite' ? (
+              <Headphones className="w-5 h-5" />
+            ) : (
+              <MessageCircle className="w-5 h-5" />
+            )}
+          </div>
+        ) : isFicheNotif ? (
           <div
             className={`w-10 h-10 rounded-xl border flex items-center justify-center shrink-0 ${
               notification.kind === 'fiche_assigned'
@@ -221,7 +253,7 @@ export const AchievementToast: React.FC<AchievementToastProps> = ({
             <span className="text-[11px] sm:text-xs font-extrabold text-stone-900 leading-snug truncate max-w-[200px] sm:max-w-none">
               {displayTitle}
             </span>
-            {!isContractNotif && !isFicheNotif && (
+            {!isContractNotif && !isFicheNotif && !isDirectComm && (
               <span className={`rounded px-1.5 py-0.2 text-[9px] font-extrabold ${meta.pillBg} ${meta.pillText}`}>
                 {meta.label}
               </span>
@@ -249,11 +281,13 @@ export const AchievementToast: React.FC<AchievementToastProps> = ({
               }}
               className="text-[10px] sm:text-[11px] font-bold text-orange-700 hover:underline"
             >
-              {isFicheNotif
-                ? 'Ouvrir la fiche →'
-                : isContractNotif
-                  ? 'Voir Équipe & Payouts →'
-                  : 'Voir mes succès →'}
+              {isDirectComm
+                ? 'Ouvrir Discussion / Coaching →'
+                : isFicheNotif
+                  ? 'Ouvrir la fiche →'
+                  : isContractNotif
+                    ? 'Voir Équipe & Payouts →'
+                    : 'Voir mes succès →'}
             </button>
             {queueCount > 1 && (
               <button

@@ -15,6 +15,9 @@ import {
   X,
   Eye,
   Briefcase,
+  UserPlus,
+  RotateCcw,
+  MessageCircle,
 } from 'lucide-react';
 import {
   ROLE_BADGE_META,
@@ -65,6 +68,9 @@ interface TeamPerformancePanelProps {
   ) => Promise<void>;
   onJumpToBadges?: (targetUid: string) => void;
   onOpenContractFiche?: (contract: SignedContractRecord) => void;
+  onAssignContractFiche?: (contract: SignedContractRecord) => void;
+  onRestoreContractFiche?: (contract: SignedContractRecord) => void;
+  onOpenMemberProfileChat?: (uid: string) => void;
   onInspectPortfolioFiche?: (item: PortfolioFicheItem) => void;
   onOpenPortfolioQuote?: (fiche: FicheEntreprise, ownerUid: string) => void;
   onOpenPortfolioAssign?: (item: PortfolioFicheItem) => void;
@@ -91,6 +97,9 @@ export const TeamPerformancePanel: React.FC<TeamPerformancePanelProps> = ({
   onAdminUpdateContract,
   onJumpToBadges,
   onOpenContractFiche,
+  onAssignContractFiche,
+  onRestoreContractFiche,
+  onOpenMemberProfileChat,
   onInspectPortfolioFiche,
   onOpenPortfolioQuote,
   onOpenPortfolioAssign,
@@ -882,6 +891,17 @@ export const TeamPerformancePanel: React.FC<TeamPerformancePanelProps> = ({
                               Portefeuille
                             </button>
                           )}
+                          {isSuperAdmin && onOpenMemberProfileChat && !isMe && (
+                            <button
+                              type="button"
+                              onClick={() => onOpenMemberProfileChat(row.uid)}
+                              className="inline-flex items-center gap-1 rounded-lg border border-sky-200 bg-sky-50 px-2 py-1 text-[11px] font-semibold text-sky-800 hover:bg-sky-100"
+                              title={`Ouvrir le profil complet, le chat direct et le coaching de ${row.displayName}`}
+                            >
+                              <MessageCircle className="h-3 w-3" />
+                              Profil / Chat
+                            </button>
+                          )}
                           {isSuperAdmin && onJumpToBadges && (
                             <button
                               type="button"
@@ -1100,7 +1120,7 @@ export const TeamPerformancePanel: React.FC<TeamPerformancePanelProps> = ({
                               </button>
                             </div>
                           ) : (
-                            <div className="inline-flex items-center gap-1.5">
+                            <div className="inline-flex flex-wrap items-center justify-end gap-1.5">
                               {onOpenContractFiche && (canManageContracts || accessibleFicheIds?.has(c.ficheId)) && (
                                 <button
                                   type="button"
@@ -1110,6 +1130,28 @@ export const TeamPerformancePanel: React.FC<TeamPerformancePanelProps> = ({
                                 >
                                   <Eye className="h-3 w-3" />
                                   Fiche
+                                </button>
+                              )}
+                              {canManageContracts && onAssignContractFiche && (
+                                <button
+                                  type="button"
+                                  onClick={() => onAssignContractFiche(c)}
+                                  className="inline-flex items-center gap-1 rounded-lg border border-orange-200 bg-orange-50 px-2 py-1 text-[11px] font-semibold text-orange-800 hover:bg-orange-100"
+                                  title="Réattribuer cette fiche signée à un collaborateur"
+                                >
+                                  <UserPlus className="h-3 w-3" />
+                                  Attribuer
+                                </button>
+                              )}
+                              {canManageContracts && onRestoreContractFiche && (
+                                <button
+                                  type="button"
+                                  onClick={() => onRestoreContractFiche(c)}
+                                  className="inline-flex items-center gap-1 rounded-lg border border-violet-200 bg-violet-50 px-2 py-1 text-[11px] font-semibold text-violet-800 hover:bg-violet-100"
+                                  title="Restituer et déverrouiller cette fiche au collaborateur"
+                                >
+                                  <RotateCcw className="h-3 w-3" />
+                                  Restituer
                                 </button>
                               )}
                               <button

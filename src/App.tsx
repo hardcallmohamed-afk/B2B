@@ -50,6 +50,7 @@ import {
   Eye,
   FileSpreadsheet,
   UserPlus,
+  RotateCcw,
 } from 'lucide-react';
 import { onAuthStateChanged, type User } from 'firebase/auth';
 import { doc, onSnapshot, query, where } from 'firebase/firestore';
@@ -74,6 +75,12 @@ import {
   AssignRestoreFicheModal,
   type AssignRestoreMode,
 } from './components/AssignRestoreFicheModal';
+import {
+  CollaboratorProfileChatModal,
+  type CollaboratorProfileTarget,
+  type ProfileChatModalTab,
+} from './components/CollaboratorProfileChatModal';
+import { CollaboratorChatWidget } from './components/CollaboratorChatWidget';
 import type { PortfolioFicheItem } from './components/TeamPortfoliosPanel';
 import {
   buildHashFromRoute,
@@ -197,9 +204,12 @@ import {
   createCloudNotification,
   markAllCloudNotificationsRead,
   saveFicheActivite,
+  saveFicheAuditLog,
   transferFicheToCollaborator,
   restoreSignedFicheToCollaborator,
   updateTeamMemberFiche,
+  getDirectChatChannelsQuery,
+  getCoachingSessionsQuery,
   getCurrentUserIdToken,
   handleFirestoreError,
   OperationType,
@@ -215,6 +225,7 @@ import {
   computeCollectionSyncDiff,
   parseFriendlyCloudError,
   type ActiviteType,
+  type FicheAuditAction,
   type SanitizedFicheDoc,
   type SanitizedEmailSkillDoc,
 } from './utils/firestoreSanitize';
@@ -2827,11 +2838,19 @@ export default function App() {
   const [portfolioRefreshKey, setPortfolioRefreshKey] = useState<number>(0);
   const cloudNotifsHydratedRef = useRef<boolean>(false);
   const seenCloudNotifIdsRef = useRef<Set<string>>(new Set());
+  const cloudContractNotifKeysRef = useRef<Set<string>>(new Set());
   const accessNotifCooldownRef = useRef<Map<string, number>>(new Map());
   const notifyBadgesPrefRef = useRef<boolean>(true);
   const notifySoundPrefRef = useRef<boolean>(true);
   notifyBadgesPrefRef.current = userProfile.notifyBadges !== false;
   notifySoundPrefRef.current = userProfile.notifySound !== false;
+  const [profileChatModal, setProfileChatModal] = useState<{
+    target: CollaboratorProfileTarget;
+    initialTab: ProfileChatModalTab;
+  } | null>(null);
+  const [unreadChatByUid, setUnreadChatByUid] = useState<Record<string, number>>({});
+  const [coachingReadyUids, setCoachingReadyUids] = useState<Set<string>>(() => new Set());
+  const [collabChatOpenSignal, setCollabChatOpenSignal] = useState<number>(0);
 
   useEffect(() => {
     if (!profileMenuOpen) return;
@@ -3266,7 +3285,20 @@ export default function App() {
         totalWorkedSeconds: cur.totalBaseSeconds,
         sessionWorkedSeconds: cur.sessionSeconds,
         deviceLabel: encodedDevice,
-      }).catch(() => {});
+        fallbackProfile: {
+          email: cur.email,
+          displayName: cur.displayName,
+          role: cur.role,
+          zone: cur.zone,
+        },
+      })
+        .then((res) => {
+          if (activeAttendanceRef.current && activeAttendanceRef.current.uid === cur.uid) {
+            activeAttendanceRef.current.todayBaseSeconds = res.todayWorkedSeconds;
+            activeAttendanceRef.current.totalBaseSeconds = res.totalWorkedSeconds;
+          }
+        })
+        .catch(() => {});
     },
     []
   );
@@ -3726,6 +3758,26 @@ export default function App() {
 
     const initialTelemetryLabel = computeLiveTelemetryLabel();
 
+    // Initialiser immédiatement activeAttendanceRef avant l'aller-retour réseau
+    // afin que les heartbeats et la télémétrie GPS restent toujours opérationnels même en cas de micro-coupure.
+    activeAttendanceRef.current = {
+      uid,
+      email,
+      displayName: initName,
+      role: currentUserRole,
+      zone: initZone,
+      sessionId,
+      dateKey,
+      startedAtMs: nowMs,
+      lastTickMs: nowMs,
+      todayBaseSeconds: 0,
+      totalBaseSeconds: 0,
+      sessionSeconds: 0,
+      deviceLabel: initialTelemetryLabel,
+      baseDeviceLabel: deviceInfo.label,
+      closed: false,
+    };
+
     startAttendanceSession({
       uid,
       email,
@@ -3743,31 +3795,22 @@ export default function App() {
     })
       .then((res) => {
         if (cancelled) return;
-        activeAttendanceRef.current = {
-          uid,
-          email,
-          displayName: initName,
-          role: currentUserRole,
-          zone: initZone,
-          sessionId,
-          dateKey,
-          startedAtMs: nowMs,
-          lastTickMs: nowMs,
-          todayBaseSeconds: res.todayWorkedSeconds,
-          totalBaseSeconds: res.totalWorkedSeconds,
-          sessionSeconds: 0,
-          deviceLabel: computeLiveTelemetryLabel(),
-          baseDeviceLabel: deviceInfo.label,
-          closed: false,
-        };
+        const cur = activeAttendanceRef.current;
+        if (cur && cur.uid === uid) {
+          cur.todayBaseSeconds = Math.max(cur.todayBaseSeconds, res.todayWorkedSeconds);
+          cur.totalBaseSeconds = Math.max(cur.totalBaseSeconds, res.totalWorkedSeconds);
+          cur.closed = false;
+        }
       })
       .catch(() => {
-        // Silent fallback if presence write temporarily fails offline
+        // Silent fallback: les heartbeats auto-réparateurs prendront le relais automatiquement
       });
 
-    const accumulateElapsed = (commitNetwork = false) => {
+    const accumulateElapsed = (commitNetwork = false, forceRecovery = false) => {
       const cur = activeAttendanceRef.current;
-      if (!cur || cur.closed || cur.uid !== uid) return;
+      if (!cur || cur.uid !== uid) return;
+      if (cur.closed && !forceRecovery) return;
+      if (forceRecovery) cur.closed = false;
       const tickMs = Date.now();
       const currentKey = getLocalDateKey(new Date(tickMs));
       if (currentKey !== cur.dateKey) {
@@ -3784,6 +3827,7 @@ export default function App() {
       cur.deviceLabel = computeLiveTelemetryLabel();
 
       if (commitNetwork && navigator.onLine !== false) {
+        const snapNow = latestLocalStateRef.current;
         heartbeatAttendanceSession({
           uid: cur.uid,
           sessionId: cur.sessionId,
@@ -3793,7 +3837,22 @@ export default function App() {
           totalWorkedSeconds: cur.totalBaseSeconds,
           sessionWorkedSeconds: cur.sessionSeconds,
           deviceLabel: cur.deviceLabel,
-        }).catch(() => {});
+          fallbackProfile: {
+            email: cur.email,
+            displayName: snapNow.userProfile.displayName.trim() || cur.displayName,
+            phonePro: snapNow.userProfile.phonePro || '',
+            avatarDataUrl: snapNow.userProfile.avatarDataUrl || '',
+            role: cur.role,
+            zone: snapNow.userProfile.zone || cur.zone,
+          },
+        })
+          .then((res) => {
+            if (!cancelled && activeAttendanceRef.current && activeAttendanceRef.current.uid === uid) {
+              activeAttendanceRef.current.todayBaseSeconds = res.todayWorkedSeconds;
+              activeAttendanceRef.current.totalBaseSeconds = res.totalWorkedSeconds;
+            }
+          })
+          .catch(() => {});
       }
     };
 
@@ -3867,14 +3926,18 @@ export default function App() {
       }
     }, 3_000);
 
+    // Heartbeat de présence toutes les 15 secondes pour garantir un statut « En ligne » parfaitement fiable
     const heartbeatTimer = window.setInterval(() => {
-      accumulateElapsed(true);
-    }, 30_000);
+      if (document.visibilityState !== 'hidden') {
+        accumulateElapsed(true, true);
+      }
+    }, 15_000);
 
     const handleVisibilityChange = () => {
       const cur = activeAttendanceRef.current;
-      if (!cur || cur.closed || cur.uid !== uid) return;
+      if (!cur || cur.uid !== uid) return;
       if (document.visibilityState === 'hidden') {
+        if (cur.closed) return;
         const tickMs = Date.now();
         const delta = computeHeartbeatDeltaSeconds(cur.lastTickMs, tickMs);
         cur.todayBaseSeconds += delta;
@@ -3883,6 +3946,7 @@ export default function App() {
         cur.lastTickMs = tickMs;
         cur.deviceLabel = computeLiveTelemetryLabel();
         if (navigator.onLine !== false) {
+          const snapNow = latestLocalStateRef.current;
           heartbeatAttendanceSession({
             uid: cur.uid,
             sessionId: cur.sessionId,
@@ -3892,11 +3956,30 @@ export default function App() {
             totalWorkedSeconds: cur.totalBaseSeconds,
             sessionWorkedSeconds: cur.sessionSeconds,
             deviceLabel: cur.deviceLabel,
+            fallbackProfile: {
+              email: cur.email,
+              displayName: snapNow.userProfile.displayName.trim() || cur.displayName,
+              phonePro: snapNow.userProfile.phonePro || '',
+              avatarDataUrl: snapNow.userProfile.avatarDataUrl || '',
+              role: cur.role,
+              zone: snapNow.userProfile.zone || cur.zone,
+            },
           }).catch(() => {});
         }
       } else {
+        // Retour au premier plan (desktop ou reprise app mobile) : réactiver immédiatement le statut En ligne
+        cur.closed = false;
         cur.lastTickMs = Date.now();
+        accumulateElapsed(true, true);
       }
+    };
+
+    const handleWindowFocusOrPageShow = () => {
+      const cur = activeAttendanceRef.current;
+      if (!cur || cur.uid !== uid) return;
+      cur.closed = false;
+      cur.lastTickMs = Date.now();
+      accumulateElapsed(true, true);
     };
 
     const handleOffline = () => {
@@ -3927,7 +4010,8 @@ export default function App() {
 
     const handleOnline = () => {
       const cur = activeAttendanceRef.current;
-      if (!cur || cur.closed || cur.uid !== uid) return;
+      if (!cur || cur.uid !== uid) return;
+      cur.closed = false;
       try {
         const rawOff = window.localStorage.getItem(`op_offline_disconnect_${uid}`);
         window.localStorage.removeItem(`op_offline_disconnect_${uid}`);
@@ -3981,9 +4065,15 @@ export default function App() {
         // Ignore
       }
       cur.lastTickMs = Date.now();
+      accumulateElapsed(true, true);
     };
 
-    const handlePageHide = () => {
+    const handlePageHide = (ev?: PageTransitionEvent | Event) => {
+      // Sur mobile (Android/iOS), un changement d'application temporaire met la page en bfcache (persisted=true)
+      // Ne pas clôturer la session comme hors ligne définitive dans ce cas.
+      if (ev && 'persisted' in ev && (ev as PageTransitionEvent).persisted) {
+        return;
+      }
       const cur = activeAttendanceRef.current;
       if (!cur || cur.closed || cur.uid !== uid) return;
       const closeMs = Date.now();
@@ -4038,6 +4128,8 @@ export default function App() {
     };
 
     document.addEventListener('visibilitychange', handleVisibilityChange);
+    window.addEventListener('focus', handleWindowFocusOrPageShow);
+    window.addEventListener('pageshow', handleWindowFocusOrPageShow);
     window.addEventListener('offline', handleOffline);
     window.addEventListener('online', handleOnline);
     window.addEventListener('pagehide', handlePageHide);
@@ -4049,6 +4141,8 @@ export default function App() {
       window.clearInterval(heartbeatTimer);
       stopAutoLocationEngine();
       document.removeEventListener('visibilitychange', handleVisibilityChange);
+      window.removeEventListener('focus', handleWindowFocusOrPageShow);
+      window.removeEventListener('pageshow', handleWindowFocusOrPageShow);
       window.removeEventListener('offline', handleOffline);
       window.removeEventListener('online', handleOnline);
       window.removeEventListener('pagehide', handlePageHide);
@@ -4240,6 +4334,8 @@ export default function App() {
             ficheOwnerId: typeof d.ficheOwnerId === 'string' ? d.ficheOwnerId : undefined,
             numeroFiche: typeof d.numeroFiche === 'string' ? d.numeroFiche : undefined,
             societe: typeof d.societe === 'string' ? d.societe : undefined,
+            payoutStatus: typeof d.payoutStatus === 'string' ? d.payoutStatus : undefined,
+            payoutMad: typeof d.payoutMad === 'number' ? d.payoutMad : undefined,
             targetTab:
               d.targetTab === 'badges' || d.targetTab === 'team' || d.targetTab === 'crm'
                 ? d.targetTab
@@ -4247,7 +4343,13 @@ export default function App() {
             read: Boolean(d.read),
             createdAtIso,
           });
-          mapped.push(mapCloudNotificationDocToAppNotification(sanitized));
+          const notif = mapCloudNotificationDocToAppNotification(sanitized);
+          if (notif.kind === 'contract_signed' || notif.kind === 'contract_status_changed') {
+            cloudContractNotifKeysRef.current.add(
+              `${notif.kind}:${notif.ficheMeta?.ficheId || notif.ficheMeta?.societe || ''}:${notif.contractMeta?.payoutStatus || ''}`
+            );
+          }
+          mapped.push(notif);
         });
 
         mapped.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
@@ -4290,7 +4392,10 @@ export default function App() {
           setAchievementToastQueue((prev) => [...prev, ...newlyArrivedUnread]);
           newlyArrivedUnread.forEach((item) => triggerBrowserPushNotification(item));
           if (notifySoundPrefRef.current) {
-            playNotificationSound(newlyArrivedUnread[0].kind);
+            playNotificationSound(
+              newlyArrivedUnread[0].kind,
+              newlyArrivedUnread[0].contractMeta?.payoutStatus
+            );
           }
         }
       },
@@ -4304,6 +4409,53 @@ export default function App() {
     );
     return () => unsub();
   }, [authReady, cloudUser, canAccessWorkspace]);
+
+  // Super-Admin : suivi temps réel des messages non lus (Chat Direct 0 API) et sessions Coaching Terrain prêtes
+  useEffect(() => {
+    if (!authReady || !cloudUser || !canAccessWorkspace || !isSuperAdmin) {
+      setUnreadChatByUid({});
+      setCoachingReadyUids(new Set());
+      return;
+    }
+
+    const unsubChats = onSnapshot(
+      getDirectChatChannelsQuery(),
+      (snap) => {
+        const next: Record<string, number> = {};
+        snap.forEach((docSnap) => {
+          const d = docSnap.data();
+          const count = typeof d.unreadByAdmin === 'number' ? d.unreadByAdmin : 0;
+          if (count > 0) next[docSnap.id] = count;
+        });
+        setUnreadChatByUid(next);
+      },
+      () => {
+        // Non-fatal fallback
+      }
+    );
+
+    const unsubCoaching = onSnapshot(
+      getCoachingSessionsQuery(),
+      (snap) => {
+        const ready = new Set<string>();
+        snap.forEach((docSnap) => {
+          const d = docSnap.data();
+          if (Boolean(d.collabConsentActive)) {
+            ready.add(docSnap.id);
+          }
+        });
+        setCoachingReadyUids(ready);
+      },
+      () => {
+        // Non-fatal fallback
+      }
+    );
+
+    return () => {
+      unsubChats();
+      unsubCoaching();
+    };
+  }, [authReady, cloudUser, canAccessWorkspace, isSuperAdmin]);
 
   useEffect(() => {
     if (!authReady || !cloudUser || !canAccessWorkspace) return;
@@ -4990,10 +5142,19 @@ export default function App() {
       // Ignore quota
     }
 
-    if (created.length === 0) return;
+    const dedupedCreated = created.filter((item) => {
+      const contractKey = `${item.kind}:${item.contractMeta?.contractId ? signedContracts.find((c) => c.id === item.contractMeta?.contractId)?.ficheId || '' : ''}:${item.contractMeta?.payoutStatus || ''}`;
+      const fallbackSocieteKey = `${item.kind}:${item.contractMeta?.societe || ''}:${item.contractMeta?.payoutStatus || ''}`;
+      return (
+        !cloudContractNotifKeysRef.current.has(contractKey) &&
+        !cloudContractNotifKeysRef.current.has(fallbackSocieteKey)
+      );
+    });
+
+    if (dedupedCreated.length === 0) return;
 
     setNotifications((prev) => {
-      const merged = mergeNotificationsFeed(prev, created);
+      const merged = mergeNotificationsFeed(prev, dedupedCreated);
       try {
         window.localStorage.setItem(`op_notifications_${uid}`, JSON.stringify(merged));
       } catch {
@@ -5003,10 +5164,13 @@ export default function App() {
     });
 
     if (userProfile.notifyBadges !== false) {
-      setAchievementToastQueue((prev) => [...prev, ...created]);
-      created.forEach((item) => triggerBrowserPushNotification(item));
+      setAchievementToastQueue((prev) => [...prev, ...dedupedCreated]);
+      dedupedCreated.forEach((item) => triggerBrowserPushNotification(item));
       if (userProfile.notifySound !== false) {
-        playNotificationSound(created[0].kind, created[0].contractMeta?.payoutStatus);
+        playNotificationSound(
+          dedupedCreated[0].kind,
+          dedupedCreated[0].contractMeta?.payoutStatus
+        );
       }
     }
   }, [
@@ -7141,6 +7305,20 @@ ${assistPasteText.slice(0, 6000)}`;
       statutUpdatedAt: new Date().toISOString(),
     };
     setFiches((prev) => ensureUniqueNumeroFiches([f, ...prev]));
+    if (cloudUser) {
+      void saveFicheAuditLog(cloudUser.uid, f.id, {
+        ficheId: f.id,
+        action: 'created',
+        field: 'fiche',
+        oldValue: '',
+        newValue: `${f.societe} (${f.statut})`,
+        summary: `Création de la fiche ${nextCode} « ${f.societe} » (${f.ville} · ${f.secteur}) par ${currentUserDisplayName}.`,
+        actorUid: cloudUser.uid,
+        actorName: currentUserDisplayName,
+        actorRole: currentUserRole,
+        createdAtIso: f.dateAjout,
+      });
+    }
     setQuickForm({
       societe: '',
       secteur: 'pme',
@@ -7173,20 +7351,60 @@ ${assistPasteText.slice(0, 6000)}`;
       ownerUid: string,
       ficheId: string,
       type: ActiviteType,
-      texte: string
+      texte: string,
+      auditDetails?: {
+        action?: FicheAuditAction;
+        field?: string;
+        oldValue?: string;
+        newValue?: string;
+      }
     ) => {
       if (!cloudUser || !ownerUid || !ficheId) return;
+      const nowIso = new Date().toISOString();
+      const mappedAction: FicheAuditAction =
+        auditDetails?.action ||
+        (type === 'acces'
+          ? 'accessed'
+          : type === 'modification'
+            ? 'field_updated'
+            : type === 'statut'
+              ? 'status_changed'
+              : type === 'signature'
+                ? 'signed'
+                : type === 'attribution'
+                  ? 'assigned'
+                  : type === 'restitution'
+                    ? 'restored'
+                    : type === 'devis'
+                      ? 'quote_generated'
+                      : type === 'rdv'
+                        ? 'rdv_scheduled'
+                        : 'activity_logged');
       try {
-        await saveFicheActivite(ownerUid, ficheId, {
-          id: `act_${type}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 5)}`,
-          type,
-          resultat: 'autre',
-          texte,
-          auteurNom: currentUserDisplayName,
-          auteurUid: cloudUser.uid,
-          auteurRole: currentUserRole,
-          createdAtIso: new Date().toISOString(),
-        });
+        await Promise.allSettled([
+          saveFicheActivite(ownerUid, ficheId, {
+            id: `act_${type}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 5)}`,
+            type,
+            resultat: 'autre',
+            texte,
+            auteurNom: currentUserDisplayName,
+            auteurUid: cloudUser.uid,
+            auteurRole: currentUserRole,
+            createdAtIso: nowIso,
+          }),
+          saveFicheAuditLog(ownerUid, ficheId, {
+            ficheId,
+            action: mappedAction,
+            field: auditDetails?.field || type,
+            oldValue: auditDetails?.oldValue ?? '',
+            newValue: auditDetails?.newValue ?? '',
+            summary: texte,
+            actorUid: cloudUser.uid,
+            actorName: currentUserDisplayName,
+            actorRole: currentUserRole,
+            createdAtIso: nowIso,
+          }),
+        ]);
         setDetailActivityRefreshKey((k) => k + 1);
       } catch {
         // Journalisation d'audit non bloquante
@@ -7403,7 +7621,80 @@ ${assistPasteText.slice(0, 6000)}`;
     }
   };
 
+  const handleContractAssignOrRestore = async (
+    contract: SignedContractRecord,
+    mode: AssignRestoreMode
+  ) => {
+    if (!cloudUser || !isTeamSupervisor) return;
+    const localMatch =
+      contract.ownerId === cloudUser.uid
+        ? fiches.find((f) => f.id === contract.ficheId)
+        : undefined;
+    if (localMatch) {
+      setAssignRestoreTarget({
+        mode,
+        fiche: localMatch,
+        ownerUid: cloudUser.uid,
+        ownerName: currentUserDisplayName,
+      });
+      return;
+    }
+    try {
+      const ownerFiches = await fetchTeamMemberFiches(contract.ownerId);
+      const found = ownerFiches.find((f) => f.id === contract.ficheId);
+      if (found) {
+        setAssignRestoreTarget({
+          mode,
+          fiche: found as unknown as FicheEntreprise,
+          ownerUid: contract.ownerId,
+          ownerName: contract.ownerName,
+        });
+      } else {
+        notify(`Fiche source introuvable dans le portefeuille de ${contract.ownerName}.`, 'warn');
+      }
+    } catch {
+      notify('Impossible de charger la fiche du collaborateur.', 'err');
+    }
+  };
+
+  const openCollaboratorProfileByUid = useCallback(
+    (targetUid: string, initialTab: ProfileChatModalTab = 'profile') => {
+      if (!isSuperAdmin || !targetUid) return;
+      const managed = managedUsers.find((u) => u.uid === targetUid);
+      const stat = teamStats.find((s) => s.uid === targetUid);
+      const pres = userPresences.find((p) => p.uid === targetUid);
+      setProfileChatModal({
+        target: {
+          uid: targetUid,
+          displayName:
+            managed?.displayName || stat?.displayName || pres?.displayName || 'Collaborateur',
+          email: managed?.email || pres?.email || '',
+          role: managed?.role || stat?.role || pres?.role || 'commercial',
+          zone: managed?.zone || stat?.zone || pres?.zone || 'Meknès',
+          phonePro: pres?.phonePro || '',
+          avatarDataUrl: stat?.avatarDataUrl || pres?.avatarDataUrl || '',
+          active: managed?.active ?? stat?.active ?? true,
+        },
+        initialTab,
+      });
+    },
+    [isSuperAdmin, managedUsers, teamStats, userPresences]
+  );
+
   const handleSelectNotification = async (n: AppNotification) => {
+    if (n.kind === 'direct_message' || n.kind === 'coaching_invite') {
+      if (isSuperAdmin && n.ficheMeta?.ficheOwnerId) {
+        openCollaboratorProfileByUid(
+          n.ficheMeta.ficheOwnerId,
+          n.kind === 'coaching_invite' ? 'coaching' : 'chat'
+        );
+        return;
+      }
+      if (!isSuperAdmin) {
+        setCollabChatOpenSignal((s) => s + 1);
+        return;
+      }
+    }
     if (n.ficheMeta?.ficheId && cloudUser) {
       const localMatch = fiches.find((f) => f.id === n.ficheMeta?.ficheId);
       if (localMatch) {
@@ -7449,7 +7740,13 @@ ${assistPasteText.slice(0, 6000)}`;
         cloudUser.uid,
         id,
         'modification',
-        `Champ « ${String(field)} » modifié de « ${prevVal || 'vide'} » vers « ${val || 'vide'} ».`
+        `Champ « ${String(field)} » modifié de « ${prevVal || 'vide'} » vers « ${val || 'vide'} ».`,
+        {
+          action: 'field_updated',
+          field: String(field),
+          oldValue: prevVal,
+          newValue: val,
+        }
       );
     }
     setEditingCell(null);
@@ -7646,6 +7943,8 @@ ${assistPasteText.slice(0, 6000)}`;
         );
       }
 
+      const prevFicheStatut =
+        fiches.find((x) => x.id === signContractTarget.id)?.statut || 'En cours';
       setFiches((prev) =>
         prev.map((x) =>
           x.id === signContractTarget.id
@@ -7663,8 +7962,48 @@ ${assistPasteText.slice(0, 6000)}`;
         cloudUser.uid,
         signContractTarget.id,
         'signature',
-        `Contrat Orange Pro signé (${payload.produitOrangePro} — ${payload.tier}${canSetInitialPayout ? ` · ${payload.payoutMad.toLocaleString('fr-FR')} MAD` : ' · En attente de validation supervision'}).`
+        `Contrat Orange Pro signé (${payload.produitOrangePro} — ${payload.tier}${canSetInitialPayout ? ` · ${payload.payoutMad.toLocaleString('fr-FR')} MAD` : ' · En attente de validation supervision'}).`,
+        {
+          action: 'signed',
+          field: 'statut',
+          oldValue: prevFicheStatut,
+          newValue: 'Signé Orange Pro',
+        }
       );
+
+      // Notification cloud persistante vers tous les superviseurs (Chef d'équipe, Manager, Super-Admin)
+      const signedNowIso = new Date().toISOString();
+      const initialStatus: PayoutStatus = canSetInitialPayout ? 'Validé' : 'En attente';
+      const supervisorRecipients = new Set<string>();
+      for (const m of teamStats) {
+        if (
+          m.active !== false &&
+          m.uid !== cloudUser.uid &&
+          (m.role === 'super_admin' || m.role === 'manager' || m.role === 'team_lead')
+        ) {
+          supervisorRecipients.add(m.uid);
+        }
+      }
+      supervisorRecipients.forEach((recipientUid) => {
+        void createCloudNotification({
+          recipientUid,
+          senderUid: cloudUser.uid,
+          senderName: currentUserDisplayName,
+          senderRole: currentUserRole,
+          kind: 'contract_signed',
+          title: `Nouveau contrat signé — ${signContractTarget.societe}`,
+          message: `${currentUserDisplayName} a signé « ${signContractTarget.societe} » (${payload.produitOrangePro} · ${payload.tier}) — Statut : ${initialStatus}.`,
+          ficheId: signContractTarget.id,
+          ficheOwnerId: cloudUser.uid,
+          numeroFiche: signContractTarget.numeroFiche,
+          societe: signContractTarget.societe,
+          payoutStatus: initialStatus,
+          payoutMad: payload.payoutMad,
+          targetTab: 'team',
+          createdAtIso: signedNowIso,
+        });
+      });
+
       setSignContractTarget(null);
       setPortfolioRefreshKey((k) => k + 1);
       notify(
@@ -7745,6 +8084,77 @@ ${assistPasteText.slice(0, 6000)}`;
         );
       }
 
+      // Journal d'audit sur la fiche concernée + notifications cloud (collaborateur + autres superviseurs)
+      if (cloudUser && targetContract) {
+        const prevStatus = targetContract.payoutStatus;
+        const statusChanged = prevStatus !== updates.payoutStatus;
+        if (targetContract.ownerId && targetContract.ficheId) {
+          void logFicheAuditAction(
+            targetContract.ownerId,
+            targetContract.ficheId,
+            'statut',
+            `Statut du contrat « ${targetContract.societe} » passé de « ${prevStatus} » à « ${updates.payoutStatus} » (${updates.payoutMad.toLocaleString('fr-FR')} MAD${updates.payoutStatus === 'Refusé' && refusMotif ? ` · Motif : ${refusMotif}` : updates.payoutStatus === 'Versé' && refVirement ? ` · Réf : ${refVirement}` : ''}).`,
+            {
+              action: 'status_changed',
+              field: 'payoutStatus',
+              oldValue: prevStatus,
+              newValue: updates.payoutStatus,
+            }
+          );
+        }
+
+        if (statusChanged) {
+          const nowIso = new Date().toISOString();
+          const statusTitle =
+            updates.payoutStatus === 'Versé'
+              ? `Payout versé — ${targetContract.societe}`
+              : updates.payoutStatus === 'Validé'
+                ? `Contrat validé — ${targetContract.societe}`
+                : updates.payoutStatus === 'Refusé'
+                  ? `Contrat refusé — ${targetContract.societe}`
+                  : `Contrat remis en attente — ${targetContract.societe}`;
+          const statusMsg =
+            updates.payoutStatus === 'Refusé'
+              ? `Le contrat « ${targetContract.societe} » a été refusé par ${currentUserDisplayName}. Motif : ${refusMotif || 'Non précisé'}.`
+              : updates.payoutStatus === 'Versé'
+                ? `Votre commission de ${updates.payoutMad.toLocaleString('fr-FR')} MAD pour « ${targetContract.societe} » a été versée (Réf. ${refVirement}).`
+                : `Le contrat « ${targetContract.societe} » est passé en statut « ${updates.payoutStatus} » (${updates.payoutMad.toLocaleString('fr-FR')} MAD).`;
+
+          const recipients = new Set<string>();
+          if (targetContract.ownerId && targetContract.ownerId !== cloudUser.uid) {
+            recipients.add(targetContract.ownerId);
+          }
+          for (const m of teamStats) {
+            if (
+              m.active !== false &&
+              m.uid !== cloudUser.uid &&
+              (m.role === 'super_admin' || m.role === 'manager' || m.role === 'team_lead')
+            ) {
+              recipients.add(m.uid);
+            }
+          }
+          recipients.forEach((recipientUid) => {
+            void createCloudNotification({
+              recipientUid,
+              senderUid: cloudUser.uid,
+              senderName: currentUserDisplayName,
+              senderRole: currentUserRole,
+              kind: 'contract_status_changed',
+              title: statusTitle,
+              message: statusMsg,
+              ficheId: targetContract.ficheId,
+              ficheOwnerId: targetContract.ownerId,
+              numeroFiche: targetContract.numeroFiche,
+              societe: targetContract.societe,
+              payoutStatus: updates.payoutStatus,
+              payoutMad: updates.payoutMad,
+              targetTab: 'team',
+              createdAtIso: nowIso,
+            });
+          });
+        }
+      }
+
       notify(
         updates.payoutStatus === 'Refusé'
           ? 'Contrat marqué « Refusé » : le payout et le classement ont été recalculés automatiquement.'
@@ -7792,7 +8202,13 @@ ${assistPasteText.slice(0, 6000)}`;
         cloudUser.uid,
         ficheId,
         'statut',
-        `Statut CRM modifié de « ${target.statut} » vers « ${targetStatut} ».`
+        `Statut CRM modifié de « ${target.statut} » vers « ${targetStatut} ».`,
+        {
+          action: 'status_changed',
+          field: 'statut',
+          oldValue: target.statut,
+          newValue: targetStatut,
+        }
       );
     }
     recordLiveClientActivity(result.movedFiche.societe, result.movedFiche.ville, `Statut: ${targetStatut}`);
@@ -9475,6 +9891,7 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
                 fiches={filteredFiches}
                 velocityReport={velocityReport}
                 verifyingId={verifyingId}
+                canSuperviseTeam={isTeamSupervisor}
                 onMoveFiche={handleMoveFicheKanban}
                 onOpenEmail={openEmailStudio}
                 onVerifyOne={handleVerifyWeb}
@@ -9490,6 +9907,28 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
                   setQuoteModalOwnerUid(cloudUser.uid);
                   setQuoteModalFiche(f);
                 }}
+                onAssignFiche={
+                  isTeamSupervisor
+                    ? (f) =>
+                        setAssignRestoreTarget({
+                          mode: 'assign',
+                          fiche: f,
+                          ownerUid: cloudUser.uid,
+                          ownerName: currentUserDisplayName,
+                        })
+                    : undefined
+                }
+                onRestoreFiche={
+                  isTeamSupervisor
+                    ? (f) =>
+                        setAssignRestoreTarget({
+                          mode: 'restore',
+                          fiche: f,
+                          ownerUid: cloudUser.uid,
+                          ownerName: currentUserDisplayName,
+                        })
+                    : undefined
+                }
                 onQuickAddInStage={(statut) => {
                   setQuickAddStatut(statut);
                   setShowQuickAdd(true);
@@ -10091,6 +10530,24 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
                                     <UserPlus className="w-3.5 h-3.5" />
                                   </button>
                                 )}
+                                {isTeamSupervisor && f.statut === 'Signé Orange Pro' && (
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      setAssignRestoreTarget({
+                                        mode: 'restore',
+                                        fiche: f,
+                                        ownerUid: cloudUser.uid,
+                                        ownerName: currentUserDisplayName,
+                                      })
+                                    }
+                                    aria-label={`Restituer la fiche signée ${f.societe}`}
+                                    title="Restituer cette fiche signée (déverrouiller l'accès)"
+                                    className="p-1.5 rounded-lg bg-amber-50 hover:bg-amber-100 text-amber-800"
+                                  >
+                                    <RotateCcw className="w-3.5 h-3.5" />
+                                  </button>
+                                )}
                                 <button
                                   type="button"
                                   onClick={() => {
@@ -10250,6 +10707,7 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
               fiches={filteredFiches}
               velocityReport={velocityReport}
               verifyingId={verifyingId}
+              canSuperviseTeam={isTeamSupervisor}
               onMoveFiche={handleMoveFicheKanban}
               onOpenEmail={openEmailStudio}
               onVerifyOne={handleVerifyWeb}
@@ -10265,6 +10723,28 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
                 setQuoteModalOwnerUid(cloudUser.uid);
                 setQuoteModalFiche(f);
               }}
+              onAssignFiche={
+                isTeamSupervisor
+                  ? (f) =>
+                      setAssignRestoreTarget({
+                        mode: 'assign',
+                        fiche: f,
+                        ownerUid: cloudUser.uid,
+                        ownerName: currentUserDisplayName,
+                      })
+                  : undefined
+              }
+              onRestoreFiche={
+                isTeamSupervisor
+                  ? (f) =>
+                      setAssignRestoreTarget({
+                        mode: 'restore',
+                        fiche: f,
+                        ownerUid: cloudUser.uid,
+                        ownerName: currentUserDisplayName,
+                      })
+                  : undefined
+              }
               onQuickAddInStage={(statut) => {
                 setQuickAddStatut(statut);
                 setShowQuickAdd(true);
@@ -10946,6 +11426,15 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
             }
             accessibleFicheIds={new Set(accessibleFiches.map((f) => f.id))}
             onOpenContractFiche={(c) => void handleOpenContractFiche(c)}
+            onAssignContractFiche={
+              isTeamSupervisor ? (c) => void handleContractAssignOrRestore(c, 'assign') : undefined
+            }
+            onRestoreContractFiche={
+              isTeamSupervisor ? (c) => void handleContractAssignOrRestore(c, 'restore') : undefined
+            }
+            onOpenMemberProfileChat={
+              isSuperAdmin ? (uid) => openCollaboratorProfileByUid(uid, 'profile') : undefined
+            }
             onInspectPortfolioFiche={(item: PortfolioFicheItem) =>
               openFicheDetailModal(item.fiche, item.ownerUid, item.ownerName)
             }
@@ -11050,6 +11539,11 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
                 setActiveTab('admin');
               }
             }}
+            onOpenMemberProfile={(target, initialTab) =>
+              setProfileChatModal({ target, initialTab: initialTab || 'profile' })
+            }
+            unreadChatByUid={unreadChatByUid}
+            coachingReadyUids={coachingReadyUids}
             onNotify={notify}
           />
         )}
@@ -12137,7 +12631,13 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
                   ownerUid,
                   targetFiche.id,
                   'statut',
-                  `Statut CRM modifié de « ${prevStatut} » vers « ${nextStatut} » par la supervision.`
+                  `Statut CRM modifié de « ${prevStatut} » vers « ${nextStatut} » par la supervision.`,
+                  {
+                    action: 'status_changed',
+                    field: 'statut',
+                    oldValue: prevStatut,
+                    newValue: nextStatut,
+                  }
                 );
                 setPortfolioRefreshKey((k) => k + 1);
                 notify(`Statut mis à jour vers « ${nextStatut} ».`);
@@ -12169,7 +12669,13 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
                   ownerUid,
                   ficheId,
                   'modification',
-                  `Secteur modifié de « ${prevSecteur} » vers « ${nextSecteur} ».`
+                  `Secteur modifié de « ${prevSecteur} » vers « ${nextSecteur} ».`,
+                  {
+                    action: 'field_updated',
+                    field: 'secteur',
+                    oldValue: prevSecteur,
+                    newValue: nextSecteur,
+                  }
                 );
                 setPortfolioRefreshKey((k) => k + 1);
               })
@@ -12185,7 +12691,13 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
               cloudUser.uid,
               ficheId,
               'modification',
-              `Secteur modifié de « ${prevFiche.secteur} » vers « ${nextSecteur} ».`
+              `Secteur modifié de « ${prevFiche.secteur} » vers « ${nextSecteur} ».`,
+              {
+                action: 'field_updated',
+                field: 'secteur',
+                oldValue: prevFiche.secteur,
+                newValue: nextSecteur,
+              }
             );
           }
         }}
@@ -12396,6 +12908,55 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
         onFallbackLlmPrompt={handleCopilotFallbackPrompt}
         onRefreshAiStatus={refreshServerAiStatus}
       />
+
+      {/* Super-Admin : Profil Collaborateur, Discussion Directe (0 API) & Coaching Audio Live Push-to-Talk (WebRTC P2P) */}
+      {isSuperAdmin && (
+        <CollaboratorProfileChatModal
+          isOpen={Boolean(profileChatModal)}
+          initialTab={profileChatModal?.initialTab || 'profile'}
+          target={profileChatModal?.target || null}
+          adminUid={cloudUser.uid}
+          adminName={currentUserDisplayName}
+          presence={
+            profileChatModal?.target
+              ? userPresences.find((p) => p.uid === profileChatModal.target.uid) || null
+              : null
+          }
+          teamStat={
+            profileChatModal?.target
+              ? teamStats.find((s) => s.uid === profileChatModal.target.uid) || null
+              : null
+          }
+          signedContracts={signedContracts}
+          onClose={() => setProfileChatModal(null)}
+          onNotify={(msg, type) =>
+            notify(msg, type === 'err' ? 'err' : type === 'warn' ? 'warn' : 'ok')
+          }
+          onInspectFiche={(fiche, ownerUid, ownerName) => {
+            setProfileChatModal(null);
+            openFicheDetailModal(fiche as unknown as FicheEntreprise, ownerUid, ownerName);
+          }}
+        />
+      )}
+
+      {/* Collaborateurs : Widget Discussion Direction (0 API) & Mode Coaching Terrain Opt-in (Micro Live + Push-to-Talk) */}
+      {!isSuperAdmin && (
+        <CollaboratorChatWidget
+          currentUserUid={cloudUser.uid}
+          currentUserName={currentUserDisplayName}
+          currentUserEmail={cloudUser.email || ''}
+          currentUserRole={currentUserRole}
+          currentUserZone={userProfile.zone || appUserProfile?.zone || villesState.defaultVille || 'Meknès'}
+          superAdminUid={
+            teamStats.find((s) => s.role === 'super_admin')?.uid ||
+            userPresences.find((p) => p.role === 'super_admin')?.uid
+          }
+          forceOpenSignal={collabChatOpenSignal}
+          onNotify={(msg, type) =>
+            notify(msg, type === 'err' ? 'err' : type === 'warn' ? 'warn' : 'ok')
+          }
+        />
+      )}
     </div>
   );
 }

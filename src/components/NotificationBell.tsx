@@ -11,6 +11,8 @@ import {
   Eye,
   RotateCcw,
   Pencil,
+  MessageCircle,
+  Headphones,
 } from 'lucide-react';
 import { RARITY_META, formatMad } from '../utils/gamification';
 import {
@@ -55,6 +57,20 @@ function renderNotificationIcon(n: AppNotification) {
     return (
       <div className="w-9 h-9 rounded-xl border border-amber-200 bg-amber-50 text-amber-700 flex items-center justify-center shrink-0">
         <Pencil className="w-4 h-4" />
+      </div>
+    );
+  }
+  if (n.kind === 'direct_message') {
+    return (
+      <div className="w-9 h-9 rounded-xl border border-sky-200 bg-sky-50 text-sky-700 flex items-center justify-center shrink-0">
+        <MessageCircle className="w-4 h-4" />
+      </div>
+    );
+  }
+  if (n.kind === 'coaching_invite') {
+    return (
+      <div className="w-9 h-9 rounded-xl border border-emerald-200 bg-emerald-50 text-emerald-700 flex items-center justify-center shrink-0">
+        <Headphones className="w-4 h-4" />
       </div>
     );
   }
@@ -238,6 +254,8 @@ export const NotificationBell: React.FC<NotificationBellProps> = ({
                         ? 'text-violet-700'
                         : 'text-amber-700';
 
+                const isDirectComm =
+                  n.kind === 'direct_message' || n.kind === 'coaching_invite';
                 const soundProfile = getNotificationSoundProfile(n.kind, status);
 
                 return (
@@ -275,6 +293,10 @@ export const NotificationBell: React.FC<NotificationBellProps> = ({
                         ) : isFicheNotif ? (
                           <span className={`text-[10px] font-bold shrink-0 ${ficheTagCls}`}>
                             {n.ficheMeta?.numeroFiche || 'CRM'}
+                          </span>
+                        ) : isDirectComm ? (
+                          <span className="text-[10px] font-bold shrink-0 text-sky-700">
+                            {n.kind === 'coaching_invite' ? 'Coaching Live' : 'Message'}
                           </span>
                         ) : (
                           <span className="text-[10px] font-bold text-orange-700 shrink-0 tabular-nums">

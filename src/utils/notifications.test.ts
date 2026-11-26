@@ -194,6 +194,8 @@ test('getNotificationSoundProfile defines a distinct acoustic signature for ever
     getNotificationSoundProfile('fiche_accessed'),
     getNotificationSoundProfile('fiche_restored'),
     getNotificationSoundProfile('fiche_updated'),
+    getNotificationSoundProfile('direct_message'),
+    getNotificationSoundProfile('coaching_invite'),
   ];
 
   // Every profile must have a unique profileKey and a unique acoustic fingerprint (waveform + notesHz + stepSec)
@@ -204,7 +206,7 @@ test('getNotificationSoundProfile defines a distinct acoustic signature for ever
   assert.equal(uniqueKeys.size, profiles.length);
   assert.equal(uniqueFingerprints.size, profiles.length);
 
-  // Cloud notification mapping
+  // Cloud notification mapping (fiche + contract payout status)
   const mapped = mapCloudNotificationDocToAppNotification({
     id: 'ntf_assign_1',
     orgScope: 'orange_pro_team',
@@ -229,5 +231,26 @@ test('getNotificationSoundProfile defines a distinct acoustic signature for ever
   assert.equal(mapped.ficheMeta?.ficheId, 'f_12');
   assert.equal(mapped.ficheMeta?.actorName, 'Mohamed Admin');
   assert.equal(mapped.targetTab, 'crm');
-});
 
+  const mappedContract = mapCloudNotificationDocToAppNotification({
+    id: 'ntf_ctr_1',
+    orgScope: 'orange_pro_team',
+    recipientUid: 'collab_1',
+    senderUid: 'sup_1',
+    senderName: 'Mohamed Admin',
+    senderRole: 'super_admin',
+    kind: 'contract_status_changed',
+    title: 'Contrat refusé — Clinique Atlas',
+    message: 'Dossier refusé.',
+    ficheId: 'f_12',
+    ficheOwnerId: 'collab_1',
+    societe: 'Clinique Atlas',
+    payoutStatus: 'Refusé',
+    payoutMad: 2500,
+    targetTab: 'team',
+    read: false,
+    createdAtIso: '2026-11-26T10:20:00.000Z',
+  });
+  assert.equal(mappedContract.contractMeta?.payoutStatus, 'Refusé');
+  assert.equal(mappedContract.contractMeta?.payoutMad, 2500);
+});

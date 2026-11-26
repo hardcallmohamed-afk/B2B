@@ -105,10 +105,22 @@ service cloud.firestore {
       ];
     }
 
+    function isValidAuditAction(val) {
+      return val is string && val in [
+        'creation', 'modification', 'statut', 'secteur', 'attribution',
+        'restitution', 'signature', 'verification_web', 'enrichissement',
+        'devis', 'rdv', 'email', 'acces'
+      ];
+    }
+
+    function isValidCoachingStatus(val) {
+      return val is string && val in ['idle', 'ready', 'active', 'ended'];
+    }
+
     function isValidNotificationKind(val) {
       return val is string && val in [
         'fiche_assigned', 'fiche_accessed', 'fiche_restored', 'fiche_updated',
-        'contract_signed', 'contract_status_changed'
+        'contract_signed', 'contract_status_changed', 'direct_message', 'coaching_invite'
       ];
     }
 
@@ -478,7 +490,7 @@ service cloud.firestore {
         && data.keys().hasOnly([
           'id', 'orgScope', 'recipientUid', 'senderUid', 'senderName', 'senderRole',
           'kind', 'title', 'message', 'ficheId', 'ficheOwnerId', 'numeroFiche',
-          'societe', 'targetTab', 'read', 'createdAtIso',
+          'societe', 'payoutStatus', 'payoutMad', 'targetTab', 'read', 'createdAtIso',
           'createdAt', 'updatedAt'
         ])
         && data.id is string
@@ -496,9 +508,127 @@ service cloud.firestore {
         && (!('ficheOwnerId' in data) || (data.ficheOwnerId is string && data.ficheOwnerId.size() <= 128))
         && (!('numeroFiche' in data) || (data.numeroFiche is string && data.numeroFiche.size() <= 32))
         && (!('societe' in data) || (data.societe is string && data.societe.size() <= 200))
+        && (!('payoutStatus' in data) || isValidPayoutStatus(data.payoutStatus))
+        && (!('payoutMad' in data) || (data.payoutMad is number && data.payoutMad >= 0 && data.payoutMad <= 10000000))
         && (!('targetTab' in data) || isValidNotificationTab(data.targetTab))
         && data.read is bool
         && data.createdAtIso is string && data.createdAtIso.size() <= 64
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidFicheAuditLog(data, userId, ficheId, logId) {
+      return data.keys().hasAll([
+          'id', 'ownerId', 'ficheId', 'action', 'summary',
+          'actorUid', 'actorName', 'createdAtIso', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'id', 'ownerId', 'ficheId', 'action', 'field', 'oldValue', 'newValue',
+          'summary', 'actorUid', 'actorName', 'actorRole', 'createdAtIso',
+          'createdAt', 'updatedAt'
+        ])
+        && data.id is string && data.id == logId && isValidId(data.id)
+        && data.ownerId is string && data.ownerId == userId && isValidId(data.ownerId)
+        && data.ficheId is string && data.ficheId == ficheId && isValidId(data.ficheId)
+        && isValidAuditAction(data.action)
+        && (!('field' in data) || (data.field is string && data.field.size() <= 64))
+        && (!('oldValue' in data) || (data.oldValue is string && data.oldValue.size() <= 300))
+        && (!('newValue' in data) || (data.newValue is string && data.newValue.size() <= 300))
+        && data.summary is string && data.summary.size() >= 1 && data.summary.size() <= 600
+        && data.actorUid is string && isValidId(data.actorUid)
+        && data.actorName is string && data.actorName.size() >= 1 && data.actorName.size() <= 120
+        && (!('actorRole' in data) || (data.actorRole is string && data.actorRole.size() <= 40))
+        && data.createdAtIso is string && data.createdAtIso.size() <= 64
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidDirectChatChannel(data, collabUid) {
+      return data.keys().hasAll([
+          'collabUid', 'orgScope', 'collabName', 'lastMessagePreview',
+          'lastMessageAtIso', 'lastSenderUid', 'unreadForAdmin', 'unreadForCollab',
+          'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'collabUid', 'orgScope', 'collabName', 'lastMessagePreview',
+          'lastMessageAtIso', 'lastSenderUid', 'unreadForAdmin', 'unreadForCollab',
+          'createdAt', 'updatedAt'
+        ])
+        && data.collabUid is string && data.collabUid == collabUid && isValidId(data.collabUid)
+        && data.orgScope is string && data.orgScope == 'orange_pro_team'
+        && data.collabName is string && data.collabName.size() >= 1 && data.collabName.size() <= 120
+        && data.lastMessagePreview is string && data.lastMessagePreview.size() <= 240
+        && data.lastMessageAtIso is string && data.lastMessageAtIso.size() <= 64
+        && data.lastSenderUid is string && data.lastSenderUid.size() <= 128
+        && data.unreadForAdmin is int && data.unreadForAdmin >= 0 && data.unreadForAdmin <= 10000
+        && data.unreadForCollab is int && data.unreadForCollab >= 0 && data.unreadForCollab <= 10000
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidDirectChatMessage(data, collabUid, messageId) {
+      return data.keys().hasAll([
+          'id', 'channelUid', 'orgScope', 'senderUid', 'senderName',
+          'text', 'read', 'createdAtIso', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'id', 'channelUid', 'orgScope', 'senderUid', 'senderName', 'senderRole',
+          'text', 'read', 'createdAtIso', 'createdAt', 'updatedAt'
+        ])
+        && data.id is string && data.id == messageId && isValidId(data.id)
+        && data.channelUid is string && data.channelUid == collabUid && isValidId(data.channelUid)
+        && data.orgScope is string && data.orgScope == 'orange_pro_team'
+        && data.senderUid is string && isValidId(data.senderUid)
+        && data.senderName is string && data.senderName.size() >= 1 && data.senderName.size() <= 120
+        && (!('senderRole' in data) || (data.senderRole is string && data.senderRole.size() <= 40))
+        && data.text is string && data.text.size() >= 1 && data.text.size() <= 1500
+        && data.read is bool
+        && data.createdAtIso is string && data.createdAtIso.size() <= 64
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidCoachingSession(data, collabUid) {
+      return data.keys().hasAll([
+          'collabUid', 'orgScope', 'collabName', 'collabConsentActive',
+          'status', 'adminPttActive', 'updatedAtIso', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'collabUid', 'orgScope', 'collabName', 'collabConsentActive',
+          'status', 'adminUid', 'adminName', 'adminPttActive',
+          'offerSdp', 'answerSdp', 'startedAtIso', 'updatedAtIso',
+          'createdAt', 'updatedAt'
+        ])
+        && data.collabUid is string && data.collabUid == collabUid && isValidId(data.collabUid)
+        && data.orgScope is string && data.orgScope == 'orange_pro_team'
+        && data.collabName is string && data.collabName.size() >= 1 && data.collabName.size() <= 120
+        && data.collabConsentActive is bool
+        && isValidCoachingStatus(data.status)
+        && (!('adminUid' in data) || (data.adminUid is string && data.adminUid.size() <= 128))
+        && (!('adminName' in data) || (data.adminName is string && data.adminName.size() <= 120))
+        && data.adminPttActive is bool
+        && (!('offerSdp' in data) || (data.offerSdp is string && data.offerSdp.size() <= 16000))
+        && (!('answerSdp' in data) || (data.answerSdp is string && data.answerSdp.size() <= 16000))
+        && (!('startedAtIso' in data) || (data.startedAtIso is string && data.startedAtIso.size() <= 64))
+        && data.updatedAtIso is string && data.updatedAtIso.size() <= 64
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidCoachingCandidate(data, collabUid, candId) {
+      return data.keys().hasAll([
+          'id', 'sessionUid', 'senderRole', 'senderUid', 'candidateJson',
+          'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'id', 'sessionUid', 'senderRole', 'senderUid', 'candidateJson',
+          'createdAt', 'updatedAt'
+        ])
+        && data.id is string && data.id == candId && isValidId(data.id)
+        && data.sessionUid is string && data.sessionUid == collabUid && isValidId(data.sessionUid)
+        && data.senderRole is string && data.senderRole in ['collab', 'admin']
+        && data.senderUid is string && isValidId(data.senderUid)
+        && data.candidateJson is string && data.candidateJson.size() >= 1 && data.candidateJson.size() <= 4000
         && data.createdAt is timestamp
         && data.updatedAt is timestamp;
     }
@@ -770,17 +900,17 @@ service cloud.firestore {
               (
                 incoming().activeDateKey == existing().activeDateKey
                 && incoming().todayWorkedSeconds >= existing().todayWorkedSeconds
-                && incoming().todayWorkedSeconds <= existing().todayWorkedSeconds + 120
+                && incoming().todayWorkedSeconds <= existing().todayWorkedSeconds + 300
               )
               || (
                 incoming().activeDateKey != existing().activeDateKey
                 && incoming().todayWorkedSeconds >= 0
-                && incoming().todayWorkedSeconds <= 120
+                && incoming().todayWorkedSeconds <= 300
               )
             )
             && incoming().todayWorkedSeconds <= 86400
             && incoming().totalWorkedSeconds >= existing().totalWorkedSeconds
-            && incoming().totalWorkedSeconds <= existing().totalWorkedSeconds + 120
+            && incoming().totalWorkedSeconds <= existing().totalWorkedSeconds + 300
             && incoming().diff(existing()).affectedKeys().hasOnly([
               'displayName', 'firstName', 'lastName', 'phonePro', 'avatarDataUrl',
               'zone', 'isOnline', 'currentDevice', 'devicesUsed',
@@ -998,6 +1128,37 @@ service cloud.firestore {
             && (isSuperAdmin() || isTeamLeadOrManager() || (isOwner(userId) && existing().ownerId == request.auth.uid))
             && exists(/databases/$(database)/documents/users/$(userId)/fiches/$(ficheId));
         }
+
+        // 10c. Subcollection: /users/{userId}/fiches/{ficheId}/audit_logs/{logId} (Immutable Modification Audit Log)
+        match /audit_logs/{logId} {
+          allow get: if isValidId(userId) && isValidId(ficheId) && isValidId(logId) && (
+            (isOwner(userId) && (resource == null || existing().ownerId == request.auth.uid))
+            || ((isSuperAdmin() || isTeamLeadOrManager()) && (resource == null || existing().ownerId == userId))
+          );
+
+          allow list: if isVerifiedUser() && (
+            (request.auth.uid == userId && resource.data.ownerId == request.auth.uid)
+            || ((isSuperAdmin() || isTeamLeadOrManager()) && resource.data.ownerId == userId)
+          );
+
+          allow create: if isValidId(userId)
+            && isValidId(ficheId)
+            && isValidId(logId)
+            && isValidFicheAuditLog(incoming(), userId, ficheId, logId)
+            && incoming().actorUid == request.auth.uid
+            && incoming().createdAt == request.time
+            && incoming().updatedAt == request.time
+            && exists(/databases/$(database)/documents/users/$(userId)/fiches/$(ficheId))
+            && (
+              (isOwner(userId) && incoming().ownerId == request.auth.uid)
+              || ((isSuperAdmin() || isTeamLeadOrManager()) && incoming().ownerId == userId)
+            );
+
+          // Audit logs are strictly append-only (immutable)
+          allow update: if false;
+
+          allow delete: if isSuperAdmin() && isValidId(userId) && isValidId(ficheId) && isValidId(logId);
+        }
       }
 
       // 11. Subcollection: /users/{userId}/skills/{skillId} (Email Studio Skills)
@@ -1072,6 +1233,152 @@ service cloud.firestore {
 
       allow delete: if isValidId(notifId)
         && (isSuperAdmin() || (isVerifiedUser() && existing().recipientUid == request.auth.uid));
+    }
+
+    // 13. Collection: /direct_chats/{collabUid} (Private 1-to-1 Discussion Channel: Super-Admin <-> Collaborator)
+    match /direct_chats/{collabUid} {
+      allow get: if isValidId(collabUid) && (
+        isSuperAdmin()
+        || (isOwner(collabUid) && (resource == null || existing().collabUid == request.auth.uid))
+      );
+
+      allow list: if (isSuperAdmin() && resource.data.orgScope == 'orange_pro_team')
+        || (isVerifiedUser() && resource.data.collabUid == request.auth.uid);
+
+      allow create: if isValidId(collabUid)
+        && isValidDirectChatChannel(incoming(), collabUid)
+        && (isSuperAdmin() || isOwner(collabUid))
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+
+      allow update: if isValidId(collabUid)
+        && isValidDirectChatChannel(incoming(), collabUid)
+        && (isSuperAdmin() || (isOwner(collabUid) && existing().collabUid == request.auth.uid))
+        && incoming().collabUid == existing().collabUid
+        && incoming().orgScope == existing().orgScope
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'collabName', 'lastMessagePreview', 'lastMessageAtIso', 'lastSenderUid',
+          'unreadForAdmin', 'unreadForCollab', 'updatedAt'
+        ]);
+
+      allow delete: if isSuperAdmin() && isValidId(collabUid);
+
+      // 13b. Subcollection: /direct_chats/{collabUid}/messages/{messageId}
+      match /messages/{messageId} {
+        allow get: if isValidId(collabUid) && isValidId(messageId) && (
+          isSuperAdmin()
+          || (isOwner(collabUid) && (resource == null || existing().channelUid == request.auth.uid))
+        );
+
+        allow list: if (isSuperAdmin() && resource.data.orgScope == 'orange_pro_team')
+          || (isVerifiedUser() && request.auth.uid == collabUid && resource.data.channelUid == request.auth.uid);
+
+        allow create: if isValidId(collabUid)
+          && isValidId(messageId)
+          && isValidDirectChatMessage(incoming(), collabUid, messageId)
+          && (isSuperAdmin() || isOwner(collabUid))
+          && incoming().senderUid == request.auth.uid
+          && incoming().createdAt == request.time
+          && incoming().updatedAt == request.time
+          && exists(/databases/$(database)/documents/direct_chats/$(collabUid));
+
+        allow update: if isValidId(collabUid)
+          && isValidId(messageId)
+          && isValidDirectChatMessage(incoming(), collabUid, messageId)
+          && (isSuperAdmin() || isOwner(collabUid))
+          && incoming().id == existing().id
+          && incoming().channelUid == existing().channelUid
+          && incoming().senderUid == existing().senderUid
+          && incoming().createdAt == existing().createdAt
+          && incoming().updatedAt == request.time
+          && exists(/databases/$(database)/documents/direct_chats/$(collabUid))
+          && incoming().diff(existing()).affectedKeys().hasOnly(['read', 'updatedAt']);
+
+        allow delete: if isSuperAdmin() && isValidId(collabUid) && isValidId(messageId);
+      }
+    }
+
+    // 14. Collection: /coaching_sessions/{collabUid} (Transparent Opt-In Field Coaching & Push-to-Talk Audio — WebRTC P2P)
+    match /coaching_sessions/{collabUid} {
+      allow get: if isValidId(collabUid) && (
+        isSuperAdmin()
+        || (isOwner(collabUid) && (resource == null || existing().collabUid == request.auth.uid))
+      );
+
+      allow list: if (isSuperAdmin() && resource.data.orgScope == 'orange_pro_team')
+        || (isVerifiedUser() && resource.data.collabUid == request.auth.uid);
+
+      // Only the collaborator themselves can opt-in (collabConsentActive == true); Super-Admin can only initialize idle/ended doc with consent false.
+      allow create: if isValidId(collabUid)
+        && isValidCoachingSession(incoming(), collabUid)
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && (
+          isOwner(collabUid)
+          || (isSuperAdmin() && incoming().collabConsentActive == false)
+        );
+
+      allow update: if isValidId(collabUid)
+        && isValidCoachingSession(incoming(), collabUid)
+        && incoming().collabUid == existing().collabUid
+        && incoming().orgScope == existing().orgScope
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          // Collaborator controls own consent, WebRTC offer, and status
+          (
+            isOwner(collabUid)
+            && existing().collabUid == request.auth.uid
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+              'collabName', 'collabConsentActive', 'status', 'offerSdp',
+              'startedAtIso', 'updatedAtIso', 'updatedAt'
+            ])
+          )
+          ||
+          // Super-Admin can join/answer/Push-to-Talk ONLY while collaborator consent is active (cannot force collabConsentActive true)
+          (
+            isSuperAdmin()
+            && incoming().collabConsentActive == existing().collabConsentActive
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+              'status', 'adminUid', 'adminName', 'adminPttActive',
+              'answerSdp', 'updatedAtIso', 'updatedAt'
+            ])
+          )
+        );
+
+      allow delete: if isSuperAdmin() && isValidId(collabUid);
+
+      // 14b. Subcollection: /coaching_sessions/{collabUid}/candidates/{candId} (WebRTC ICE Candidates)
+      match /candidates/{candId} {
+        allow get: if isValidId(collabUid) && isValidId(candId) && (
+          isSuperAdmin() || isOwner(collabUid)
+        );
+
+        allow list: if isVerifiedUser() && (
+          (isSuperAdmin() && resource.data.sessionUid == collabUid)
+          || (request.auth.uid == collabUid && resource.data.sessionUid == request.auth.uid)
+        );
+
+        allow create: if isValidId(collabUid)
+          && isValidId(candId)
+          && isValidCoachingCandidate(incoming(), collabUid, candId)
+          && incoming().senderUid == request.auth.uid
+          && incoming().createdAt == request.time
+          && incoming().updatedAt == request.time
+          && exists(/databases/$(database)/documents/coaching_sessions/$(collabUid))
+          && (
+            (isSuperAdmin() && incoming().senderRole == 'admin')
+            || (isOwner(collabUid) && incoming().senderRole == 'collab')
+          );
+
+        allow update: if false;
+
+        allow delete: if isValidId(collabUid)
+          && isValidId(candId)
+          && (isSuperAdmin() || isOwner(collabUid));
+      }
     }
   }
 }

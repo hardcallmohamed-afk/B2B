@@ -52,8 +52,30 @@ import {
   formatAuditDateTimeFr,
   formatFriendlyDateFr,
 } from '../utils/activiteHelpers';
-import type { SanitizedActiviteDoc } from '../utils/firestoreSanitize';
-import { fetchFicheActivites } from '../firebase';
+import type {
+  FicheAuditAction,
+  SanitizedActiviteDoc,
+  SanitizedFicheAuditLogDoc,
+} from '../utils/firestoreSanitize';
+import { fetchFicheActivites, fetchFicheAuditLogs } from '../firebase';
+
+const AUDIT_ACTION_META: Record<
+  FicheAuditAction,
+  { label: string; badgeCls: string }
+> = {
+  created: { label: 'Création', badgeCls: 'bg-emerald-50 border-emerald-200 text-emerald-800' },
+  field_updated: { label: 'Modification champ', badgeCls: 'bg-amber-50 border-amber-200 text-amber-800' },
+  status_changed: { label: 'Changement statut', badgeCls: 'bg-orange-50 border-orange-200 text-orange-800' },
+  assigned: { label: 'Attribution', badgeCls: 'bg-orange-100 border-orange-300 text-orange-900' },
+  restored: { label: 'Restitution', badgeCls: 'bg-violet-50 border-violet-200 text-violet-800' },
+  signed: { label: 'Signature contrat', badgeCls: 'bg-emerald-100 border-emerald-300 text-emerald-900' },
+  accessed: { label: 'Consultation', badgeCls: 'bg-sky-50 border-sky-200 text-sky-800' },
+  activity_logged: { label: 'Activité CRM', badgeCls: 'bg-stone-100 border-stone-200 text-stone-800' },
+  rdv_scheduled: { label: 'RDV planifié', badgeCls: 'bg-sky-50 border-sky-200 text-sky-800' },
+  quote_generated: { label: 'Devis PDF', badgeCls: 'bg-indigo-50 border-indigo-200 text-indigo-800' },
+  web_verified: { label: 'Vérification Web', badgeCls: 'bg-teal-50 border-teal-200 text-teal-800' },
+  enriched: { label: 'Enrichissement', badgeCls: 'bg-cyan-50 border-cyan-200 text-cyan-800' },
+};
 
 interface FicheDetailModalProps {
   isOpen: boolean;
@@ -116,7 +138,9 @@ export const FicheDetailModal: React.FC<FicheDetailModalProps> = ({
   onCopyText,
 }) => {
   const [activites, setActivites] = useState<SanitizedActiviteDoc[]>([]);
+  const [auditLogs, setAuditLogs] = useState<SanitizedFicheAuditLogDoc[]>([]);
   const [loadingActivites, setLoadingActivites] = useState(false);
+  const [historyFilter, setHistoryFilter] = useState<'all' | 'audit' | 'activites'>('all');
   const resolvedOwnerUid = ficheOwnerUid || currentUserUid;
   const hasSupervision = isSuperAdmin || canSuperviseTeam;
 
@@ -124,12 +148,14 @@ export const FicheDetailModal: React.FC<FicheDetailModalProps> = ({
     if (!isOpen || !fiche || !resolvedOwnerUid) return;
     let cancelled = false;
     setLoadingActivites(true);
-    fetchFicheActivites(resolvedOwnerUid, fiche.id)
-      .then((list) => {
-        if (!cancelled) setActivites(list || []);
-      })
-      .catch(() => {
-        if (!cancelled) setActivites([]);
+    Promise.allSettled([
+      fetchFicheActivites(resolvedOwnerUid, fiche.id),
+      fetchFicheAuditLogs(resolvedOwnerUid, fiche.id),
+    ])
+      .then(([actRes, audRes]) => {
+        if (cancelled) return;
+        setActivites(actRes.status === 'fulfilled' && actRes.value ? actRes.value : []);
+        setAuditLogs(audRes.status === 'fulfilled' && audRes.value ? audRes.value : []);
       })
       .finally(() => {
         if (!cancelled) setLoadingActivites(false);
@@ -166,9 +192,14 @@ export const FicheDetailModal: React.FC<FicheDetailModalProps> = ({
   const reloadHistory = () => {
     if (!resolvedOwnerUid) return;
     setLoadingActivites(true);
-    fetchFicheActivites(resolvedOwnerUid, fiche.id)
-      .then((list) => setActivites(list || []))
-      .catch(() => setActivites([]))
+    Promise.allSettled([
+      fetchFicheActivites(resolvedOwnerUid, fiche.id),
+      fetchFicheAuditLogs(resolvedOwnerUid, fiche.id),
+    ])
+      .then(([actRes, audRes]) => {
+        setActivites(actRes.status === 'fulfilled' && actRes.value ? actRes.value : []);
+        setAuditLogs(audRes.status === 'fulfilled' && audRes.value ? audRes.value : []);
+      })
       .finally(() => setLoadingActivites(false));
   };
 
@@ -741,63 +772,172 @@ export const FicheDetailModal: React.FC<FicheDetailModalProps> = ({
             </div>
           </section>
 
-          {/* 3. Journal d'Activités & Devis PDF générés */}
+          {/* 3. Journal d'Audit Immuable (sous-collection audit_logs) & Activités CRM */}
           <section className="rounded-2xl border border-stone-200 bg-white overflow-hidden">
-            <div className="px-4 py-3 border-b border-stone-100 flex items-center justify-between gap-2 bg-stone-50/70">
+            <div className="px-4 py-3 border-b border-stone-100 flex flex-wrap items-center justify-between gap-2 bg-stone-50/70">
               <div className="flex items-center gap-2">
                 <History className="w-4 h-4 text-orange-600" />
-                  <h3 className="text-sm font-bold text-stone-900">
-                    Journal d’audit complet, Activités &amp; Devis ({activites.length})
-                  </h3>
-                </div>
-                <div className="flex items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={reloadHistory}
-                    disabled={loadingActivites}
-                    className="inline-flex items-center gap-1 text-[11px] font-semibold text-stone-600 hover:text-stone-900 disabled:opacity-50"
-                  >
-                    <RefreshCw className={`w-3 h-3 ${loadingActivites ? 'animate-spin' : ''}`} />
-                    Actualiser
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => onOpenActivite(fiche)}
-                    className="rounded-lg border border-orange-200 bg-orange-50 hover:bg-orange-100 px-2.5 py-1 text-[11px] font-bold text-orange-800"
-                  >
-                    + Activité
-                  </button>
-                </div>
+                <h3 className="text-sm font-bold text-stone-900">
+                  Journal d’Audit Immuable &amp; Activités ({auditLogs.length + activites.length})
+                </h3>
               </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <div className="inline-flex rounded-lg border border-stone-200 bg-white p-0.5 text-[11px] font-semibold">
+                  {(
+                    [
+                      { id: 'all', label: `Tout (${auditLogs.length + activites.length})` },
+                      { id: 'audit', label: `Audit (${auditLogs.length})` },
+                      { id: 'activites', label: `Activités (${activites.length})` },
+                    ] as const
+                  ).map((tab) => (
+                    <button
+                      key={tab.id}
+                      type="button"
+                      onClick={() => setHistoryFilter(tab.id)}
+                      className={`rounded-md px-2 py-0.5 transition-colors ${
+                        historyFilter === tab.id
+                          ? 'bg-orange-600 text-white'
+                          : 'text-stone-600 hover:bg-stone-100'
+                      }`}
+                    >
+                      {tab.label}
+                    </button>
+                  ))}
+                </div>
+                <button
+                  type="button"
+                  onClick={reloadHistory}
+                  disabled={loadingActivites}
+                  className="inline-flex items-center gap-1 text-[11px] font-semibold text-stone-600 hover:text-stone-900 disabled:opacity-50"
+                >
+                  <RefreshCw className={`w-3 h-3 ${loadingActivites ? 'animate-spin' : ''}`} />
+                  Actualiser
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onOpenActivite(fiche)}
+                  className="rounded-lg border border-orange-200 bg-orange-50 hover:bg-orange-100 px-2.5 py-1 text-[11px] font-bold text-orange-800"
+                >
+                  + Activité
+                </button>
+              </div>
+            </div>
 
-              <div className="p-4">
-                {loadingActivites ? (
-                  <div className="py-6 text-center text-xs text-stone-500">
-                    Chargement de l’historique complet d’audit et d’activités...
-                  </div>
-                ) : activites.length === 0 ? (
-                  <div className="py-6 text-center text-xs text-stone-500 space-y-2">
-                    <p>Aucune action ni activité enregistrée pour cette entreprise pour le moment.</p>
-                    <div className="flex items-center justify-center gap-2">
-                      <button
-                        type="button"
-                        onClick={() => onOpenQuote(fiche)}
-                        className="rounded-lg bg-orange-600 hover:bg-orange-700 px-3 py-1.5 text-xs font-bold text-white"
-                      >
-                        Générer le 1er Devis PDF
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => onOpenActivite(fiche)}
-                        className="rounded-lg border border-stone-300 bg-white hover:bg-stone-50 px-3 py-1.5 text-xs font-semibold text-stone-700"
-                      >
-                        Logger un appel
-                      </button>
+            <div className="p-4">
+              {loadingActivites ? (
+                <div className="py-6 text-center text-xs text-stone-500">
+                  Chargement du journal d’audit et des activités...
+                </div>
+              ) : (() => {
+                type TimelineEntry =
+                  | { kind: 'audit'; ts: number; id: string; item: SanitizedFicheAuditLogDoc }
+                  | { kind: 'activite'; ts: number; id: string; item: SanitizedActiviteDoc };
+
+                const entries: TimelineEntry[] = [];
+                if (historyFilter === 'all' || historyFilter === 'audit') {
+                  for (const log of auditLogs) {
+                    entries.push({
+                      kind: 'audit',
+                      ts: Date.parse(log.createdAtIso || '') || 0,
+                      id: `aud_${log.id}`,
+                      item: log,
+                    });
+                  }
+                }
+                if (historyFilter === 'all' || historyFilter === 'activites') {
+                  for (const act of activites) {
+                    entries.push({
+                      kind: 'activite',
+                      ts: Date.parse(act.createdAtIso || '') || 0,
+                      id: `act_${act.id}`,
+                      item: act,
+                    });
+                  }
+                }
+                entries.sort((a, b) => b.ts - a.ts);
+
+                if (entries.length === 0) {
+                  return (
+                    <div className="py-6 text-center text-xs text-stone-500 space-y-2">
+                      <p>Aucune modification ni activité enregistrée pour cette entreprise pour le moment.</p>
+                      <div className="flex items-center justify-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => onOpenQuote(fiche)}
+                          className="rounded-lg bg-orange-600 hover:bg-orange-700 px-3 py-1.5 text-xs font-bold text-white"
+                        >
+                          Générer le 1er Devis PDF
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => onOpenActivite(fiche)}
+                          className="rounded-lg border border-stone-300 bg-white hover:bg-stone-50 px-3 py-1.5 text-xs font-semibold text-stone-700"
+                        >
+                          Logger un appel
+                        </button>
+                      </div>
                     </div>
-                  </div>
-                ) : (
+                  );
+                }
+
+                return (
                   <div className="divide-y divide-stone-100">
-                    {activites.map((act) => {
+                    {entries.map((entry) => {
+                      if (entry.kind === 'audit') {
+                        const log = entry.item;
+                        const meta = AUDIT_ACTION_META[log.action] || {
+                          label: log.action,
+                          badgeCls: 'bg-stone-100 border-stone-200 text-stone-700',
+                        };
+                        const roleLabel =
+                          log.actorRole && log.actorRole in ROLE_BADGE_META
+                            ? ROLE_BADGE_META[log.actorRole as TeamRole].shortLabel
+                            : log.actorRole || '';
+                        return (
+                          <div key={entry.id} className="py-3 first:pt-0 last:pb-0 text-xs">
+                            <div className="flex flex-wrap items-center justify-between gap-2">
+                              <div className="flex flex-wrap items-center gap-1.5">
+                                <span
+                                  className={`inline-flex items-center rounded-md border px-2 py-0.5 text-[10px] font-bold ${meta.badgeCls}`}
+                                >
+                                  Audit · {meta.label}
+                                </span>
+                                {log.field && (
+                                  <span className="font-mono text-[10px] font-semibold text-stone-500">
+                                    champ: {log.field}
+                                  </span>
+                                )}
+                              </div>
+                              <div className="flex flex-wrap items-center gap-2 text-[11px] text-stone-500">
+                                <span className="font-semibold text-stone-800">
+                                  {log.actorName}
+                                  {roleLabel ? ` (${roleLabel})` : ''}
+                                </span>
+                                <span>·</span>
+                                <span className="font-mono text-[10px] text-stone-500 tabular-nums">
+                                  {formatAuditDateTimeFr(log.createdAtIso)}
+                                </span>
+                              </div>
+                            </div>
+                            <p className="mt-1 text-stone-700 leading-relaxed">{log.summary}</p>
+                            {(log.oldValue !== undefined || log.newValue !== undefined) && (
+                              <div className="mt-1.5 inline-flex flex-wrap items-center gap-1.5 rounded-lg border border-stone-200 bg-stone-50 px-2 py-1 text-[11px]">
+                                {log.oldValue !== undefined && (
+                                  <span className="text-stone-500 line-through">
+                                    {log.oldValue || '(vide)'}
+                                  </span>
+                                )}
+                                <span className="text-stone-400">→</span>
+                                <span className="font-semibold text-stone-900">
+                                  {log.newValue || '(vide)'}
+                                </span>
+                              </div>
+                            )}
+                          </div>
+                        );
+                      }
+
+                      const act = entry.item;
                       const typeMeta = ACTIVITE_TYPE_META[act.type] || {
                         label: act.type,
                         bgClass: 'bg-stone-50 border-stone-200',
@@ -809,7 +949,7 @@ export const FicheDetailModal: React.FC<FicheDetailModalProps> = ({
                           ? ROLE_BADGE_META[act.auteurRole as TeamRole].shortLabel
                           : act.auteurRole || '';
                       return (
-                        <div key={act.id} className="py-3 first:pt-0 last:pb-0 text-xs">
+                        <div key={entry.id} className="py-3 first:pt-0 last:pb-0 text-xs">
                           <div className="flex flex-wrap items-center justify-between gap-2">
                             <div className="flex flex-wrap items-center gap-1.5">
                               <span
@@ -861,8 +1001,9 @@ export const FicheDetailModal: React.FC<FicheDetailModalProps> = ({
                       );
                     })}
                   </div>
-                )}
-              </div>
+                );
+              })()}
+            </div>
           </section>
         </div>
       </div>

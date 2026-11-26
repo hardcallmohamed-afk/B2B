@@ -475,6 +475,108 @@ test('sanitizeFichePayload, sanitizeActivitePayload, and sanitizeCloudNotificati
   assert.equal(notif.read, false);
 });
 
+test('sanitizeFicheAuditLogPayload, direct chat, coaching WebRTC, and contract cloud notifications enforce strict schema bounds', async () => {
+  const {
+    sanitizeFicheAuditLogPayload,
+    sanitizeDirectChatChannelPayload,
+    sanitizeDirectChatMessagePayload,
+    sanitizeCoachingSessionPayload,
+    sanitizeCoachingCandidatePayload,
+    sanitizeCloudNotificationPayload,
+  } = await import('./firestoreSanitize');
+
+  const audit = sanitizeFicheAuditLogPayload('collab_1', 'f_10', {
+    id: 'aud/1!',
+    ficheId: 'f_10',
+    action: 'field_updated',
+    field: 'telephone',
+    oldValue: '0535000000',
+    newValue: '0661112233',
+    summary: 'Téléphone mis à jour',
+    actorUid: 'sup_1',
+    actorName: 'Mohamed Admin',
+    actorRole: 'super_admin',
+    createdAtIso: '2026-11-26T11:00:00.000Z',
+  });
+  assert.equal(audit.id, 'aud_1_');
+  assert.equal(audit.action, 'field_updated');
+  assert.equal(audit.field, 'telephone');
+  assert.equal(audit.oldValue, '0535000000');
+  assert.equal(audit.newValue, '0661112233');
+
+  const fallbackAudit = sanitizeFicheAuditLogPayload('collab_1', 'f_10', {
+    ficheId: 'f_10',
+    action: 'invalid_action',
+    summary: 'Test fallback',
+    actorUid: 'sup_1',
+    actorName: 'Admin',
+  });
+  assert.equal(fallbackAudit.action, 'field_updated');
+
+  const chan = sanitizeDirectChatChannelPayload({
+    collabUid: 'collab_1',
+    collabName: 'Malak Cheik',
+    collabEmail: 'Malak@OrangePro.MA',
+    collabZone: 'Meknès',
+    lastMessageText: 'Bonjour !',
+    lastSenderUid: 'admin_1',
+    lastSenderName: 'Admin',
+    unreadByAdmin: -3,
+    unreadByCollab: 2,
+  });
+  assert.equal(chan.collabUid, 'collab_1');
+  assert.equal(chan.collabEmail, 'malak@orangepro.ma');
+  assert.equal(chan.unreadByAdmin, 0);
+  assert.equal(chan.unreadByCollab, 2);
+
+  const msg = sanitizeDirectChatMessagePayload({
+    id: 'msg_1',
+    collabUid: 'collab_1',
+    senderUid: 'admin_1',
+    senderName: 'Admin',
+    senderRole: 'super_admin',
+    text: 'Bravo pour le RDV !',
+  });
+  assert.equal(msg.id, 'msg_1');
+  assert.equal(msg.text, 'Bravo pour le RDV !');
+
+  const coaching = sanitizeCoachingSessionPayload({
+    collabUid: 'collab_1',
+    collabName: 'Malak Cheik',
+    status: 'live',
+    collabConsentActive: true,
+    adminPttActive: true,
+    offerSdp: 'v=0\r\no=- 1 2 IN IP4 127.0.0.1',
+  });
+  assert.equal(coaching.status, 'live');
+  assert.equal(coaching.collabConsentActive, true);
+  assert.equal(coaching.adminPttActive, true);
+
+  const cand = sanitizeCoachingCandidatePayload({
+    id: 'c1',
+    senderUid: 'admin_1',
+    fromRole: 'admin',
+    candidateJson: '{"candidate":"candidate:1"}',
+  });
+  assert.equal(cand.fromRole, 'admin');
+  assert.equal(cand.senderUid, 'admin_1');
+
+  const contractNotif = sanitizeCloudNotificationPayload({
+    recipientUid: 'collab_1',
+    senderUid: 'admin_1',
+    senderName: 'Admin',
+    kind: 'contract_status_changed',
+    title: 'Contrat refusé',
+    message: 'Dossier incomplet',
+    payoutStatus: 'Refusé',
+    payoutMad: 1500,
+    targetTab: 'team',
+  });
+  assert.equal(contractNotif.kind, 'contract_status_changed');
+  assert.equal(contractNotif.payoutStatus, 'Refusé');
+  assert.equal(contractNotif.payoutMad, 1500);
+});
+
 
 
 

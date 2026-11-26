@@ -207,13 +207,41 @@ export function shouldFlagAbruptClosure(
 export function computeHeartbeatDeltaSeconds(
   lastTickMs: number,
   nowMs: number,
-  maxStepSeconds = 180
+  maxStepSeconds = 120
 ): number {
   if (!Number.isFinite(lastTickMs) || !Number.isFinite(nowMs) || nowMs <= lastTickMs) {
     return 0;
   }
   const rawSeconds = Math.round((nowMs - lastTickMs) / 1000);
   return Math.min(maxStepSeconds, Math.max(0, rawSeconds));
+}
+
+/**
+ * Reconciles effective online state from Firestore `isOnline` flag + `lastSeenAt` freshness
+ * so active collaborators show En ligne reliably and stale sessions (> 10 min without heartbeat) fall back gracefully.
+ */
+export function reconcilePresenceOnlineState(
+  isOnline: boolean,
+  lastSeenAt?: string,
+  nowMs: number = Date.now(),
+  staleWindowMs = 10 * 60 * 1000
+): { effectiveOnline: boolean; isStaleSignal: boolean; secondsSinceLastSeen: number | null } {
+  if (!lastSeenAt) {
+    return { effectiveOnline: Boolean(isOnline), isStaleSignal: false, secondsSinceLastSeen: null };
+  }
+  const ts = Date.parse(lastSeenAt);
+  if (!Number.isFinite(ts)) {
+    return { effectiveOnline: Boolean(isOnline), isStaleSignal: false, secondsSinceLastSeen: null };
+  }
+  const diffMs = Math.max(0, nowMs - ts);
+  const secondsSinceLastSeen = Math.round(diffMs / 1000);
+  if (isOnline && diffMs <= staleWindowMs) {
+    return { effectiveOnline: true, isStaleSignal: false, secondsSinceLastSeen };
+  }
+  if (isOnline && diffMs > staleWindowMs) {
+    return { effectiveOnline: false, isStaleSignal: true, secondsSinceLastSeen };
+  }
+  return { effectiveOnline: false, isStaleSignal: false, secondsSinceLastSeen };
 }
 
 export function stripFieldTelemetrySuffix(deviceOrRaw: string): string {
@@ -684,6 +712,62 @@ export function computeMercatorMarkerPosition(params: {
   return { leftPx, topPx, isInsideViewport };
 }
 
+/**
+ * Computes optimal center (lat, lng) and integer zoom level (5..17) to frame a set of collaborator pins
+ * inside the Radar Dispatch map viewport ("Tout cadrer").
+ */
+export function computeTeamBoundsZoom(
+  points: Array<{ lat: number; lng: number }>,
+  viewportWidth = 768,
+  viewportHeight = 420
+): { centerLat: number; centerLng: number; zoom: number } {
+  const valid = (points || []).filter(
+    (p) =>
+      Number.isFinite(p.lat) &&
+      Number.isFinite(p.lng) &&
+      Math.abs(p.lat) <= 85 &&
+      Math.abs(p.lng) <= 180
+  );
+  if (valid.length === 0) {
+    return { centerLat: 33.8935, centerLng: -5.5473, zoom: 6 };
+  }
+  if (valid.length === 1) {
+    return {
+      centerLat: Number(valid[0].lat.toFixed(6)),
+      centerLng: Number(valid[0].lng.toFixed(6)),
+      zoom: 15,
+    };
+  }
+
+  let minLat = valid[0].lat;
+  let maxLat = valid[0].lat;
+  let minLng = valid[0].lng;
+  let maxLng = valid[0].lng;
+  for (const p of valid) {
+    if (p.lat < minLat) minLat = p.lat;
+    if (p.lat > maxLat) maxLat = p.lat;
+    if (p.lng < minLng) minLng = p.lng;
+    if (p.lng > maxLng) maxLng = p.lng;
+  }
+
+  const centerLat = Number(((minLat + maxLat) / 2).toFixed(6));
+  const centerLng = Number(((minLng + maxLng) / 2).toFixed(6));
+
+  const padW = Math.max(200, viewportWidth - 110);
+  const padH = Math.max(160, viewportHeight - 110);
+
+  for (let z = 16; z >= 5; z--) {
+    const sw = projectLatLngToMercatorWorld(minLat, minLng, z);
+    const ne = projectLatLngToMercatorWorld(maxLat, maxLng, z);
+    const spanX = Math.abs(ne.worldX - sw.worldX);
+    const spanY = Math.abs(sw.worldY - ne.worldY);
+    if (spanX <= padW && spanY <= padH) {
+      return { centerLat, centerLng, zoom: z };
+    }
+  }
+  return { centerLat, centerLng, zoom: 5 };
+}
+
 export interface AutoAcquiredCoordinates {
   lat: number;
   lng: number;
@@ -707,6 +791,8 @@ export function startAutomaticMultiPlatformLocationEngine(params: {
   let watchId: number | null = null;
   let retryIntervalId: number | null = null;
   let hasHardwareFix = false;
+  let lastBestAccuracy = Infinity;
+  let lastBestFixAtMs = 0;
 
   const saveAndEmit = (coords: AutoAcquiredCoordinates) => {
     if (disposed) return;
@@ -718,23 +804,48 @@ export function startAutomaticMultiPlatformLocationEngine(params: {
     ) {
       return;
     }
+
+    const nowMs = Date.now();
+    // Prevent coarse IP/cache fixes from overriding a real hardware/wifi fix
+    if ((coords.method === 'ip_geo' || coords.method === 'cache') && hasHardwareFix) {
+      return;
+    }
+    // Reject noisy low-accuracy fixes (> 250m) if we already have a fresh high-precision GPS fix (<= 60m within 45s)
+    if (
+      coords.accuracyMeters > 250 &&
+      lastBestAccuracy <= 60 &&
+      nowMs - lastBestFixAtMs < 45_000
+    ) {
+      return;
+    }
+
     if (coords.method === 'gps_hardware' || coords.method === 'wifi_network') {
       hasHardwareFix = true;
-    }
-    try {
-      if (typeof window !== 'undefined' && window.localStorage) {
-        window.localStorage.setItem(
-          AUTO_GEO_CACHE_KEY,
-          JSON.stringify({
-            lat: Number(coords.lat.toFixed(6)),
-            lng: Number(coords.lng.toFixed(6)),
-            accuracyMeters: coords.accuracyMeters,
-            updatedAt: Date.now(),
-          })
-        );
+      if (coords.accuracyMeters <= lastBestAccuracy || nowMs - lastBestFixAtMs >= 45_000) {
+        lastBestAccuracy = coords.accuracyMeters;
+        lastBestFixAtMs = nowMs;
       }
-    } catch {
-      // ignore storage quota
+    }
+
+    // Only persist reliable fixes to local cache (avoid overwriting good GPS cache with coarse IP geo)
+    const shouldCache = coords.method !== 'ip_geo' || !hasHardwareFix;
+    if (shouldCache) {
+      try {
+        if (typeof window !== 'undefined' && window.localStorage) {
+          window.localStorage.setItem(
+            AUTO_GEO_CACHE_KEY,
+            JSON.stringify({
+              lat: Number(coords.lat.toFixed(6)),
+              lng: Number(coords.lng.toFixed(6)),
+              accuracyMeters: coords.accuracyMeters,
+              method: coords.method,
+              updatedAt: nowMs,
+            })
+          );
+        }
+      } catch {
+        // ignore storage quota
+      }
     }
     params.onLocationUpdate({
       ...coords,
@@ -743,17 +854,26 @@ export function startAutomaticMultiPlatformLocationEngine(params: {
     });
   };
 
-  // 1. Hydrate immediately from cached coordinates if available
+  // 1. Hydrate immediately from cached coordinates if available (< 12h old)
+  let hasFreshCachedGps = false;
   try {
     if (typeof window !== 'undefined' && window.localStorage) {
       const raw = window.localStorage.getItem(AUTO_GEO_CACHE_KEY);
       if (raw) {
         const parsed = JSON.parse(raw);
-        if (typeof parsed?.lat === 'number' && typeof parsed?.lng === 'number') {
+        const ageMs = Date.now() - (Number(parsed?.updatedAt) || 0);
+        if (
+          typeof parsed?.lat === 'number' &&
+          typeof parsed?.lng === 'number' &&
+          ageMs < 12 * 60 * 60 * 1000
+        ) {
+          if (parsed.method === 'gps_hardware' || parsed.method === 'wifi_network') {
+            hasFreshCachedGps = ageMs < 30 * 60 * 1000;
+          }
           params.onLocationUpdate({
             lat: Number(parsed.lat.toFixed(6)),
             lng: Number(parsed.lng.toFixed(6)),
-            accuracyMeters: Number(parsed.accuracyMeters) || 25,
+            accuracyMeters: Number(parsed.accuracyMeters) || 50,
             speedKmh: 0,
             method: 'cache',
           });
@@ -764,9 +884,9 @@ export function startAutomaticMultiPlatformLocationEngine(params: {
     // ignore
   }
 
-  // 2. Zero-prompt automatic network geolocation (PC, Android, iPhone fallback before/without popup)
+  // 2. Zero-prompt automatic network geolocation (PC, Android, iPhone fallback only when no fresh GPS cache/fix exists)
   const fetchNetworkGeoFallback = async () => {
-    if (disposed || hasHardwareFix || typeof fetch === 'undefined') return;
+    if (disposed || hasHardwareFix || hasFreshCachedGps || typeof fetch === 'undefined') return;
     const providers: Array<() => Promise<{ lat: number; lng: number }>> = [
       async () => {
         const res = await fetch('https://ipwho.is/', { signal: AbortSignal.timeout(4500) });
@@ -805,7 +925,7 @@ export function startAutomaticMultiPlatformLocationEngine(params: {
           saveAndEmit({
             lat: coords.lat,
             lng: coords.lng,
-            accuracyMeters: 45,
+            accuracyMeters: 2500,
             speedKmh: 0,
             method: 'ip_geo',
           });

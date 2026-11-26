@@ -17,9 +17,11 @@ import {
   stripFieldTelemetrySuffix,
   computeDistanceKm,
   computeMercatorMarkerPosition,
+  computeTeamBoundsZoom,
   computeVisibleGoogleMapTiles,
   panMercatorCenterByPixels,
   projectLatLngToMercatorWorld,
+  reconcilePresenceOnlineState,
 } from './attendance';
 import { getRoleCapabilities } from './authAccess';
 
@@ -231,3 +233,51 @@ test('getRoleCapabilities grants progressive CRM privileges per role while stric
   assert.equal(superCaps.canAccessLiveGpsMap, true);
 });
 
+test('reconcilePresenceOnlineState and computeTeamBoundsZoom keep online status reliable and fit team pins accurately', () => {
+  const now = Date.parse('2026-11-26T11:00:00.000Z');
+  // Active online session with fresh heartbeat -> online
+  const activeFresh = reconcilePresenceOnlineState(
+    true,
+    '2026-11-26T10:59:15.000Z',
+    now
+  );
+  assert.equal(activeFresh.effectiveOnline, true);
+  assert.equal(activeFresh.isStaleSignal, false);
+
+  // Explicit logout (isOnline=false) stays offline
+  const loggedOut = reconcilePresenceOnlineState(
+    false,
+    '2026-11-26T10:59:15.000Z',
+    now
+  );
+  assert.equal(loggedOut.effectiveOnline, false);
+  assert.equal(loggedOut.isStaleSignal, false);
+
+  // Stale session (15 min old > 10 min window) with isOnline=true -> reconciled as offline/stale
+  const stale = reconcilePresenceOnlineState(
+    true,
+    '2026-11-26T10:45:00.000Z',
+    now
+  );
+  assert.equal(stale.effectiveOnline, false);
+  assert.equal(stale.isStaleSignal, true);
+
+  // Default heartbeat cap is 120s (safe under Firestore +300s rule)
+  assert.equal(computeHeartbeatDeltaSeconds(0, 600_000), 120);
+
+  // computeTeamBoundsZoom frames single point tightly and multiple spread cities sensibly
+  const single = computeTeamBoundsZoom([{ lat: 33.8935, lng: -5.5473 }], 800, 400);
+  assert.equal(single.zoom, 15);
+  assert.ok(Math.abs(single.centerLat - 33.8935) < 0.0001);
+
+  const multi = computeTeamBoundsZoom(
+    [
+      { lat: 33.8935, lng: -5.5473 }, // Meknès
+      { lat: 33.5731, lng: -7.5898 }, // Casablanca
+    ],
+    800,
+    400
+  );
+  assert.ok(multi.zoom >= 7 && multi.zoom <= 11);
+  assert.ok(multi.centerLat > 33.57 && multi.centerLat < 33.90);
+});

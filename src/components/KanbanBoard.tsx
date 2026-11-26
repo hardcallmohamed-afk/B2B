@@ -15,6 +15,8 @@ import {
   AlertTriangle,
   Eye,
   FileSpreadsheet,
+  UserPlus,
+  RotateCcw,
 } from 'lucide-react';
 import {
   SECTEURS_META,
@@ -44,6 +46,9 @@ interface KanbanBoardProps {
   onOpenDetail?: (fiche: FicheEntreprise) => void;
   onOpenQuote?: (fiche: FicheEntreprise) => void;
   onQuickAddInStage?: (statut: StatutCRM) => void;
+  canSuperviseTeam?: boolean;
+  onAssignFiche?: (fiche: FicheEntreprise) => void;
+  onRestoreFiche?: (fiche: FicheEntreprise) => void;
 }
 
 function getVelocityCardStyles(level: VelocityLevel): {
@@ -103,6 +108,9 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
   onOpenDetail,
   onOpenQuote,
   onQuickAddInStage,
+  canSuperviseTeam = false,
+  onAssignFiche,
+  onRestoreFiche,
 }) => {
   const [draggingId, setDraggingId] = useState<string | null>(null);
   const [dragOverStage, setDragOverStage] = useState<StatutCRM | null>(null);
@@ -532,6 +540,34 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
                                     <Globe className="w-3.5 h-3.5" />
                                   </button>
                                 )}
+                                {canSuperviseTeam && onAssignFiche && (
+                                  <button
+                                    type="button"
+                                    onClick={() => onAssignFiche(f)}
+                                    aria-label={`Attribuer ${f.societe}`}
+                                    title={
+                                      f.statut === 'Signé Orange Pro'
+                                        ? 'Réattribuer cette fiche à un collaborateur'
+                                        : 'Attribuer cette fiche à un collaborateur'
+                                    }
+                                    className="p-1 rounded hover:bg-orange-50 text-orange-700"
+                                  >
+                                    <UserPlus className="w-3.5 h-3.5" />
+                                  </button>
+                                )}
+                                {canSuperviseTeam &&
+                                  f.statut === 'Signé Orange Pro' &&
+                                  onRestoreFiche && (
+                                    <button
+                                      type="button"
+                                      onClick={() => onRestoreFiche(f)}
+                                      aria-label={`Restituer ${f.societe}`}
+                                      title="Restituer / déverrouiller cette fiche signée"
+                                      className="p-1 rounded hover:bg-violet-50 text-violet-700"
+                                    >
+                                      <RotateCcw className="w-3.5 h-3.5" />
+                                    </button>
+                                  )}
                               </div>
                               <button
                                 type="button"

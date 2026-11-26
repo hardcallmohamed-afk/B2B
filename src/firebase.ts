@@ -47,6 +47,11 @@ import {
   sanitizeProviderId,
   sanitizeActivitePayload,
   sanitizeCloudNotificationPayload,
+  sanitizeFicheAuditLogPayload,
+  sanitizeDirectChatChannelPayload,
+  sanitizeDirectChatMessagePayload,
+  sanitizeCoachingSessionPayload,
+  sanitizeCoachingCandidatePayload,
   type FicheLike,
   type EmailSkillLike,
   type WorkspaceLike,
@@ -55,6 +60,11 @@ import {
   type ApiKeyConfigLike,
   type ActiviteLike,
   type CloudNotificationLike,
+  type FicheAuditLogLike,
+  type DirectChatChannelLike,
+  type DirectChatMessageLike,
+  type CoachingSessionLike,
+  type CoachingCandidateLike,
   type SanitizedFicheDoc,
   type SanitizedEmailSkillDoc,
   type SanitizedSignedContractDoc,
@@ -62,6 +72,11 @@ import {
   type SanitizedAttendanceSessionDoc,
   type SanitizedActiviteDoc,
   type SanitizedCloudNotificationDoc,
+  type SanitizedFicheAuditLogDoc,
+  type SanitizedDirectChatChannelDoc,
+  type SanitizedDirectChatMessageDoc,
+  type SanitizedCoachingSessionDoc,
+  type SanitizedCoachingCandidateDoc,
   type SyncDiff,
   type PayoutStatus,
 } from './utils/firestoreSanitize';
@@ -1506,11 +1521,19 @@ export async function heartbeatAttendanceSession(params: {
   totalWorkedSeconds: number;
   sessionWorkedSeconds: number;
   deviceLabel: string;
-}): Promise<void> {
+  fallbackProfile?: {
+    email: string;
+    displayName: string;
+    role: TeamRole;
+    zone: string;
+    phonePro?: string;
+    avatarDataUrl?: string;
+  };
+}): Promise<{ todayWorkedSeconds: number; totalWorkedSeconds: number }> {
   const presRef = doc(db, 'user_presence', params.uid);
   const sessRef = doc(db, 'user_presence', params.uid, 'sessions', params.sessionId);
-  const safeToday = Math.min(86400, Math.max(0, Math.round(params.todayWorkedSeconds)));
-  const safeTotal = Math.min(100000000, Math.max(0, Math.round(params.totalWorkedSeconds)));
+  let safeToday = Math.min(86400, Math.max(0, Math.round(params.todayWorkedSeconds)));
+  let safeTotal = Math.min(100000000, Math.max(0, Math.round(params.totalWorkedSeconds)));
   const safeSession = Math.min(86400, Math.max(0, Math.round(params.sessionWorkedSeconds)));
 
   try {
@@ -1521,10 +1544,70 @@ export async function heartbeatAttendanceSession(params: {
       activeDateKey: params.dateKey.slice(0, 16),
       todayWorkedSeconds: safeToday,
       totalWorkedSeconds: safeTotal,
+      currentSessionId: params.sessionId.slice(0, 128),
       updatedAt: serverTimestamp(),
     });
-  } catch (error) {
-    handleFirestoreError(error, OperationType.UPDATE, `user_presence/${params.uid}`);
+  } catch {
+    // Self-healing reconciliation: multi-device skew, sleep gap > 120s, or missing doc
+    try {
+      const snap = await getDoc(presRef);
+      if (snap.exists()) {
+        const prev = snap.data();
+        const sameDay = prev.activeDateKey === params.dateKey;
+        const prevToday = Math.max(0, Math.round(Number(prev.todayWorkedSeconds) || 0));
+        const prevTotal = Math.max(0, Math.round(Number(prev.totalWorkedSeconds) || 0));
+        const deltaGuess = sameDay
+          ? Math.min(120, Math.max(0, safeToday - prevToday))
+          : Math.min(120, Math.max(0, safeToday));
+        safeToday = sameDay
+          ? Math.min(86400, prevToday + deltaGuess)
+          : Math.min(86400, deltaGuess);
+        const totalDelta = Math.min(120, Math.max(deltaGuess, safeTotal - prevTotal));
+        safeTotal = Math.min(100000000, prevTotal + Math.max(0, totalDelta));
+
+        await updateDoc(presRef, {
+          isOnline: true,
+          currentDevice: params.deviceLabel.slice(0, 160),
+          lastSeenAt: params.nowIso.slice(0, 64),
+          activeDateKey: params.dateKey.slice(0, 16),
+          todayWorkedSeconds: safeToday,
+          totalWorkedSeconds: safeTotal,
+          currentSessionId: params.sessionId.slice(0, 128),
+          updatedAt: serverTimestamp(),
+        });
+      } else if (params.fallbackProfile) {
+        const { firstName, lastName } = splitFirstAndLastName(params.fallbackProfile.displayName);
+        const cleanPres = sanitizeUserPresencePayload({
+          uid: params.uid,
+          email: params.fallbackProfile.email,
+          displayName: params.fallbackProfile.displayName,
+          firstName,
+          lastName,
+          phonePro: params.fallbackProfile.phonePro || '',
+          avatarDataUrl: params.fallbackProfile.avatarDataUrl || '',
+          role: params.fallbackProfile.role,
+          zone: params.fallbackProfile.zone,
+          isOnline: true,
+          currentDevice: params.deviceLabel,
+          devicesUsed: [params.deviceLabel],
+          lastLoginAt: params.nowIso,
+          lastSeenAt: params.nowIso,
+          activeDateKey: params.dateKey,
+          todayWorkedSeconds: Math.min(120, safeToday),
+          totalWorkedSeconds: Math.min(120, safeTotal),
+          currentSessionId: params.sessionId,
+        });
+        safeToday = cleanPres.todayWorkedSeconds;
+        safeTotal = cleanPres.totalWorkedSeconds;
+        await setDoc(presRef, {
+          ...cleanPres,
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        });
+      }
+    } catch {
+      // Avoid crashing UI on transient network loss; next heartbeat will retry
+    }
   }
 
   try {
@@ -1536,6 +1619,8 @@ export async function heartbeatAttendanceSession(params: {
   } catch {
     // Non-fatal if session doc hasn't settled yet
   }
+
+  return { todayWorkedSeconds: safeToday, totalWorkedSeconds: safeTotal };
 }
 
 export async function closeAttendanceSession(params: {
@@ -1744,6 +1829,85 @@ export async function fetchFicheActivites(
 }
 
 /**
+ * Journal d'audit immuable (sous-collection /users/{uid}/fiches/{ficheId}/audit_logs/{logId})
+ * Enregistre chaque modification avec acteur, rôle, champ, ancienne/nouvelle valeur, date et heure exacte.
+ */
+export async function saveFicheAuditLog(
+  ownerUid: string,
+  ficheId: string,
+  input: FicheAuditLogLike
+): Promise<SanitizedFicheAuditLogDoc | null> {
+  if (!ownerUid || !ficheId) return null;
+  const sanitized = sanitizeFicheAuditLogPayload(ownerUid, ficheId, {
+    ...input,
+    createdAtIso: input.createdAtIso || new Date().toISOString(),
+  });
+  const ref = doc(db, 'users', ownerUid, 'fiches', ficheId, 'audit_logs', sanitized.id);
+  try {
+    await setDoc(ref, {
+      ...sanitized,
+      createdAt: serverTimestamp(),
+    });
+    return sanitized;
+  } catch {
+    // Non-bloquant pour ne jamais casser une saisie CRM en cas de latence réseau
+    return null;
+  }
+}
+
+export async function fetchFicheAuditLogs(
+  ownerUid: string,
+  ficheId: string
+): Promise<SanitizedFicheAuditLogDoc[]> {
+  const auditPath = `users/${ownerUid}/fiches/${ficheId}/audit_logs`;
+  try {
+    const q = query(
+      collection(db, 'users', ownerUid, 'fiches', ficheId, 'audit_logs'),
+      where('ownerId', '==', ownerUid)
+    );
+    const snap = await getDocs(q);
+    const list: SanitizedFicheAuditLogDoc[] = [];
+    snap.forEach((docSnap) => {
+      const d = docSnap.data();
+      let resolvedIso =
+        typeof d.createdAtIso === 'string' && d.createdAtIso.trim()
+          ? d.createdAtIso.trim()
+          : '';
+      if (!resolvedIso && d.createdAt && typeof d.createdAt.toDate === 'function') {
+        try {
+          resolvedIso = d.createdAt.toDate().toISOString();
+        } catch {
+          resolvedIso = '';
+        }
+      }
+      list.push(
+        sanitizeFicheAuditLogPayload(ownerUid, ficheId, {
+          id: docSnap.id,
+          action: d.action,
+          field: typeof d.field === 'string' ? d.field : undefined,
+          oldValue: typeof d.oldValue === 'string' ? d.oldValue : undefined,
+          newValue: typeof d.newValue === 'string' ? d.newValue : undefined,
+          summary: typeof d.summary === 'string' ? d.summary : '',
+          actorUid: typeof d.actorUid === 'string' ? d.actorUid : ownerUid,
+          actorName: typeof d.actorName === 'string' ? d.actorName : 'Collaborateur',
+          actorRole: typeof d.actorRole === 'string' ? d.actorRole : undefined,
+          createdAtIso: resolvedIso || undefined,
+        })
+      );
+    });
+    list.sort((a, b) => {
+      const ta = a.createdAtIso ? Date.parse(a.createdAtIso) : 0;
+      const tb = b.createdAtIso ? Date.parse(b.createdAtIso) : 0;
+      if (tb !== ta) return tb - ta;
+      return b.id.localeCompare(a.id);
+    });
+    return list;
+  } catch (error) {
+    handleFirestoreError(error, OperationType.LIST, auditPath);
+  }
+}
+
+/**
  * LOT 6: Consultation des fiches d'un collaborateur actif
  * par le Super-Admin, le Manager ou le Team Lead.
  */
@@ -1908,13 +2072,19 @@ export async function transferFicheToCollaborator(params: {
   const targetRef = doc(db, 'users', params.targetOwnerUid, 'fiches', targetFiche.id);
   const targetPath = `users/${params.targetOwnerUid}/fiches/${targetFiche.id}`;
 
-  // 1. Load source activities before deleting source (if transferring between two users)
+  // 1. Load source activities & audit logs before deleting source (if transferring between two users)
   let sourceActivities: SanitizedActiviteDoc[] = [];
+  let sourceAuditLogs: SanitizedFicheAuditLogDoc[] = [];
   if (params.sourceOwnerUid !== params.targetOwnerUid) {
     try {
       sourceActivities = await fetchFicheActivites(params.sourceOwnerUid, params.fiche.id);
     } catch {
       sourceActivities = [];
+    }
+    try {
+      sourceAuditLogs = await fetchFicheAuditLogs(params.sourceOwnerUid, params.fiche.id);
+    } catch {
+      sourceAuditLogs = [];
     }
   }
 
@@ -1937,7 +2107,7 @@ export async function transferFicheToCollaborator(params: {
     handleFirestoreError(error, OperationType.WRITE, targetPath);
   }
 
-  // 3. Migrate previous activities into target fiche if moved between different owners
+  // 3. Migrate previous activities & audit logs into target fiche if moved between different owners
   if (params.sourceOwnerUid !== params.targetOwnerUid && sourceActivities.length > 0) {
     for (const act of sourceActivities.slice(0, 60)) {
       try {
@@ -1959,6 +2129,26 @@ export async function transferFicheToCollaborator(params: {
       }
     }
   }
+  if (params.sourceOwnerUid !== params.targetOwnerUid && sourceAuditLogs.length > 0) {
+    for (const aud of sourceAuditLogs.slice(0, 80)) {
+      try {
+        const migrated = sanitizeFicheAuditLogPayload(params.targetOwnerUid, targetFiche.id, {
+          ...aud,
+          ownerId: params.targetOwnerUid,
+          ficheId: targetFiche.id,
+        });
+        await setDoc(
+          doc(db, 'users', params.targetOwnerUid, 'fiches', targetFiche.id, 'audit_logs', migrated.id),
+          {
+            ...migrated,
+            createdAt: serverTimestamp(),
+          }
+        );
+      } catch {
+        // Non-fatal
+      }
+    }
+  }
 
   // 4. Delete from source portfolio if moved to another collaborator
   if (params.sourceOwnerUid !== params.targetOwnerUid) {
@@ -1969,7 +2159,7 @@ export async function transferFicheToCollaborator(params: {
     }
   }
 
-  // 5. Log audit entry on the target fiche
+  // 5. Log activity & dedicated audit entry on the target fiche
   const isReassign = params.sourceOwnerUid !== params.targetOwnerUid;
   const auditNote = [
     isReassign
@@ -1995,6 +2185,18 @@ export async function transferFicheToCollaborator(params: {
   } catch {
     // Non-fatal
   }
+
+  await saveFicheAuditLog(params.targetOwnerUid, targetFiche.id, {
+    action: 'assigned',
+    field: 'ownerId',
+    oldValue: params.sourceOwnerName,
+    newValue: params.targetOwnerName,
+    summary: auditNote,
+    actorUid: params.actorUid,
+    actorName: params.actorName,
+    actorRole: params.actorRole,
+    createdAtIso: nowIso,
+  });
 
   // 6. Send real-time cloud notification to target collaborator (if different from actor)
   if (params.targetOwnerUid !== params.actorUid) {
@@ -2045,7 +2247,7 @@ export async function restoreSignedFicheToCollaborator(params: {
 
   await updateTeamMemberFiche(params.ownerUid, updatedFiche);
 
-  // Audit log
+  // Audit log (activity + dedicated audit_logs sub-collection)
   try {
     await saveFicheActivite(params.ownerUid, updatedFiche.id, {
       id: `act_rest_${Date.now().toString(36)}`,
@@ -2060,6 +2262,18 @@ export async function restoreSignedFicheToCollaborator(params: {
   } catch {
     // Non-fatal
   }
+
+  await saveFicheAuditLog(params.ownerUid, updatedFiche.id, {
+    action: 'restored',
+    field: 'statut',
+    oldValue: params.fiche.statut,
+    newValue: params.nextStatut,
+    summary: `Fiche signée restituée et déverrouillée par ${params.actorName} (statut : « ${params.nextStatut} »). Motif : ${cleanReason}`,
+    actorUid: params.actorUid,
+    actorName: params.actorName,
+    actorRole: params.actorRole,
+    createdAtIso: nowIso,
+  });
 
   // Real-time cloud notification to collaborator
   if (params.ownerUid !== params.actorUid) {
@@ -2171,4 +2385,257 @@ async function updateOrUpsertSignedContract(
     handleFirestoreError(error, OperationType.UPDATE, operationPath);
   }
 }
+
+// =========================================================================
+// DISCUSSION DIRECTE TEMPS RÉEL (Super-Admin <-> Collaborateur, 0 API externe)
+// =========================================================================
+
+export function getDirectChatChannelsQuery() {
+  return query(collection(db, 'direct_chats'), where('orgScope', '==', 'orange_pro_team'));
+}
+
+export function getDirectChatChannelDocRef(collabUid: string) {
+  return doc(db, 'direct_chats', collabUid);
+}
+
+export function getDirectChatMessagesQuery(collabUid: string) {
+  return query(
+    collection(db, 'direct_chats', collabUid, 'messages'),
+    where('orgScope', '==', 'orange_pro_team')
+  );
+}
+
+export async function sendDirectChatMessage(params: {
+  collabUid: string;
+  collabName: string;
+  collabEmail?: string;
+  collabZone?: string;
+  senderUid: string;
+  senderName: string;
+  senderRole: string;
+  isSenderSuperAdmin: boolean;
+  text: string;
+  recipientUidForNotification?: string;
+}): Promise<SanitizedDirectChatMessageDoc> {
+  const nowIso = new Date().toISOString();
+  const cleanText = params.text.trim().slice(0, 2000);
+  if (!cleanText) {
+    throw new Error('Le message ne peut pas être vide.');
+  }
+
+  const channelRef = doc(db, 'direct_chats', params.collabUid);
+  let prevUnreadAdmin = 0;
+  let prevUnreadCollab = 0;
+
+  try {
+    const snap = await getDoc(channelRef);
+    if (snap.exists()) {
+      const prev = snap.data();
+      prevUnreadAdmin = Math.max(0, Math.round(Number(prev.unreadByAdmin) || 0));
+      prevUnreadCollab = Math.max(0, Math.round(Number(prev.unreadByCollab) || 0));
+      await updateDoc(channelRef, {
+        collabName: (params.collabName || String(prev.collabName || 'Collaborateur')).slice(0, 120),
+        lastMessageText: cleanText.slice(0, 500),
+        lastMessageAt: nowIso,
+        lastSenderUid: params.senderUid,
+        lastSenderName: params.senderName.slice(0, 120),
+        unreadByAdmin: params.isSenderSuperAdmin ? 0 : Math.min(10000, prevUnreadAdmin + 1),
+        unreadByCollab: params.isSenderSuperAdmin ? Math.min(10000, prevUnreadCollab + 1) : 0,
+        updatedAt: serverTimestamp(),
+      });
+    } else {
+      const channelDoc = sanitizeDirectChatChannelPayload({
+        collabUid: params.collabUid,
+        collabName: params.collabName,
+        collabEmail: params.collabEmail,
+        collabZone: params.collabZone,
+        lastMessageText: cleanText.slice(0, 500),
+        lastMessageAt: nowIso,
+        lastSenderUid: params.senderUid,
+        lastSenderName: params.senderName,
+        unreadByAdmin: params.isSenderSuperAdmin ? 0 : 1,
+        unreadByCollab: params.isSenderSuperAdmin ? 1 : 0,
+      });
+      await setDoc(channelRef, {
+        ...channelDoc,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+    }
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, `direct_chats/${params.collabUid}`);
+  }
+
+  const msgDoc = sanitizeDirectChatMessagePayload({
+    collabUid: params.collabUid,
+    senderUid: params.senderUid,
+    senderName: params.senderName,
+    senderRole: params.senderRole,
+    text: cleanText,
+    createdAtIso: nowIso,
+  });
+
+  try {
+    await setDoc(doc(db, 'direct_chats', params.collabUid, 'messages', msgDoc.id), {
+      ...msgDoc,
+      createdAt: serverTimestamp(),
+    });
+  } catch (error) {
+    handleFirestoreError(
+      error,
+      OperationType.CREATE,
+      `direct_chats/${params.collabUid}/messages/${msgDoc.id}`
+    );
+  }
+
+  if (params.recipientUidForNotification && params.recipientUidForNotification !== params.senderUid) {
+    await createCloudNotification({
+      recipientUid: params.recipientUidForNotification,
+      senderUid: params.senderUid,
+      senderName: params.senderName,
+      senderRole: params.senderRole,
+      kind: 'direct_message',
+      title: `Nouveau message de ${params.senderName}`,
+      message: cleanText.slice(0, 220),
+      ficheOwnerId: params.collabUid,
+      targetTab: params.isSenderSuperAdmin ? 'crm' : 'team',
+      createdAtIso: nowIso,
+    });
+  }
+
+  return msgDoc;
+}
+
+export async function markDirectChatRead(
+  collabUid: string,
+  readerRole: 'admin' | 'collab'
+): Promise<void> {
+  if (!collabUid) return;
+  const ref = doc(db, 'direct_chats', collabUid);
+  try {
+    const snap = await getDoc(ref);
+    if (!snap.exists()) return;
+    await updateDoc(ref, {
+      ...(readerRole === 'admin' ? { unreadByAdmin: 0 } : { unreadByCollab: 0 }),
+      updatedAt: serverTimestamp(),
+    });
+  } catch {
+    // Non-fatal
+  }
+}
+
+// =========================================================================
+// COACHING TERRAIN LIVE & PUSH-TO-TALK (WebRTC P2P + Firestore, 0 API externe)
+// Consentement explicite du collaborateur requis & indicateur visible obligatoire
+// =========================================================================
+
+export function getCoachingSessionsQuery() {
+  return query(collection(db, 'coaching_sessions'), where('orgScope', '==', 'orange_pro_team'));
+}
+
+export function getCoachingSessionDocRef(collabUid: string) {
+  return doc(db, 'coaching_sessions', collabUid);
+}
+
+export function getCoachingCandidatesQuery(collabUid: string) {
+  return collection(db, 'coaching_sessions', collabUid, 'candidates');
+}
+
+export async function clearCoachingCandidates(collabUid: string): Promise<void> {
+  try {
+    const snap = await getDocs(collection(db, 'coaching_sessions', collabUid, 'candidates'));
+    if (snap.empty) return;
+    const batch = writeBatch(db);
+    snap.forEach((docSnap) => {
+      batch.delete(docSnap.ref);
+    });
+    await batch.commit();
+  } catch {
+    // Non-fatal
+  }
+}
+
+export async function setCollaboratorCoachingState(
+  collabUid: string,
+  input: Omit<CoachingSessionLike, 'collabUid'>
+): Promise<SanitizedCoachingSessionDoc> {
+  const clean = sanitizeCoachingSessionPayload({
+    ...input,
+    collabUid,
+    updatedAtIso: new Date().toISOString(),
+  });
+  const ref = doc(db, 'coaching_sessions', collabUid);
+  try {
+    const snap = await getDoc(ref);
+    if (snap.exists()) {
+      await updateDoc(ref, {
+        collabName: clean.collabName,
+        status: clean.status,
+        collabConsentActive: clean.collabConsentActive,
+        offerSdp: clean.offerSdp ?? '',
+        ...(clean.answerSdp !== undefined ? { answerSdp: clean.answerSdp } : {}),
+        ...(clean.adminPttActive !== undefined ? { adminPttActive: clean.adminPttActive } : {}),
+        updatedAtIso: clean.updatedAtIso,
+        updatedAt: serverTimestamp(),
+      });
+    } else {
+      await setDoc(ref, {
+        ...clean,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+    }
+    return clean;
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, `coaching_sessions/${collabUid}`);
+  }
+}
+
+export async function setAdminCoachingState(
+  collabUid: string,
+  updates: {
+    status?: 'live' | 'collab_ready' | 'ended';
+    adminUid?: string;
+    adminName?: string;
+    adminPttActive?: boolean;
+    answerSdp?: string;
+  }
+): Promise<void> {
+  const ref = doc(db, 'coaching_sessions', collabUid);
+  const path = `coaching_sessions/${collabUid}`;
+  try {
+    const payload: DocumentData = {
+      updatedAtIso: new Date().toISOString(),
+      updatedAt: serverTimestamp(),
+    };
+    if (updates.status !== undefined) payload.status = updates.status;
+    if (updates.adminUid !== undefined) payload.adminUid = updates.adminUid;
+    if (updates.adminName !== undefined) payload.adminName = updates.adminName.slice(0, 120);
+    if (updates.adminPttActive !== undefined) payload.adminPttActive = updates.adminPttActive;
+    if (updates.answerSdp !== undefined) payload.answerSdp = updates.answerSdp.slice(0, 24000);
+    await updateDoc(ref, payload);
+  } catch (error) {
+    handleFirestoreError(error, OperationType.UPDATE, path);
+  }
+}
+
+export async function addCoachingIceCandidate(
+  collabUid: string,
+  input: CoachingCandidateLike
+): Promise<SanitizedCoachingCandidateDoc | null> {
+  const clean = sanitizeCoachingCandidatePayload({
+    ...input,
+    createdAtIso: new Date().toISOString(),
+  });
+  try {
+    await setDoc(doc(db, 'coaching_sessions', collabUid, 'candidates', clean.id), {
+      ...clean,
+      createdAt: serverTimestamp(),
+    });
+    return clean;
+  } catch {
+    return null;
+  }
+}
+
 

@@ -16,7 +16,9 @@ export type NotificationKind =
   | 'fiche_assigned'
   | 'fiche_accessed'
   | 'fiche_restored'
-  | 'fiche_updated';
+  | 'fiche_updated'
+  | 'direct_message'
+  | 'coaching_invite';
 
 export interface ContractNotificationMeta {
   contractId: string;
@@ -297,8 +299,19 @@ export function mapCloudNotificationDocToAppNotification(
     fiche_restored: 'rare',
     fiche_updated: 'commun',
     contract_signed: 'epique',
-    contract_status_changed: 'rare',
+    contract_status_changed:
+      doc.payoutStatus === 'Versé'
+        ? 'legendaire'
+        : doc.payoutStatus === 'Validé'
+          ? 'epique'
+          : doc.payoutStatus === 'Refusé'
+            ? 'commun'
+            : 'rare',
+    direct_message: 'rare',
+    coaching_invite: 'legendaire',
   };
+
+  const isContractKind = doc.kind === 'contract_signed' || doc.kind === 'contract_status_changed';
 
   return {
     id: `cloud_${doc.id}`,
@@ -311,7 +324,20 @@ export function mapCloudNotificationDocToAppNotification(
     xpBoost: 0,
     createdAt: doc.createdAtIso,
     read: Boolean(doc.read),
-    targetTab: doc.targetTab || (doc.kind === 'fiche_accessed' ? 'team' : 'crm'),
+    targetTab:
+      doc.targetTab ||
+      (isContractKind || doc.kind === 'fiche_accessed' ? 'team' : 'crm'),
+    contractMeta: isContractKind
+      ? {
+          contractId: doc.id,
+          ownerId: doc.ficheOwnerId || doc.recipientUid,
+          ownerName: doc.senderName,
+          societe: doc.societe || doc.title,
+          produitOrangePro: 'Orange Pro',
+          payoutMad: typeof doc.payoutMad === 'number' ? doc.payoutMad : 0,
+          payoutStatus: doc.payoutStatus || 'En attente',
+        }
+      : undefined,
     ficheMeta: doc.ficheId
       ? {
           ficheId: doc.ficheId,
@@ -474,6 +500,26 @@ export function getNotificationSoundProfile(
         notesHz: [392.0, 493.88, 587.33, 783.99], // G4 -> B4 -> D5 -> G5 noble brassy triad
         stepSec: 0.095,
         noteDurationSec: 0.32,
+        gainPeak: 0.075,
+      };
+    case 'direct_message':
+      return {
+        profileKey: 'direct_message',
+        label: 'Message direct Direction',
+        waveform: 'sine',
+        notesHz: [622.25, 932.33], // D#5 -> A#5 crisp chat pop
+        stepSec: 0.055,
+        noteDurationSec: 0.17,
+        gainPeak: 0.06,
+      };
+    case 'coaching_invite':
+      return {
+        profileKey: 'coaching_invite',
+        label: 'Invitation Coaching Terrain Live',
+        waveform: 'triangle',
+        notesHz: [523.25, 783.99, 1046.5, 1567.98], // C5 -> G5 -> C6 -> G6 resonant call chime
+        stepSec: 0.085,
+        noteDurationSec: 0.28,
         gainPeak: 0.075,
       };
     case 'distinction_awarded':

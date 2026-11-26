@@ -1034,7 +1034,7 @@
         },
         "kind": {
           "type": "string",
-          "enum": ["fiche_assigned", "fiche_accessed", "fiche_restored", "fiche_updated", "contract_signed", "contract_status_changed"]
+          "enum": ["fiche_assigned", "fiche_accessed", "fiche_restored", "fiche_updated", "contract_signed", "contract_status_changed", "direct_message", "coaching_invite"]
         },
         "title": {
           "type": "string",
@@ -1060,6 +1060,13 @@
         "societe": {
           "type": "string",
           "maxLength": 200
+        },
+        "payoutStatus": {
+          "type": "string",
+          "enum": ["En attente", "Validé", "Versé", "Refusé"]
+        },
+        "payoutMad": {
+          "type": "number"
         },
         "targetTab": {
           "type": "string",
@@ -1095,6 +1102,105 @@
         "createdAt",
         "updatedAt"
       ]
+    },
+    "FicheAuditLog": {
+      "title": "FicheAuditLog",
+      "description": "Entrée immuable du journal d'audit pour chaque modification, attribution, restitution, signature ou consultation d'une fiche.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "ownerId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "ficheId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "action": {
+          "type": "string",
+          "enum": ["creation", "modification", "statut", "secteur", "attribution", "restitution", "signature", "verification_web", "enrichissement", "devis", "rdv", "email", "acces"]
+        },
+        "field": { "type": "string", "maxLength": 64 },
+        "oldValue": { "type": "string", "maxLength": 300 },
+        "newValue": { "type": "string", "maxLength": 300 },
+        "summary": { "type": "string", "minLength": 1, "maxLength": 600 },
+        "actorUid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "actorName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "actorRole": { "type": "string", "maxLength": 40 },
+        "createdAtIso": { "type": "string", "maxLength": 64 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "ownerId", "ficheId", "action", "summary", "actorUid", "actorName", "createdAtIso", "createdAt", "updatedAt"]
+    },
+    "DirectChatChannel": {
+      "title": "DirectChatChannel",
+      "description": "Canal de discussion directe temps réel entre le Super-Admin et un collaborateur (zéro API externe).",
+      "type": "object",
+      "properties": {
+        "collabUid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "orgScope": { "type": "string", "enum": ["orange_pro_team"] },
+        "collabName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "lastMessagePreview": { "type": "string", "maxLength": 240 },
+        "lastMessageAtIso": { "type": "string", "maxLength": 64 },
+        "lastSenderUid": { "type": "string", "maxLength": 128 },
+        "unreadForAdmin": { "type": "integer" },
+        "unreadForCollab": { "type": "integer" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["collabUid", "orgScope", "collabName", "lastMessagePreview", "lastMessageAtIso", "lastSenderUid", "unreadForAdmin", "unreadForCollab", "createdAt", "updatedAt"]
+    },
+    "DirectChatMessage": {
+      "title": "DirectChatMessage",
+      "description": "Message temps réel dans un canal de discussion directe Super-Admin ↔ Collaborateur.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "channelUid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "orgScope": { "type": "string", "enum": ["orange_pro_team"] },
+        "senderUid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "senderName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "senderRole": { "type": "string", "maxLength": 40 },
+        "text": { "type": "string", "minLength": 1, "maxLength": 1500 },
+        "read": { "type": "boolean" },
+        "createdAtIso": { "type": "string", "maxLength": 64 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "channelUid", "orgScope", "senderUid", "senderName", "text", "read", "createdAtIso", "createdAt", "updatedAt"]
+    },
+    "CoachingSession": {
+      "title": "CoachingSession",
+      "description": "Session transparente et consentie de Coaching Terrain Live & Push-to-Talk (WebRTC P2P via signalisation Firestore, zéro API).",
+      "type": "object",
+      "properties": {
+        "collabUid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "orgScope": { "type": "string", "enum": ["orange_pro_team"] },
+        "collabName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "collabConsentActive": { "type": "boolean" },
+        "status": { "type": "string", "enum": ["idle", "ready", "active", "ended"] },
+        "adminUid": { "type": "string", "maxLength": 128 },
+        "adminName": { "type": "string", "maxLength": 120 },
+        "adminPttActive": { "type": "boolean" },
+        "offerSdp": { "type": "string", "maxLength": 16000 },
+        "answerSdp": { "type": "string", "maxLength": 16000 },
+        "startedAtIso": { "type": "string", "maxLength": 64 },
+        "updatedAtIso": { "type": "string", "maxLength": 64 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["collabUid", "orgScope", "collabName", "collabConsentActive", "status", "adminPttActive", "updatedAtIso", "createdAt", "updatedAt"]
+    },
+    "CoachingIceCandidate": {
+      "title": "CoachingIceCandidate",
+      "description": "Candidat ICE WebRTC pour la connexion audio P2P de Coaching Terrain.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "sessionUid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "senderRole": { "type": "string", "enum": ["collab", "admin"] },
+        "senderUid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "candidateJson": { "type": "string", "minLength": 1, "maxLength": 4000 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "sessionUid", "senderRole", "senderUid", "candidateJson", "createdAt", "updatedAt"]
     }
   },
   "firestore": {
@@ -1152,6 +1258,12 @@
       },
       "description": "Journal d'activité d'une fiche prospect (appels, emails, relances, RDV, devis)."
     },
+    "/users/{userId}/fiches/{ficheId}/audit_logs/{logId}": {
+      "schema": {
+        "$ref": "#/entities/FicheAuditLog"
+      },
+      "description": "Journal d'audit immuable de toutes les modifications, attributions, restitutions et actions sur une fiche prospect."
+    },
     "/users/{userId}/skills/{skillId}": {
       "schema": {
         "$ref": "#/entities/EmailSkill"
@@ -1162,7 +1274,31 @@
       "schema": {
         "$ref": "#/entities/AppNotification"
       },
-      "description": "Notifications temps réel inter-utilisateurs (attribution, accès fiche, restitution, contrats)."
+      "description": "Notifications temps réel inter-utilisateurs (attribution, accès fiche, restitution, contrats, discussion directe)."
+    },
+    "/direct_chats/{collabUid}": {
+      "schema": {
+        "$ref": "#/entities/DirectChatChannel"
+      },
+      "description": "Canal de discussion directe 1-à-1 entre le Super-Admin et un collaborateur."
+    },
+    "/direct_chats/{collabUid}/messages/{messageId}": {
+      "schema": {
+        "$ref": "#/entities/DirectChatMessage"
+      },
+      "description": "Messages temps réel d'un canal de discussion Super-Admin ↔ Collaborateur."
+    },
+    "/coaching_sessions/{collabUid}": {
+      "schema": {
+        "$ref": "#/entities/CoachingSession"
+      },
+      "description": "Session WebRTC P2P transparente et consentie de Coaching Terrain Live & Push-to-Talk."
+    },
+    "/coaching_sessions/{collabUid}/candidates/{candId}": {
+      "schema": {
+        "$ref": "#/entities/CoachingIceCandidate"
+      },
+      "description": "Candidats ICE WebRTC pour la session de Coaching Terrain."
     }
   }
 }

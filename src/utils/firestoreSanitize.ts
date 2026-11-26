@@ -249,6 +249,8 @@ export const VALID_CLOUD_NOTIFICATION_KINDS = new Set([
   'fiche_updated',
   'contract_signed',
   'contract_status_changed',
+  'direct_message',
+  'coaching_invite',
 ] as const);
 
 export type CloudNotificationKind =
@@ -257,7 +259,9 @@ export type CloudNotificationKind =
   | 'fiche_restored'
   | 'fiche_updated'
   | 'contract_signed'
-  | 'contract_status_changed';
+  | 'contract_status_changed'
+  | 'direct_message'
+  | 'coaching_invite';
 
 export interface CloudNotificationLike {
   id?: string;
@@ -272,6 +276,8 @@ export interface CloudNotificationLike {
   ficheOwnerId?: string;
   numeroFiche?: string;
   societe?: string;
+  payoutStatus?: string;
+  payoutMad?: number;
   targetTab?: 'crm' | 'team' | 'badges';
   read?: boolean;
   createdAtIso?: string;
@@ -291,8 +297,169 @@ export interface SanitizedCloudNotificationDoc {
   ficheOwnerId?: string;
   numeroFiche?: string;
   societe?: string;
+  payoutStatus?: 'En attente' | 'Validé' | 'Versé' | 'Refusé';
+  payoutMad?: number;
   targetTab?: 'crm' | 'team' | 'badges';
   read: boolean;
+  createdAtIso: string;
+}
+
+export const VALID_AUDIT_ACTIONS = new Set([
+  'created',
+  'field_updated',
+  'status_changed',
+  'assigned',
+  'restored',
+  'signed',
+  'accessed',
+  'activity_logged',
+  'rdv_scheduled',
+  'quote_generated',
+  'web_verified',
+  'enriched',
+] as const);
+
+export type FicheAuditAction =
+  | 'created'
+  | 'field_updated'
+  | 'status_changed'
+  | 'assigned'
+  | 'restored'
+  | 'signed'
+  | 'accessed'
+  | 'activity_logged'
+  | 'rdv_scheduled'
+  | 'quote_generated'
+  | 'web_verified'
+  | 'enriched';
+
+export interface FicheAuditLogLike {
+  id?: string;
+  ficheId?: string;
+  ownerId?: string;
+  action: string;
+  field?: string;
+  oldValue?: string;
+  newValue?: string;
+  summary: string;
+  actorUid: string;
+  actorName: string;
+  actorRole?: string;
+  createdAtIso?: string;
+}
+
+export interface SanitizedFicheAuditLogDoc {
+  id: string;
+  ficheId: string;
+  ownerId: string;
+  action: FicheAuditAction;
+  field?: string;
+  oldValue?: string;
+  newValue?: string;
+  summary: string;
+  actorUid: string;
+  actorName: string;
+  actorRole?: string;
+  createdAtIso: string;
+}
+
+export interface DirectChatChannelLike {
+  collabUid: string;
+  collabName: string;
+  collabEmail?: string;
+  collabZone?: string;
+  lastMessageText?: string;
+  lastMessageAt?: string;
+  lastSenderUid?: string;
+  lastSenderName?: string;
+  unreadByAdmin?: number;
+  unreadByCollab?: number;
+}
+
+export interface SanitizedDirectChatChannelDoc {
+  collabUid: string;
+  orgScope: 'orange_pro_team';
+  collabName: string;
+  collabEmail?: string;
+  collabZone?: string;
+  lastMessageText: string;
+  lastMessageAt: string;
+  lastSenderUid: string;
+  lastSenderName?: string;
+  unreadByAdmin: number;
+  unreadByCollab: number;
+}
+
+export interface DirectChatMessageLike {
+  id?: string;
+  collabUid: string;
+  senderUid: string;
+  senderName: string;
+  senderRole?: string;
+  text: string;
+  createdAtIso?: string;
+}
+
+export interface SanitizedDirectChatMessageDoc {
+  id: string;
+  collabUid: string;
+  orgScope: 'orange_pro_team';
+  senderUid: string;
+  senderName: string;
+  senderRole?: string;
+  text: string;
+  createdAtIso: string;
+}
+
+export const VALID_COACHING_STATUSES = new Set([
+  'idle',
+  'collab_ready',
+  'live',
+  'ended',
+] as const);
+
+export type CoachingSessionStatus = 'idle' | 'collab_ready' | 'live' | 'ended';
+
+export interface CoachingSessionLike {
+  collabUid: string;
+  collabName: string;
+  status: string;
+  collabConsentActive?: boolean;
+  adminUid?: string;
+  adminName?: string;
+  adminPttActive?: boolean;
+  offerSdp?: string;
+  answerSdp?: string;
+  updatedAtIso?: string;
+}
+
+export interface SanitizedCoachingSessionDoc {
+  collabUid: string;
+  orgScope: 'orange_pro_team';
+  collabName: string;
+  status: CoachingSessionStatus;
+  collabConsentActive: boolean;
+  adminUid?: string;
+  adminName?: string;
+  adminPttActive?: boolean;
+  offerSdp?: string;
+  answerSdp?: string;
+  updatedAtIso: string;
+}
+
+export interface CoachingCandidateLike {
+  id?: string;
+  senderUid: string;
+  fromRole: 'admin' | 'collab';
+  candidateJson: string;
+  createdAtIso?: string;
+}
+
+export interface SanitizedCoachingCandidateDoc {
+  id: string;
+  senderUid: string;
+  fromRole: 'admin' | 'collab';
+  candidateJson: string;
   createdAtIso: string;
 }
 
@@ -616,11 +783,165 @@ export function sanitizeCloudNotificationPayload(
   if (typeof input.societe === 'string' && input.societe.trim().length > 0) {
     doc.societe = clampString(input.societe.trim(), 200);
   }
+  if (typeof input.payoutStatus === 'string' && VALID_PAYOUT_STATUSES.has(input.payoutStatus as never)) {
+    doc.payoutStatus = input.payoutStatus as 'En attente' | 'Validé' | 'Versé' | 'Refusé';
+  }
+  if (typeof input.payoutMad === 'number' && Number.isFinite(input.payoutMad)) {
+    doc.payoutMad = Math.min(10000000, Math.max(0, Math.round(input.payoutMad)));
+  }
   if (input.targetTab === 'crm' || input.targetTab === 'team' || input.targetTab === 'badges') {
     doc.targetTab = input.targetTab;
   }
 
   return doc;
+}
+
+export function sanitizeFicheAuditLogPayload(
+  ownerId: string,
+  ficheId: string,
+  input: FicheAuditLogLike
+): SanitizedFicheAuditLogDoc {
+  const cleanOwnerId = sanitizeDocId(ownerId, 'user');
+  const cleanFicheId = sanitizeDocId(ficheId, 'op');
+  const cleanId = sanitizeDocId(
+    input.id || `aud_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`,
+    'aud'
+  );
+  const rawAction = clampString(input.action, 40).toLowerCase();
+  const action: FicheAuditAction = VALID_AUDIT_ACTIONS.has(rawAction as never)
+    ? (rawAction as FicheAuditAction)
+    : 'field_updated';
+  const rawSummary = clampString(input.summary?.trim?.() ?? '', 600);
+  const summary = rawSummary.length >= 1 ? rawSummary : 'Modification enregistrée';
+  const rawActorName = clampString(input.actorName?.trim?.() ?? '', 120);
+  const actorName = rawActorName.length >= 1 ? rawActorName : 'Collaborateur';
+
+  const doc: SanitizedFicheAuditLogDoc = {
+    id: cleanId,
+    ficheId: cleanFicheId,
+    ownerId: cleanOwnerId,
+    action,
+    summary,
+    actorUid: sanitizeDocId(input.actorUid, 'user'),
+    actorName,
+    createdAtIso: clampString(input.createdAtIso?.trim?.() ?? '', 64) || new Date().toISOString(),
+  };
+
+  if (typeof input.field === 'string' && input.field.trim().length > 0) {
+    doc.field = clampString(input.field.trim(), 80);
+  }
+  if (typeof input.oldValue === 'string') {
+    doc.oldValue = clampString(input.oldValue.trim(), 300);
+  }
+  if (typeof input.newValue === 'string') {
+    doc.newValue = clampString(input.newValue.trim(), 300);
+  }
+  if (typeof input.actorRole === 'string' && input.actorRole.trim().length > 0) {
+    doc.actorRole = clampString(input.actorRole.trim(), 40);
+  }
+
+  return doc;
+}
+
+export function sanitizeDirectChatChannelPayload(
+  input: DirectChatChannelLike
+): SanitizedDirectChatChannelDoc {
+  const cleanCollabUid = sanitizeDocId(input.collabUid, 'usr');
+  const rawName = clampString((input.collabName || '').trim(), 120);
+  const doc: SanitizedDirectChatChannelDoc = {
+    collabUid: cleanCollabUid,
+    orgScope: 'orange_pro_team',
+    collabName: rawName.length >= 1 ? rawName : 'Collaborateur',
+    lastMessageText: clampString((input.lastMessageText || '').trim(), 500),
+    lastMessageAt: clampString((input.lastMessageAt || '').trim(), 64) || new Date().toISOString(),
+    lastSenderUid: input.lastSenderUid ? sanitizeDocId(input.lastSenderUid, 'usr') : '',
+    unreadByAdmin: Math.min(10000, Math.max(0, Math.round(Number(input.unreadByAdmin) || 0))),
+    unreadByCollab: Math.min(10000, Math.max(0, Math.round(Number(input.unreadByCollab) || 0))),
+  };
+  if (typeof input.collabEmail === 'string' && input.collabEmail.trim().length > 0) {
+    doc.collabEmail = clampString(input.collabEmail.trim().toLowerCase(), 160);
+  }
+  if (typeof input.collabZone === 'string' && input.collabZone.trim().length > 0) {
+    doc.collabZone = clampString(input.collabZone.trim(), 100);
+  }
+  if (typeof input.lastSenderName === 'string' && input.lastSenderName.trim().length > 0) {
+    doc.lastSenderName = clampString(input.lastSenderName.trim(), 120);
+  }
+  return doc;
+}
+
+export function sanitizeDirectChatMessagePayload(
+  input: DirectChatMessageLike
+): SanitizedDirectChatMessageDoc {
+  const cleanId = sanitizeDocId(
+    input.id || `msg_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`,
+    'msg'
+  );
+  const rawSenderName = clampString((input.senderName || '').trim(), 120);
+  const rawText = clampString((input.text || '').trim(), 2000);
+  const doc: SanitizedDirectChatMessageDoc = {
+    id: cleanId,
+    collabUid: sanitizeDocId(input.collabUid, 'usr'),
+    orgScope: 'orange_pro_team',
+    senderUid: sanitizeDocId(input.senderUid, 'usr'),
+    senderName: rawSenderName.length >= 1 ? rawSenderName : 'Utilisateur',
+    text: rawText.length >= 1 ? rawText : '...',
+    createdAtIso: clampString((input.createdAtIso || '').trim(), 64) || new Date().toISOString(),
+  };
+  if (typeof input.senderRole === 'string' && input.senderRole.trim().length > 0) {
+    doc.senderRole = clampString(input.senderRole.trim(), 40);
+  }
+  return doc;
+}
+
+export function sanitizeCoachingSessionPayload(
+  input: CoachingSessionLike
+): SanitizedCoachingSessionDoc {
+  const rawStatus = clampString(input.status, 32).toLowerCase();
+  const status: CoachingSessionStatus = VALID_COACHING_STATUSES.has(rawStatus as never)
+    ? (rawStatus as CoachingSessionStatus)
+    : 'idle';
+  const rawName = clampString((input.collabName || '').trim(), 120);
+  const doc: SanitizedCoachingSessionDoc = {
+    collabUid: sanitizeDocId(input.collabUid, 'usr'),
+    orgScope: 'orange_pro_team',
+    collabName: rawName.length >= 1 ? rawName : 'Collaborateur',
+    status,
+    collabConsentActive: Boolean(input.collabConsentActive),
+    updatedAtIso: clampString((input.updatedAtIso || '').trim(), 64) || new Date().toISOString(),
+  };
+  if (typeof input.adminUid === 'string') {
+    doc.adminUid = input.adminUid.trim() ? sanitizeDocId(input.adminUid, 'usr') : '';
+  }
+  if (typeof input.adminName === 'string') {
+    doc.adminName = clampString(input.adminName.trim(), 120);
+  }
+  if (typeof input.adminPttActive === 'boolean') {
+    doc.adminPttActive = input.adminPttActive;
+  }
+  if (typeof input.offerSdp === 'string') {
+    doc.offerSdp = clampString(input.offerSdp, 24000);
+  }
+  if (typeof input.answerSdp === 'string') {
+    doc.answerSdp = clampString(input.answerSdp, 24000);
+  }
+  return doc;
+}
+
+export function sanitizeCoachingCandidatePayload(
+  input: CoachingCandidateLike
+): SanitizedCoachingCandidateDoc {
+  const cleanId = sanitizeDocId(
+    input.id || `ice_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`,
+    'ice'
+  );
+  return {
+    id: cleanId,
+    senderUid: sanitizeDocId(input.senderUid, 'usr'),
+    fromRole: input.fromRole === 'admin' ? 'admin' : 'collab',
+    candidateJson: clampString(input.candidateJson || '{}', 2000),
+    createdAtIso: clampString((input.createdAtIso || '').trim(), 64) || new Date().toISOString(),
+  };
 }
 
 export function sanitizeSkillPayload(ownerId: string, skill: EmailSkillLike): SanitizedEmailSkillDoc {
