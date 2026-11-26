@@ -910,14 +910,18 @@ service cloud.firestore {
             && (!('email' in existing()) || !(existing().email is string) || incoming().email.lower() == existing().email.lower() || userId == request.auth.uid)
           )
           ||
-          // Action 2: Collaborator updates own profile, device list, and live attendance status (role & email immutable)
+          // Action 2: Collaborator updates own profile, device list, and live attendance status (role & email strictly bound)
           (
             isOwner(userId)
             && incoming().uid == request.auth.uid
-            && (!('uid' in existing()) || incoming().uid == existing().uid)
-            && (!('orgScope' in existing()) || incoming().orgScope == existing().orgScope)
-            && (!('email' in existing()) || !(existing().email is string) || incoming().email.lower() == existing().email.lower())
-            && (!('role' in existing()) || incoming().role == existing().role)
+            && (!('uid' in existing()) || !(existing().uid is string) || existing().uid == '' || incoming().uid == existing().uid)
+            && (!('orgScope' in existing()) || !(existing().orgScope is string) || existing().orgScope != 'orange_pro_team' || incoming().orgScope == existing().orgScope)
+            && (!('email' in existing()) || !(existing().email is string) || existing().email.size() < 3 || incoming().email.lower() == existing().email.lower())
+            && (
+              !('role' in existing())
+              || incoming().role == existing().role
+              || incoming().role == get(/databases/$(database)/documents/app_users/$(userId)).data.role
+            )
             && (
               (
                 'activeDateKey' in existing()
@@ -964,6 +968,17 @@ service cloud.firestore {
                 'activeDateKey', 'todayWorkedSeconds', 'totalWorkedSeconds',
                 'currentSessionId', 'updatedAt'
               ])
+              || (
+                incoming().diff(existing()).affectedKeys().hasOnly([
+                  'displayName', 'firstName', 'lastName', 'phonePro', 'avatarDataUrl',
+                  'role', 'zone', 'isOnline', 'currentDevice', 'devicesUsed',
+                  'lastLoginAt', 'lastLogoutAt', 'lastSeenAt', 'lastWorkDisconnectAt',
+                  'workHoursDisconnectCount', 'workHoursDisconnectTimes',
+                  'activeDateKey', 'todayWorkedSeconds', 'totalWorkedSeconds',
+                  'currentSessionId', 'updatedAt'
+                ])
+                && incoming().role == get(/databases/$(database)/documents/app_users/$(userId)).data.role
+              )
               || (
                 !isValidUserPresence(existing(), userId)
                 && incoming().role == get(/databases/$(database)/documents/app_users/$(userId)).data.role

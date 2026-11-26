@@ -1336,6 +1336,32 @@ function withPresenceStepTag(err: unknown, stepInfo: string): Error {
   return new Error(`${baseMsg} [${stepInfo}]`);
 }
 
+function summarizePresenceDiag(
+  expectedUid: string,
+  clean: SanitizedUserPresenceDoc,
+  existing?: DocumentData
+): string {
+  const exRole = existing && typeof existing.role === 'string' ? existing.role : 'none';
+  const exEmailOk =
+    existing && typeof existing.email === 'string' ? existing.email.length >= 3 : false;
+  return [
+    `uidEq=${clean.uid === expectedUid}`,
+    `role=${clean.role}`,
+    `exRole=${exRole}`,
+    `exEmailOk=${exEmailOk}`,
+    `emailLen=${clean.email.length}`,
+    `nameLen=${clean.displayName.length}`,
+    `zoneLen=${clean.zone.length}`,
+    `devLen=${clean.currentDevice.length}`,
+    `devs=${clean.devicesUsed.length}`,
+    `disc=${clean.workHoursDisconnectTimes.length}`,
+    `today=${clean.todayWorkedSeconds}`,
+    `total=${clean.totalWorkedSeconds}`,
+    `sessLen=${clean.currentSessionId.length}`,
+    `avatarLen=${clean.avatarDataUrl.length}`,
+  ].join(';');
+}
+
 function buildRepairedUserPresenceDoc(
   params: {
     uid: string;
@@ -1373,7 +1399,11 @@ function buildRepairedUserPresenceDoc(
     lastName: params.lastName,
     phonePro: params.phonePro,
     avatarDataUrl: params.avatarDataUrl,
-    role: typeof prev.role === 'string' ? prev.role : params.role,
+    role: VALID_TEAM_ROLES.has(params.role as never)
+      ? params.role
+      : typeof prev.role === 'string'
+        ? prev.role
+        : params.role,
     zone: params.zone,
     isOnline:
       overrides.isOnline !== undefined
@@ -1483,6 +1513,7 @@ export async function syncMyUserPresenceProfile(params: {
     let diagHadTs = false;
     let diagExtraCount = 0;
     let diagMissingCount = 0;
+    let diagPayloadSummary = summarizePresenceDiag(params.uid, cleanProfile);
     try {
       const snap = await getDocFromServer(ref).catch(() => getDoc(ref));
 
@@ -1524,6 +1555,7 @@ export async function syncMyUserPresenceProfile(params: {
             lastSeenAt: cleanProfile.lastSeenAt,
           }
         );
+        diagPayloadSummary = summarizePresenceDiag(params.uid, repaired, freshData);
         await repairExistingUserPresenceDoc(ref, freshData, repaired);
       };
 
@@ -1562,6 +1594,7 @@ export async function syncMyUserPresenceProfile(params: {
 
       if (hasCoreSchema) {
         diagStep = 'fast_update';
+        diagPayloadSummary = summarizePresenceDiag(params.uid, cleanProfile, prev);
         try {
           await updateDoc(ref, {
             displayName: cleanProfile.displayName,
@@ -1569,6 +1602,7 @@ export async function syncMyUserPresenceProfile(params: {
             lastName: cleanProfile.lastName,
             phonePro: cleanProfile.phonePro,
             avatarDataUrl: cleanProfile.avatarDataUrl,
+            ...(prev.role !== cleanProfile.role ? { role: cleanProfile.role } : {}),
             zone: cleanProfile.zone,
             isOnline: true,
             lastSeenAt: cleanProfile.lastSeenAt,
@@ -1585,7 +1619,7 @@ export async function syncMyUserPresenceProfile(params: {
     } catch (innerErr) {
       throw withPresenceStepTag(
         innerErr,
-        `step=${diagStep};exists=${diagExisted};hadTs=${diagHadTs};miss=${diagMissingCount};extra=${diagExtraCount}`
+        `step=${diagStep};exists=${diagExisted};hadTs=${diagHadTs};miss=${diagMissingCount};extra=${diagExtraCount};${diagPayloadSummary}`
       );
     }
   };
@@ -1647,6 +1681,7 @@ export async function startAttendanceSession(params: {
     let diagHadTs = false;
     let diagExtraCount = 0;
     let diagMissingCount = 0;
+    let diagPayloadSummary = '';
 
     try {
       const snap = await getDocFromServer(presRef).catch(() => getDoc(presRef));
@@ -1701,8 +1736,9 @@ export async function startAttendanceSession(params: {
           lastName,
           phonePro: params.phonePro,
           avatarDataUrl: params.avatarDataUrl,
-          role:
-            base && typeof base.role === 'string' && VALID_TEAM_ROLES.has(base.role as never)
+          role: VALID_TEAM_ROLES.has(params.role as never)
+            ? params.role
+            : base && typeof base.role === 'string' && VALID_TEAM_ROLES.has(base.role as never)
               ? base.role
               : params.role,
           zone: params.zone,
@@ -1729,6 +1765,7 @@ export async function startAttendanceSession(params: {
           diagStep = 'selfHeal_create';
           diagExisted = false;
           const freshPres = computePayloadFromBase(null);
+          diagPayloadSummary = summarizePresenceDiag(params.uid, freshPres);
           await setDoc(presRef, {
             ...freshPres,
             createdAt: serverTimestamp(),
@@ -1744,6 +1781,7 @@ export async function startAttendanceSession(params: {
         diagExtraCount = extraKeys.length;
         diagStep = 'selfHeal_repair_update';
         const repairedPres = computePayloadFromBase(freshData);
+        diagPayloadSummary = summarizePresenceDiag(params.uid, repairedPres, freshData);
         await repairExistingUserPresenceDoc(presRef, freshData, repairedPres);
       };
 
@@ -1790,6 +1828,7 @@ export async function startAttendanceSession(params: {
         }
 
         const cleanPres = computePayloadFromBase(prev);
+        diagPayloadSummary = summarizePresenceDiag(params.uid, cleanPres, prev);
         const { missingDataKeys, extraKeys } = inspectUserPresenceDocKeys(prev);
         diagMissingCount = missingDataKeys.length;
         diagExtraCount = extraKeys.length;
@@ -1813,6 +1852,7 @@ export async function startAttendanceSession(params: {
               lastName: cleanPres.lastName,
               phonePro: cleanPres.phonePro,
               avatarDataUrl: cleanPres.avatarDataUrl,
+              ...(prev.role !== cleanPres.role ? { role: cleanPres.role } : {}),
               zone: cleanPres.zone,
               isOnline: true,
               currentDevice: cleanPres.currentDevice,
@@ -1848,6 +1888,7 @@ export async function startAttendanceSession(params: {
         diagStep = 'create_new';
         diagExisted = false;
         const cleanPres = computePayloadFromBase(null);
+        diagPayloadSummary = summarizePresenceDiag(params.uid, cleanPres);
         try {
           await setDoc(presRef, {
             ...cleanPres,
@@ -1863,7 +1904,7 @@ export async function startAttendanceSession(params: {
     } catch (innerErr) {
       throw withPresenceStepTag(
         innerErr,
-        `step=${diagStep};exists=${diagExisted};hadTs=${diagHadTs};miss=${diagMissingCount};extra=${diagExtraCount}`
+        `step=${diagStep};exists=${diagExisted};hadTs=${diagHadTs};miss=${diagMissingCount};extra=${diagExtraCount}${diagPayloadSummary ? `;${diagPayloadSummary}` : ''}`
       );
     }
   };

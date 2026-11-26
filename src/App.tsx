@@ -4380,7 +4380,7 @@ export default function App() {
     const handleUserInteractionHeartbeat = () => {
       if (document.visibilityState === 'hidden' || navigator.onLine === false) return;
       const now = Date.now();
-      if (now - lastNetworkHeartbeatMsRef.current >= 45_000) {
+      if (now - lastNetworkHeartbeatMsRef.current >= 20_000) {
         accumulateElapsed(true, true);
       }
     };
