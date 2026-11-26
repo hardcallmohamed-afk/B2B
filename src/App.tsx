@@ -129,6 +129,17 @@ import {
   type FieldActivityStatus,
 } from './utils/attendance';
 import {
+  ALL_MOROCCO_CITY_NAMES,
+  MOROCCO_CITIES_CATALOG,
+  MOROCCO_REGIONS,
+  detectMoroccoGeographyFromCoordinates,
+  doesCityBelongToRegion,
+  filterCitiesByRegion,
+  mergeWithAllMoroccanCities,
+  resolveCityAndRegionFromZoneString,
+  type DetectedLocationGeography,
+} from './utils/moroccoCities';
+import {
   auth,
   db,
   signOutUser,
@@ -432,13 +443,7 @@ export const DEFAULT_VILLES_MEKNES = [
   'Sebaa Ayoune',
 ];
 
-const ALL_MOROCCAN_CITIES = [
-  ...DEFAULT_VILLES_MEKNES,
-  'Fès', 'Rabat', 'Salé', 'Témara', 'Casablanca', 'Mohammedia', 'Kénitra', 'Tanger',
-  'Tétouan', 'Marrakech', 'Agadir', 'Oujda', 'Sefrou', 'Khémisset', 'Sidi Kacem',
-  'Sidi Slimane', 'Béni Mellal', 'Khénifra', 'Errachidia', 'El Jadida', 'Safi',
-  'Essaouira', 'Nador', 'Settat', 'Berrechid',
-];
+const ALL_MOROCCAN_CITIES = ALL_MOROCCO_CITY_NAMES;
 
 // ============================================================================
 // 2. NETTOYAGE, NORMALISATION, FILTRAGE ANTI-BRUIT & SCORING ORANGE PRO
@@ -2762,7 +2767,7 @@ export default function App() {
     return () => document.removeEventListener('mousedown', handleOutside);
   }, [profileMenuOpen]);
 
-  // 2. Panneau Villes Cibles persistant
+  // 2. Panneau Villes Cibles persistant (Intègre l'ensemble des villes du Maroc + filtrage par Région + détection GPS automatique)
   const [villesState, setVillesState] = useState<{
     all: string[];
     active: string[];
@@ -2774,11 +2779,15 @@ export default function App() {
       if (raw) {
         const parsed = JSON.parse(raw);
         if (Array.isArray(parsed?.all) && parsed.all.length > 0) {
+          const mergedAll = mergeWithAllMoroccanCities(parsed.all);
           return {
-            all: parsed.all,
-            active: Array.isArray(parsed.active) ? parsed.active : parsed.all,
+            all: mergedAll,
+            active: Array.isArray(parsed.active) && parsed.active.length > 0 ? parsed.active : DEFAULT_VILLES_MEKNES,
             mode: parsed.mode === 'filter' ? 'filter' : 'default',
-            defaultVille: typeof parsed.defaultVille === 'string' && parsed.defaultVille ? parsed.defaultVille : parsed.all[0],
+            defaultVille:
+              typeof parsed.defaultVille === 'string' && parsed.defaultVille
+                ? parsed.defaultVille
+                : 'Meknès',
           };
         }
       }
@@ -2786,12 +2795,16 @@ export default function App() {
       // Fallback
     }
     return {
-      all: DEFAULT_VILLES_MEKNES,
+      all: ALL_MOROCCO_CITY_NAMES,
       active: DEFAULT_VILLES_MEKNES,
       mode: 'default',
       defaultVille: 'Meknès',
     };
   });
+
+  const [villesRegionFilter, setVillesRegionFilter] = useState<string>('all');
+  const [detectedGeoState, setDetectedGeoState] = useState<DetectedLocationGeography | null>(null);
+  const autoAppliedGeoRegionRef = useRef<string>('');
 
   useEffect(() => {
     try {
@@ -2801,7 +2814,10 @@ export default function App() {
     }
   }, [villesState]);
 
-  const allVilles = villesState.all;
+  const allVilles = useMemo(
+    () => mergeWithAllMoroccanCities(villesState.all),
+    [villesState.all]
+  );
   const activeVilles = villesState.active;
   const modeVille = villesState.mode;
   const defaultVille = villesState.defaultVille;
@@ -2919,7 +2935,9 @@ export default function App() {
   const [search, setSearch] = useState('');
   const [couleurFilter, setCouleurFilter] = useState<SegmentCouleur | ''>('');
   const [secteurFilter, setSecteurFilter] = useState<SecteurCode | ''>('');
+  const [regionFilter, setRegionFilter] = useState<string>('');
   const [villeFilter, setVilleFilter] = useState<string>('');
+  const [quickAddRegionFilter, setQuickAddRegionFilter] = useState<string>('all');
   const [tierFilter, setTierFilter] = useState<'' | 'Grand Compte' | 'PME' | 'TPE / Libéral'>('');
   const [effectifFilter, setEffectifFilter] = useState<'' | 'tpe' | 'pme' | 'gc' | 'vide'>('');
   const [completudeFilter, setCompletudeFilter] = useState<
@@ -3631,6 +3649,41 @@ export default function App() {
         liveFieldContextRef.current.lng = nextLng;
         liveFieldContextRef.current.accuracyMeters = fix.accuracyMeters;
         liveFieldContextRef.current.speedKmh = spdKmh;
+
+        // Détection automatique de la Ville, de la Grande Ville la plus proche (Ville par défaut) et de la Région
+        const geo = detectMoroccoGeographyFromCoordinates(nextLat, nextLng);
+        setDetectedGeoState((prevGeo) => {
+          if (
+            prevGeo &&
+            prevGeo.nearestCity === geo.nearestCity &&
+            prevGeo.nearestMajorCity === geo.nearestMajorCity &&
+            prevGeo.regionId === geo.regionId
+          ) {
+            return prevGeo;
+          }
+          return geo;
+        });
+
+        // Mise à jour automatique de la zone publique (Ville · Région) visible par les autres collaborateurs et rôles
+        if (activeAttendanceRef.current && activeAttendanceRef.current.uid === uid) {
+          activeAttendanceRef.current.zone = geo.collaboratorPublicZoneLabel;
+        }
+
+        // Application automatique de la région détectée aux Villes Cibles et de la Grande Ville la plus proche à la Ville par défaut
+        if (autoAppliedGeoRegionRef.current !== `${geo.regionId}:${geo.nearestMajorCity}`) {
+          autoAppliedGeoRegionRef.current = `${geo.regionId}:${geo.nearestMajorCity}`;
+          setVillesRegionFilter(geo.regionId);
+          setVillesState((prev) => ({
+            ...prev,
+            all: mergeWithAllMoroccanCities(prev.all),
+            active: geo.regionalCities.length > 0 ? geo.regionalCities : prev.active,
+            defaultVille: geo.nearestMajorCity,
+          }));
+          setUserProfile((prev) => {
+            if (prev.zone === geo.collaboratorPublicZoneLabel) return prev;
+            return { ...prev, zone: geo.collaboratorPublicZoneLabel };
+          });
+        }
       },
     });
 
@@ -4002,8 +4055,8 @@ export default function App() {
       if (nextHash !== knownCloudWorkspaceHashRef.current) {
         knownCloudWorkspaceHashRef.current = nextHash;
         setVillesState({
-          all: cleanWs.villesAll.length > 0 ? cleanWs.villesAll : DEFAULT_VILLES_MEKNES,
-          active: cleanWs.villesActive,
+          all: mergeWithAllMoroccanCities(cleanWs.villesAll),
+          active: cleanWs.villesActive.length > 0 ? cleanWs.villesActive : DEFAULT_VILLES_MEKNES,
           mode: cleanWs.modeVille,
           defaultVille: cleanWs.defaultVille,
         });
@@ -5131,12 +5184,14 @@ export default function App() {
   }, [fiches]);
 
   const availableVillesInData = useMemo(() => {
-    const set = new Set<string>();
+    const set = new Set<string>(allVilles);
     fiches.forEach((f) => {
       if (f.ville.trim()) set.add(f.ville.trim());
     });
-    return Array.from(set).sort((a, b) => a.localeCompare(b));
-  }, [fiches]);
+    const list = Array.from(set).sort((a, b) => a.localeCompare(b));
+    if (!regionFilter) return list;
+    return list.filter((city) => doesCityBelongToRegion(city, regionFilter));
+  }, [fiches, allVilles, regionFilter]);
 
   const availableSourcesInData = useMemo(() => {
     const set = new Set<string>();
@@ -5165,6 +5220,7 @@ export default function App() {
     search.trim() ||
       couleurFilter ||
       secteurFilter ||
+      regionFilter ||
       villeFilter ||
       tierFilter ||
       effectifFilter ||
@@ -5179,6 +5235,7 @@ export default function App() {
     setSearch('');
     setCouleurFilter('');
     setSecteurFilter('');
+    setRegionFilter('');
     setVilleFilter('');
     setTierFilter('');
     setEffectifFilter('');
@@ -5194,6 +5251,7 @@ export default function App() {
     const list = accessibleFiches.filter((f) => {
       if (couleurFilter && SECTEURS_META[f.secteur]?.couleur !== couleurFilter) return false;
       if (secteurFilter && f.secteur !== secteurFilter) return false;
+      if (regionFilter && !doesCityBelongToRegion(f.ville, regionFilter)) return false;
       if (villeFilter && stripAccents(f.ville) !== stripAccents(villeFilter)) return false;
       if (statutFilter && f.statut !== statutFilter) return false;
       if (tierFilter && getOrangeProRecommendation(f).tier !== tierFilter) return false;
@@ -7860,17 +7918,78 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
           </section>
         )}
 
-        {/* Panneau Villes Cibles Persistant */}
-        <section className="bg-white rounded-xl border border-stone-200 p-4 space-y-3">
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <div className="flex items-center gap-2">
-              <MapPin className="w-4 h-4 text-orange-600" />
+        {/* Panneau Villes Cibles Persistant — Intègre l'ensemble des villes du Maroc, le filtrage par Région à part et la synchronisation GPS automatique */}
+        <section
+          data-testid="villes-cibles-panel"
+          className="bg-white rounded-xl border border-stone-200 p-4 space-y-3"
+        >
+          <div className="flex flex-wrap items-center justify-between gap-2.5">
+            <div className="flex flex-wrap items-center gap-2">
+              <MapPin className="w-4 h-4 text-orange-600 shrink-0" />
               <h2 className="text-xs font-bold text-stone-800 tabular-nums">
                 Villes Cibles ({activeVilles.length}/{allVilles.length})
               </h2>
+              {detectedGeoState ? (
+                <span
+                  data-testid="detected-geo-availability-badge"
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-200 bg-emerald-50 px-2.5 py-0.5 text-[11px] font-semibold text-emerald-900"
+                >
+                  <span>
+                    Localisation détectée : <strong>{detectedGeoState.nearestCity}</strong> · Région{' '}
+                    <strong>{detectedGeoState.regionLabel}</strong> (Grande ville :{' '}
+                    <strong>{detectedGeoState.nearestMajorCity}</strong>)
+                  </span>
+                </span>
+              ) : (
+                <span
+                  data-testid="detected-geo-availability-badge"
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-orange-200 bg-orange-50/70 px-2.5 py-0.5 text-[11px] font-semibold text-orange-900"
+                >
+                  <span>
+                    Disponibilité Services Orange Pro :{' '}
+                    <strong>
+                      {resolveCityAndRegionFromZoneString(userProfile.zone || defaultVille).formattedZone}
+                    </strong>
+                  </span>
+                </span>
+              )}
             </div>
 
             <div className="flex flex-wrap items-center gap-2 text-xs">
+              {/* Filtrage de la Région à part */}
+              <div className="flex items-center gap-1.5 bg-stone-50 px-2.5 py-1 rounded-lg border border-stone-200">
+                <span className="font-semibold text-stone-600 whitespace-nowrap">Région :</span>
+                <select
+                  aria-label="Filtrer les villes cibles par région"
+                  data-testid="villes-cibles-region-select"
+                  value={villesRegionFilter}
+                  onChange={(e) => {
+                    const nextReg = e.target.value;
+                    setVillesRegionFilter(nextReg);
+                    if (nextReg !== 'all') {
+                      const regMeta = MOROCCO_REGIONS.find((r) => r.id === nextReg);
+                      const regCities = filterCitiesByRegion(nextReg, allVilles);
+                      setVillesState((prev) => ({
+                        ...prev,
+                        active: regCities.length > 0 ? regCities : prev.active,
+                        defaultVille: regMeta?.majorCity || regCities[0] || prev.defaultVille,
+                      }));
+                    }
+                  }}
+                  className="bg-transparent font-semibold text-stone-900 focus:outline-none"
+                >
+                  <option value="all">Toutes les régions du Maroc (12 régions · {allVilles.length} villes)</option>
+                  {MOROCCO_REGIONS.map((reg) => {
+                    const count = MOROCCO_CITIES_CATALOG.filter((c) => c.regionId === reg.id).length;
+                    return (
+                      <option key={reg.id} value={reg.id}>
+                        {reg.label} ({count} villes · Chef-lieu : {reg.majorCity})
+                      </option>
+                    );
+                  })}
+                </select>
+              </div>
+
               <label className="flex items-center gap-1.5 cursor-pointer bg-stone-50 px-2.5 py-1 rounded-lg border border-stone-200">
                 <input
                   type="radio"
@@ -7881,6 +8000,7 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
                 />
                 <span>Filtrer uniquement les villes cochées</span>
               </label>
+
               <label className="flex items-center gap-1.5 cursor-pointer bg-stone-50 px-2.5 py-1 rounded-lg border border-stone-200">
                 <input
                   type="radio"
@@ -7889,26 +8009,99 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
                   onChange={() => setVillesState((p) => ({ ...p, mode: 'default' }))}
                   className="accent-orange-600"
                 />
-                <span>Ville par défaut :</span>
+                <span>
+                  Ville par défaut{detectedGeoState ? ' (Grande ville proche)' : ''} :
+                </span>
                 <select
                   aria-label="Ville par défaut"
+                  data-testid="default-ville-select"
                   value={defaultVille}
-                  onChange={(e) => setVillesState((p) => ({ ...p, defaultVille: e.target.value }))}
+                  onChange={(e) => {
+                    const nextCity = e.target.value;
+                    const resolved = resolveCityAndRegionFromZoneString(nextCity);
+                    setVillesState((p) => ({ ...p, defaultVille: nextCity }));
+                    setUserProfile((p) => ({ ...p, zone: resolved.formattedZone }));
+                  }}
                   className="bg-transparent font-semibold text-orange-700 focus:outline-none"
                 >
-                  {allVilles.map((v) => (
+                  {filterCitiesByRegion(villesRegionFilter, allVilles).map((v) => (
                     <option key={v} value={v}>
                       {v}
                     </option>
                   ))}
+                  {!filterCitiesByRegion(villesRegionFilter, allVilles).includes(defaultVille) && (
+                    <option value={defaultVille}>{defaultVille}</option>
+                  )}
                 </select>
               </label>
             </div>
           </div>
 
-          <div className="flex flex-wrap items-center gap-1.5">
-            {allVilles.map((v) => {
+          {/* Actions rapides sur la région ou l'ensemble des villes */}
+          <div className="flex flex-wrap items-center justify-between gap-2 pt-1 border-t border-stone-100 text-[11px]">
+            <div className="flex flex-wrap items-center gap-1.5">
+              <button
+                type="button"
+                onClick={() => {
+                  const visibleCities = filterCitiesByRegion(villesRegionFilter, allVilles);
+                  setVillesState((prev) => ({
+                    ...prev,
+                    active: Array.from(new Set([...prev.active, ...visibleCities])),
+                  }));
+                }}
+                className="px-2 py-1 rounded-md border border-stone-300 bg-stone-50 hover:bg-stone-100 text-stone-800 font-semibold"
+              >
+                Cocher toute la sélection ({filterCitiesByRegion(villesRegionFilter, allVilles).length})
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  const visibleSet = new Set(filterCitiesByRegion(villesRegionFilter, allVilles));
+                  setVillesState((prev) => ({
+                    ...prev,
+                    active: prev.active.filter((c) => !visibleSet.has(c)),
+                  }));
+                }}
+                className="px-2 py-1 rounded-md border border-stone-200 bg-white hover:bg-stone-50 text-stone-600 font-medium"
+              >
+                Décocher la sélection
+              </button>
+              {detectedGeoState && (
+                <button
+                  type="button"
+                  data-testid="sync-gps-region-villes-btn"
+                  onClick={() => {
+                    setVillesRegionFilter(detectedGeoState.regionId);
+                    setVillesState((prev) => ({
+                      ...prev,
+                      active: detectedGeoState.regionalCities,
+                      defaultVille: detectedGeoState.nearestMajorCity,
+                    }));
+                    setUserProfile((prev) => ({
+                      ...prev,
+                      zone: detectedGeoState.collaboratorPublicZoneLabel,
+                    }));
+                    notify(
+                      `Région ${detectedGeoState.regionLabel} appliquée (${detectedGeoState.regionalCities.length} villes cibles · Ville par défaut : ${detectedGeoState.nearestMajorCity}).`
+                    );
+                  }}
+                  className="px-2.5 py-1 rounded-md border border-orange-300 bg-orange-50 hover:bg-orange-100 text-orange-900 font-semibold"
+                >
+                  Appliquer ma région détectée ({detectedGeoState.regionShortLabel} · {detectedGeoState.nearestMajorCity})
+                </button>
+              )}
+            </div>
+            <span className="text-stone-500">
+              {villesRegionFilter === 'all'
+                ? `Ensemble des villes du Maroc (${allVilles.length} villes)`
+                : `Région active : ${MOROCCO_REGIONS.find((r) => r.id === villesRegionFilter)?.label || 'Maroc'}`}
+            </span>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-1.5 max-h-36 overflow-y-auto pr-1">
+            {filterCitiesByRegion(villesRegionFilter, allVilles).map((v) => {
               const on = activeVilles.includes(v);
+              const isMajor = MOROCCO_CITIES_CATALOG.some((c) => c.name === v && c.isMajorCity);
               return (
                 <button
                   key={v}
@@ -7922,6 +8115,7 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
                   }`}
                 >
                   {v}
+                  {isMajor && v === defaultVille ? ' ★' : ''}
                 </button>
               );
             })}
@@ -8205,8 +8399,8 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
                 </div>
               </div>
 
-              {/* 6 Filtres Multi-Critères Combinables */}
-              <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2 pt-2 border-t border-stone-100 text-xs">
+              {/* 7 Filtres Multi-Critères Combinables (incluant Région & Ensemble des Villes du Maroc) */}
+              <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-7 gap-2 pt-2 border-t border-stone-100 text-xs">
                 <select
                   aria-label="Filtrer par secteur exact"
                   value={secteurFilter}
@@ -8222,7 +8416,29 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
                 </select>
 
                 <select
+                  aria-label="Filtrer par région"
+                  data-testid="portfolio-region-filter"
+                  value={regionFilter}
+                  onChange={(e) => {
+                    const nextReg = e.target.value;
+                    setRegionFilter(nextReg);
+                    if (nextReg && villeFilter && !doesCityBelongToRegion(villeFilter, nextReg)) {
+                      setVilleFilter('');
+                    }
+                  }}
+                  className="px-2.5 py-2 rounded-lg border border-stone-300 bg-stone-50 text-stone-800"
+                >
+                  <option value="">Toutes les régions (12)</option>
+                  {MOROCCO_REGIONS.map((reg) => (
+                    <option key={reg.id} value={reg.id}>
+                      {reg.label}
+                    </option>
+                  ))}
+                </select>
+
+                <select
                   aria-label="Filtrer par ville"
+                  data-testid="portfolio-ville-filter"
                   value={villeFilter}
                   onChange={(e) => setVilleFilter(e.target.value)}
                   className="px-2.5 py-2 rounded-lg border border-stone-300 bg-stone-50 text-stone-800"
@@ -8488,18 +8704,28 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
                         const renderEditable = (field: keyof FicheEntreprise, display: string, placeholder: string) => {
                           if (editingCell?.id === f.id && editingCell.field === field) {
                             return (
-                              <input
-                                autoFocus
-                                aria-label={`Modifier ${field} de ${f.societe}`}
-                                value={editDraft}
-                                onChange={(e) => setEditDraft(e.target.value)}
-                                onBlur={commitEdit}
-                                onKeyDown={(e) => {
-                                  if (e.key === 'Enter') commitEdit();
-                                  if (e.key === 'Escape') setEditingCell(null);
-                                }}
-                                className="w-full px-1.5 py-0.5 rounded border border-orange-500 bg-white text-xs text-stone-900"
-                              />
+                              <>
+                                <input
+                                  autoFocus
+                                  aria-label={`Modifier ${field} de ${f.societe}`}
+                                  list={field === 'ville' ? `inline-villes-${f.id}` : undefined}
+                                  value={editDraft}
+                                  onChange={(e) => setEditDraft(e.target.value)}
+                                  onBlur={commitEdit}
+                                  onKeyDown={(e) => {
+                                    if (e.key === 'Enter') commitEdit();
+                                    if (e.key === 'Escape') setEditingCell(null);
+                                  }}
+                                  className="w-full px-1.5 py-0.5 rounded border border-orange-500 bg-white text-xs text-stone-900"
+                                />
+                                {field === 'ville' && (
+                                  <datalist id={`inline-villes-${f.id}`}>
+                                    {filterCitiesByRegion(regionFilter || villesRegionFilter, allVilles).map((v) => (
+                                      <option key={v} value={v} />
+                                    ))}
+                                  </datalist>
+                                )}
+                              </>
                             );
                           }
                           return (
@@ -8570,7 +8796,12 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
                             </td>
 
                             <td className="p-3 font-medium text-stone-800 whitespace-nowrap">
-                              {renderEditable('ville', f.ville, 'Ville')}
+                              <div>{renderEditable('ville', f.ville, 'Ville')}</div>
+                              {f.ville && (
+                                <div className="text-[10px] text-stone-500 font-normal">
+                                  {resolveCityAndRegionFromZoneString(f.ville).regionShortLabel}
+                                </div>
+                              )}
                             </td>
 
                             <td className="p-3 space-y-1.5 min-w-[205px]">
@@ -9304,6 +9535,84 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
                     placeholder="Origine (Pages Jaunes...)"
                     className="px-2.5 py-1.5 rounded-lg border border-stone-300 text-xs w-36"
                   />
+                </div>
+              </div>
+
+              {/* Critères de recherche Région & Villes Cibles pour l'Extraction / Import */}
+              <div
+                data-testid="extraction-region-ville-criteria"
+                className="rounded-xl border border-orange-200 bg-orange-50/40 p-3 space-y-2 text-xs"
+              >
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <span className="font-bold text-stone-800 flex items-center gap-1.5">
+                    <MapPin className="w-3.5 h-3.5 text-orange-600" />
+                    Critères de Recherche — Région &amp; Ville par défaut (Extraction / Import)
+                  </span>
+                  {detectedGeoState && (
+                    <span className="text-[11px] font-semibold text-emerald-800">
+                      Position détectée : {detectedGeoState.nearestCity} ({detectedGeoState.regionShortLabel}) → Grande ville :{' '}
+                      <strong>{detectedGeoState.nearestMajorCity}</strong>
+                    </span>
+                  )}
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  <div>
+                    <label htmlFor="extract-region-filter" className="block text-[11px] font-semibold text-stone-600 mb-0.5">
+                      Filtrage par Région à part
+                    </label>
+                    <select
+                      id="extract-region-filter"
+                      data-testid="extraction-region-select"
+                      value={villesRegionFilter}
+                      onChange={(e) => {
+                        const nextReg = e.target.value;
+                        setVillesRegionFilter(nextReg);
+                        if (nextReg !== 'all') {
+                          const regMeta = MOROCCO_REGIONS.find((r) => r.id === nextReg);
+                          const regCities = filterCitiesByRegion(nextReg, allVilles);
+                          setVillesState((prev) => ({
+                            ...prev,
+                            active: regCities.length > 0 ? regCities : prev.active,
+                            defaultVille: regMeta?.majorCity || regCities[0] || prev.defaultVille,
+                          }));
+                        }
+                      }}
+                      className="w-full px-2.5 py-1.5 rounded-lg border border-stone-300 bg-white text-xs font-semibold text-stone-800"
+                    >
+                      <option value="all">Toutes les régions du Maroc (12 régions)</option>
+                      {MOROCCO_REGIONS.map((reg) => (
+                        <option key={reg.id} value={reg.id}>
+                          {reg.label} (Grande ville : {reg.majorCity})
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label htmlFor="extract-default-ville" className="block text-[11px] font-semibold text-stone-600 mb-0.5">
+                      Ville par défaut (Grande ville la plus proche)
+                    </label>
+                    <select
+                      id="extract-default-ville"
+                      data-testid="extraction-default-ville-select"
+                      value={defaultVille}
+                      onChange={(e) => {
+                        const nextCity = e.target.value;
+                        const resolved = resolveCityAndRegionFromZoneString(nextCity);
+                        setVillesState((p) => ({ ...p, defaultVille: nextCity }));
+                        setUserProfile((p) => ({ ...p, zone: resolved.formattedZone }));
+                      }}
+                      className="w-full px-2.5 py-1.5 rounded-lg border border-stone-300 bg-white text-xs font-bold text-orange-700"
+                    >
+                      {filterCitiesByRegion(villesRegionFilter, allVilles).map((v) => (
+                        <option key={v} value={v}>
+                          {v}
+                        </option>
+                      ))}
+                      {!filterCitiesByRegion(villesRegionFilter, allVilles).includes(defaultVille) && (
+                        <option value={defaultVille}>{defaultVille}</option>
+                      )}
+                    </select>
+                  </div>
                 </div>
               </div>
 
@@ -10562,18 +10871,75 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
                 </select>
               </div>
               <div>
-                <label htmlFor="qf-ville" className="block font-semibold text-stone-600 mb-1">
-                  Ville
+                <label htmlFor="qf-region" className="block font-semibold text-stone-600 mb-1">
+                  Région (filtrage)
                 </label>
-                <input
-                  id="qf-ville"
-                  list="quick-villes"
-                  value={quickForm.ville}
-                  onChange={(e) => setQuickForm({ ...quickForm, ville: e.target.value })}
-                  className="w-full px-3 py-2 rounded-lg border border-stone-300"
-                />
+                <select
+                  id="qf-region"
+                  data-testid="quick-add-region-select"
+                  value={quickAddRegionFilter}
+                  onChange={(e) => {
+                    const nextReg = e.target.value;
+                    setQuickAddRegionFilter(nextReg);
+                    if (nextReg !== 'all') {
+                      const regCities = filterCitiesByRegion(nextReg, allVilles);
+                      const regMeta = MOROCCO_REGIONS.find((r) => r.id === nextReg);
+                      if (regCities.length > 0 && !regCities.includes(quickForm.ville)) {
+                        setQuickForm({
+                          ...quickForm,
+                          ville: regMeta?.majorCity || regCities[0],
+                        });
+                      }
+                    }
+                  }}
+                  className="w-full px-3 py-2 rounded-lg border border-stone-300 bg-white"
+                >
+                  <option value="all">Toutes les régions (12)</option>
+                  {MOROCCO_REGIONS.map((reg) => (
+                    <option key={reg.id} value={reg.id}>
+                      {reg.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label htmlFor="qf-ville" className="block font-semibold text-stone-600 mb-1">
+                  Ville ({filterCitiesByRegion(quickAddRegionFilter, allVilles).length} villes)
+                </label>
+                <div className="flex gap-1.5">
+                  <select
+                    aria-label="Choisir une ville du Maroc"
+                    data-testid="quick-add-ville-select"
+                    value={
+                      filterCitiesByRegion(quickAddRegionFilter, allVilles).includes(quickForm.ville)
+                        ? quickForm.ville
+                        : ''
+                    }
+                    onChange={(e) => {
+                      if (e.target.value) {
+                        setQuickForm({ ...quickForm, ville: e.target.value });
+                      }
+                    }}
+                    className="w-1/2 px-2 py-2 rounded-lg border border-stone-300 bg-white"
+                  >
+                    <option value="">Choisir dans la liste...</option>
+                    {filterCitiesByRegion(quickAddRegionFilter, allVilles).map((v) => (
+                      <option key={v} value={v}>
+                        {v}
+                      </option>
+                    ))}
+                  </select>
+                  <input
+                    id="qf-ville"
+                    list="quick-villes"
+                    value={quickForm.ville}
+                    onChange={(e) => setQuickForm({ ...quickForm, ville: e.target.value })}
+                    placeholder="Ou saisir..."
+                    className="w-1/2 px-2.5 py-2 rounded-lg border border-stone-300"
+                  />
+                </div>
                 <datalist id="quick-villes">
-                  {allVilles.map((v) => (
+                  {filterCitiesByRegion(quickAddRegionFilter, allVilles).map((v) => (
                     <option key={v} value={v} />
                   ))}
                 </datalist>

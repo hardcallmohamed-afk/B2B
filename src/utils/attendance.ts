@@ -319,25 +319,20 @@ export const FIELD_STATUS_META: Record<
   },
 };
 
-export const MOROCCO_CITY_COORDS: Record<string, { lat: number; lng: number; label: string }> = {
-  meknes: { lat: 33.8935, lng: -5.5473, label: 'Meknès' },
-  fes: { lat: 34.0331, lng: -5.0003, label: 'Fès' },
-  ifrane: { lat: 33.5228, lng: -5.1109, label: 'Ifrane' },
-  azrou: { lat: 33.4344, lng: -5.2213, label: 'Azrou' },
-  'el hajeb': { lat: 33.6878, lng: -5.371, label: 'El Hajeb' },
-  khemisset: { lat: 33.824, lng: -6.0663, label: 'Khémisset' },
-  'sidi kacem': { lat: 34.2215, lng: -5.7078, label: 'Sidi Kacem' },
-  'sidi slimane': { lat: 34.2648, lng: -5.926, label: 'Sidi Slimane' },
-  errachidia: { lat: 31.9314, lng: -4.4266, label: 'Errachidia' },
-  rabat: { lat: 34.0209, lng: -6.8416, label: 'Rabat' },
-  casablanca: { lat: 33.5731, lng: -7.5898, label: 'Casablanca' },
-  tanger: { lat: 35.7595, lng: -5.834, label: 'Tanger' },
-  kenitra: { lat: 34.261, lng: -6.5802, label: 'Kénitra' },
-  marrakech: { lat: 31.6295, lng: -7.9811, label: 'Marrakech' },
-  agadir: { lat: 30.4278, lng: -9.5981, label: 'Agadir' },
-  oujda: { lat: 34.6814, lng: -1.9086, label: 'Oujda' },
-  tetouan: { lat: 35.5785, lng: -5.3684, label: 'Tétouan' },
-};
+import {
+  MOROCCO_CITIES_CATALOG,
+  detectMoroccoGeographyFromCoordinates,
+  normalizeCityKey,
+  resolveCityAndRegionFromZoneString,
+} from './moroccoCities';
+
+export const MOROCCO_CITY_COORDS: Record<string, { lat: number; lng: number; label: string }> =
+  Object.fromEntries(
+    MOROCCO_CITIES_CATALOG.map((c) => [
+      normalizeCityKey(c.name),
+      { lat: c.lat, lng: c.lng, label: c.name },
+    ])
+  );
 
 function sanitizeTelemetryPart(val: string | undefined, maxLen: number): string {
   return (val || '')
@@ -473,6 +468,8 @@ export function resolveCollaboratorCoordinates(params: {
   lng: number;
   source: 'gps_live' | 'zone_reseau';
   cityLabel: string;
+  regionLabel: string;
+  nearestMajorCity: string;
 } {
   if (
     typeof params.lat === 'number' &&
@@ -480,27 +477,24 @@ export function resolveCollaboratorCoordinates(params: {
     Number.isFinite(params.lat) &&
     Number.isFinite(params.lng)
   ) {
+    const geo = detectMoroccoGeographyFromCoordinates(params.lat, params.lng);
     return {
       lat: Number(params.lat.toFixed(6)),
       lng: Number(params.lng.toFixed(6)),
       source: 'gps_live',
-      cityLabel: params.zone || 'Position GPS Directe',
+      cityLabel: `${geo.nearestCity} · ${geo.regionLabel}`,
+      regionLabel: geo.regionLabel,
+      nearestMajorCity: geo.nearestMajorCity,
     };
   }
 
-  const normalizedZone = (params.zone || 'Meknès')
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .toLowerCase()
-    .trim();
-
-  let matched = MOROCCO_CITY_COORDS.meknes;
-  for (const [key, val] of Object.entries(MOROCCO_CITY_COORDS)) {
-    if (normalizedZone.includes(key)) {
-      matched = val;
-      break;
-    }
-  }
+  const resolvedZone = resolveCityAndRegionFromZoneString(params.zone || 'Meknès');
+  const normKey = normalizeCityKey(resolvedZone.city);
+  const matched = MOROCCO_CITY_COORDS[normKey] || MOROCCO_CITY_COORDS.meknes || {
+    lat: 33.8935,
+    lng: -5.5473,
+    label: 'Meknès',
+  };
 
   // Micro-offset (~40m–120m around the city center boulevard) when falling back to zone_reseau
   let hash = 0;
@@ -514,7 +508,9 @@ export function resolveCollaboratorCoordinates(params: {
     lat: Number((matched.lat + offsetLat).toFixed(6)),
     lng: Number((matched.lng + offsetLng).toFixed(6)),
     source: 'zone_reseau',
-    cityLabel: matched.label,
+    cityLabel: `${matched.label} · ${resolvedZone.regionLabel}`,
+    regionLabel: resolvedZone.regionLabel,
+    nearestMajorCity: resolvedZone.majorCity,
   };
 }
 

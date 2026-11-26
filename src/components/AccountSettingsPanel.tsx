@@ -45,6 +45,12 @@ import {
   formatFirebaseAuthError,
   getRoleCapabilities,
 } from '../utils/authAccess';
+import {
+  ALL_MOROCCO_CITY_NAMES,
+  MOROCCO_REGIONS,
+  filterCitiesByRegion,
+  resolveCityAndRegionFromZoneString,
+} from '../utils/moroccoCities';
 
 export interface UserProfileSettings {
   displayName: string;
@@ -159,6 +165,10 @@ export const AccountSettingsPanel: React.FC<AccountSettingsPanelProps> = ({
   const [avatarDataUrl, setAvatarDataUrl] = useState(profile.avatarDataUrl);
   const [phonePro, setPhonePro] = useState(profile.phonePro);
   const [zone, setZone] = useState(profile.zone);
+  const [selectedAccountRegion, setSelectedAccountRegion] = useState<string>(() => {
+    const resolved = resolveCityAndRegionFromZoneString(profile.zone);
+    return resolved.regionId || 'all';
+  });
   const [bio, setBio] = useState(profile.bio);
   const [signature, setSignature] = useState(emailSignature);
   const [monthlyGoalContracts, setMonthlyGoalContracts] = useState(profile.monthlyGoalContracts);
@@ -554,23 +564,74 @@ export const AccountSettingsPanel: React.FC<AccountSettingsPanelProps> = ({
               </div>
             </div>
 
-            <div className="space-y-1">
+            <div className="space-y-1 sm:col-span-2">
               <label htmlFor="acc-zone" className="block text-xs font-semibold text-stone-700">
-                Zone / Ville principale
+                Disponibilité Services Orange Pro — Région &amp; Ville principale (visible par l&apos;équipe)
               </label>
-              <input
-                id="acc-zone"
-                type="text"
-                list="account-zone-list"
-                value={zone}
-                onChange={(e) => setZone(e.target.value)}
-                maxLength={100}
-                placeholder="Meknès"
-                className="w-full px-3 py-2 rounded-lg border border-stone-300 text-xs focus:outline-none focus:border-orange-600"
-              />
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                <select
+                  aria-label="Filtrer par région dans mon compte"
+                  data-testid="account-region-select"
+                  value={selectedAccountRegion}
+                  onChange={(e) => {
+                    const nextReg = e.target.value;
+                    setSelectedAccountRegion(nextReg);
+                    if (nextReg !== 'all') {
+                      const regMeta = MOROCCO_REGIONS.find((r) => r.id === nextReg);
+                      if (regMeta) {
+                        setZone(`${regMeta.majorCity} · ${regMeta.label}`);
+                      }
+                    }
+                  }}
+                  className="px-3 py-2 rounded-lg border border-stone-300 bg-stone-50 text-xs font-semibold text-stone-800 focus:outline-none focus:border-orange-600"
+                >
+                  <option value="all">Toutes les régions (12)</option>
+                  {MOROCCO_REGIONS.map((reg) => (
+                    <option key={reg.id} value={reg.id}>
+                      {reg.label}
+                    </option>
+                  ))}
+                </select>
+
+                <select
+                  aria-label="Choisir ma ville principale"
+                  data-testid="account-city-select"
+                  value={resolveCityAndRegionFromZoneString(zone).city}
+                  onChange={(e) => {
+                    const pickedCity = e.target.value;
+                    const resolved = resolveCityAndRegionFromZoneString(pickedCity);
+                    setSelectedAccountRegion(resolved.regionId);
+                    setZone(resolved.formattedZone);
+                  }}
+                  className="px-3 py-2 rounded-lg border border-stone-300 bg-white text-xs font-semibold text-stone-900 focus:outline-none focus:border-orange-600"
+                >
+                  {filterCitiesByRegion(selectedAccountRegion, [
+                    ...ALL_MOROCCO_CITY_NAMES,
+                    ...villesOptions,
+                  ]).map((v) => (
+                    <option key={v} value={v}>
+                      {v}
+                    </option>
+                  ))}
+                </select>
+
+                <input
+                  id="acc-zone"
+                  type="text"
+                  list="account-zone-list"
+                  value={zone}
+                  onChange={(e) => setZone(e.target.value)}
+                  maxLength={100}
+                  placeholder="Ville · Région"
+                  className="w-full px-3 py-2 rounded-lg border border-stone-300 text-xs focus:outline-none focus:border-orange-600"
+                />
+              </div>
               <datalist id="account-zone-list">
-                {villesOptions.map((v) => (
-                  <option key={v} value={v} />
+                {filterCitiesByRegion(selectedAccountRegion, [
+                  ...ALL_MOROCCO_CITY_NAMES,
+                  ...villesOptions,
+                ]).map((v) => (
+                  <option key={v} value={resolveCityAndRegionFromZoneString(v).formattedZone} />
                 ))}
               </datalist>
             </div>

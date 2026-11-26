@@ -92,6 +92,14 @@ import {
   type ApiKeyDetectionResult,
 } from '../utils/apiKeyDetector';
 import { isStaticHostingEnvironment } from '../utils/aiCopilotClient';
+import {
+  ALL_MOROCCO_CITY_NAMES,
+  MOROCCO_REGIONS,
+  doesCityBelongToRegion,
+  filterCitiesByRegion,
+  normalizeCityKey,
+  resolveCityAndRegionFromZoneString,
+} from '../utils/moroccoCities';
 
 const CLOUD_API_PROVIDERS = [
   { id: 'groq', label: 'Groq (Llama / Mixtral)' },
@@ -156,7 +164,10 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
   const [showPwd, setShowPwd] = useState(true);
   const [role, setRole] = useState<ManagedUserRole>('commercial');
   const [selectedInitialRoleBadges, setSelectedInitialRoleBadges] = useState<string[]>([]);
-  const [zone, setZone] = useState(villesOptions[0] || 'Meknès');
+  const [newUserRegion, setNewUserRegion] = useState<string>('fes_meknes');
+  const [zone, setZone] = useState(
+    resolveCityAndRegionFromZoneString(villesOptions[0] || 'Meknès').formattedZone
+  );
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState('');
   const [lastCreatedCreds, setLastCreatedCreds] = useState<{
@@ -167,13 +178,16 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
   } | null>(null);
   const [copiedCreds, setCopiedCreds] = useState(false);
 
-  // Recherche, filtre rôle & actions sur la liste
+  // Recherche, filtre rôle, région, ville & actions sur la liste
   const [search, setSearch] = useState('');
   const [roleFilter, setRoleFilter] = useState<'all' | ManagedUserRole>('all');
+  const [directoryRegionFilter, setDirectoryRegionFilter] = useState<string>('all');
+  const [directoryCityFilter, setDirectoryCityFilter] = useState<string>('all');
   const [statusFilter, setStatusFilter] = useState<'all' | 'active' | 'suspended'>('all');
   const [busyUid, setBusyUid] = useState<string | null>(null);
   const [confirmDeleteUid, setConfirmDeleteUid] = useState<string | null>(null);
   const [editingUserUid, setEditingUserUid] = useState<string | null>(null);
+  const [editUserRegion, setEditUserRegion] = useState<string>('all');
   const [editUserForm, setEditUserForm] = useState<{
     displayName: string;
     phonePro: string;
@@ -182,6 +196,8 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
 
   // Suivi présence, appareils, position GPS et pointage heures de travail
   const [attendanceSearch, setAttendanceSearch] = useState('');
+  const [radarRegionFilter, setRadarRegionFilter] = useState<string>('all');
+  const [radarCityFilter, setRadarCityFilter] = useState<string>('all');
   const [attendanceFilter, setAttendanceFilter] = useState<
     'all' | 'online' | 'en_rdv_client' | 'en_deplacement' | 'au_travail' | 'offline' | 'work_disconnect'
   >('all');
@@ -449,6 +465,16 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
       if (attendanceFilter === 'au_travail' && r.fieldStatus !== 'au_travail') return false;
       if (attendanceFilter === 'offline' && r.isOnline) return false;
       if (attendanceFilter === 'work_disconnect' && r.workHoursDisconnectCount === 0) return false;
+
+      const resolved = resolveCityAndRegionFromZoneString(r.coords.cityLabel || r.zone || 'Meknès');
+      if (radarRegionFilter !== 'all' && resolved.regionId !== radarRegionFilter) return false;
+      if (
+        radarCityFilter !== 'all' &&
+        normalizeCityKey(resolved.city) !== normalizeCityKey(radarCityFilter)
+      ) {
+        return false;
+      }
+
       if (!q) return true;
       return (
         r.displayName.toLowerCase().includes(q) ||
@@ -458,10 +484,11 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
         r.phonePro.toLowerCase().includes(q) ||
         r.currentDevice.toLowerCase().includes(q) ||
         r.telemetry.clientName.toLowerCase().includes(q) ||
-        r.zone.toLowerCase().includes(q)
+        r.zone.toLowerCase().includes(q) ||
+        resolved.regionLabel.toLowerCase().includes(q)
       );
     });
-  }, [consolidatedTeamTracking, attendanceSearch, attendanceFilter]);
+  }, [consolidatedTeamTracking, attendanceSearch, attendanceFilter, radarRegionFilter, radarCityFilter]);
 
   const activeRadarMember = useMemo(() => {
     return (
@@ -479,17 +506,29 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
       if (roleFilter !== 'all' && u.role !== roleFilter) return false;
       if (statusFilter === 'active' && !u.active) return false;
       if (statusFilter === 'suspended' && u.active) return false;
-      if (!q) return true;
       const pres = presenceByUid.get(u.uid);
+      const effectiveZone = pres?.zone || u.zone || 'Meknès';
+      const resolved = resolveCityAndRegionFromZoneString(effectiveZone);
+      if (directoryRegionFilter !== 'all' && resolved.regionId !== directoryRegionFilter) {
+        return false;
+      }
+      if (
+        directoryCityFilter !== 'all' &&
+        normalizeCityKey(resolved.city) !== normalizeCityKey(directoryCityFilter)
+      ) {
+        return false;
+      }
+      if (!q) return true;
       return (
         u.displayName.toLowerCase().includes(q) ||
         u.email.toLowerCase().includes(q) ||
         u.zone.toLowerCase().includes(q) ||
+        resolved.regionLabel.toLowerCase().includes(q) ||
         u.role.toLowerCase().includes(q) ||
         (pres?.phonePro || '').toLowerCase().includes(q)
       );
     });
-  }, [users, search, roleFilter, statusFilter, presenceByUid]);
+  }, [users, search, roleFilter, directoryRegionFilter, directoryCityFilter, statusFilter, presenceByUid]);
 
   const toggleInitialRoleBadge = (badgeId: string) => {
     setSelectedInitialRoleBadges((prev) =>
@@ -633,6 +672,9 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
   const startEditUserDetails = (u: ManagedAppUser) => {
     const pres = presenceByUid.get(u.uid);
     setEditingUserUid(u.uid);
+    const effectiveZone = pres?.zone || u.zone || 'Meknès';
+    const resolved = resolveCityAndRegionFromZoneString(effectiveZone);
+    setEditUserRegion(resolved.regionId);
     setEditUserForm({
       displayName: pres?.displayName || u.displayName,
       phonePro: pres?.phonePro || '',
@@ -1323,24 +1365,89 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
                 </div>
               </div>
 
-              <div className="space-y-1">
-                <label htmlFor="admin-new-zone" className="block text-xs font-semibold text-stone-700">
-                  Zone / Ville principale
+              <div className="space-y-1.5">
+                <label className="block text-xs font-semibold text-stone-700">
+                  Région &amp; Ville d&apos;affectation (Disponibilité Orange Pro)
                 </label>
-                <input
-                  id="admin-new-zone"
-                  type="text"
-                  value={zone}
-                  onChange={(e) => setZone(e.target.value)}
-                  list="admin-zone-suggestions"
-                  placeholder="Meknès"
-                  className="w-full px-2.5 py-2 rounded-lg border border-stone-300 text-xs focus:outline-none focus:border-orange-600"
-                />
-                <datalist id="admin-zone-suggestions">
-                  {villesOptions.map((v) => (
-                    <option key={v} value={v} />
-                  ))}
-                </datalist>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  <div>
+                    <label htmlFor="admin-new-user-region" className="block text-[10px] text-stone-500 mb-0.5">
+                      Région du Maroc
+                    </label>
+                    <select
+                      id="admin-new-user-region"
+                      data-testid="admin-new-user-region-select"
+                      value={newUserRegion}
+                      onChange={(e) => {
+                        const rId = e.target.value;
+                        setNewUserRegion(rId);
+                        const rMeta = MOROCCO_REGIONS.find((r) => r.id === rId);
+                        if (rMeta) {
+                          setZone(`${rMeta.majorCity} · ${rMeta.label}`);
+                        }
+                      }}
+                      className="w-full px-2.5 py-1.5 rounded-lg border border-stone-300 bg-stone-50 text-xs font-semibold text-stone-800 focus:outline-none focus:border-orange-600"
+                    >
+                      <option value="all">Toutes les régions (12)</option>
+                      {MOROCCO_REGIONS.map((reg) => (
+                        <option key={reg.id} value={reg.id}>
+                          {reg.label}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label htmlFor="admin-new-user-city" className="block text-[10px] text-stone-500 mb-0.5">
+                      Ville principale
+                    </label>
+                    <select
+                      id="admin-new-user-city"
+                      data-testid="admin-new-user-city-select"
+                      value={resolveCityAndRegionFromZoneString(zone).city}
+                      onChange={(e) => {
+                        const picked = e.target.value;
+                        const resolved = resolveCityAndRegionFromZoneString(picked);
+                        setNewUserRegion(resolved.regionId);
+                        setZone(resolved.formattedZone);
+                      }}
+                      className="w-full px-2.5 py-1.5 rounded-lg border border-stone-300 bg-white text-xs font-semibold text-stone-900 focus:outline-none focus:border-orange-600"
+                    >
+                      {filterCitiesByRegion(newUserRegion, [
+                        ...ALL_MOROCCO_CITY_NAMES,
+                        ...villesOptions,
+                      ]).map((v) => (
+                        <option key={v} value={v}>
+                          {v}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+                <div className="space-y-0.5">
+                  <label htmlFor="admin-new-zone" className="block text-[10px] text-stone-500">
+                    Zone affichée (format : Ville · Région)
+                  </label>
+                  <input
+                    id="admin-new-zone"
+                    type="text"
+                    value={zone}
+                    onChange={(e) => setZone(e.target.value)}
+                    list="admin-zone-suggestions"
+                    placeholder="Meknès · Fès-Meknès"
+                    className="w-full px-2.5 py-1.5 rounded-lg border border-stone-300 text-xs focus:outline-none focus:border-orange-600"
+                  />
+                  <datalist id="admin-zone-suggestions">
+                    {filterCitiesByRegion(newUserRegion, [
+                      ...ALL_MOROCCO_CITY_NAMES,
+                      ...villesOptions,
+                    ]).map((v) => (
+                      <option
+                        key={v}
+                        value={resolveCityAndRegionFromZoneString(v).formattedZone}
+                      />
+                    ))}
+                  </datalist>
+                </div>
               </div>
 
               <div className="rounded-lg border border-stone-200 bg-stone-50 px-3 py-2 text-[11px] text-stone-600">
@@ -1494,6 +1601,44 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
                 <option value="all">Tous statuts</option>
                 <option value="active">Actifs</option>
                 <option value="suspended">Suspendus</option>
+              </select>
+              <select
+                aria-label="Filtrer par région"
+                data-testid="admin-directory-region-filter"
+                value={directoryRegionFilter}
+                onChange={(e) => {
+                  const nextReg = e.target.value;
+                  setDirectoryRegionFilter(nextReg);
+                  if (nextReg !== 'all' && directoryCityFilter !== 'all') {
+                    const ok = doesCityBelongToRegion(directoryCityFilter, nextReg);
+                    if (!ok) setDirectoryCityFilter('all');
+                  }
+                }}
+                className="px-2.5 py-1.5 rounded-lg border border-stone-300 bg-stone-50 text-xs font-semibold text-stone-800 focus:outline-none focus:border-orange-600"
+              >
+                <option value="all">Région : Toutes (12)</option>
+                {MOROCCO_REGIONS.map((reg) => (
+                  <option key={reg.id} value={reg.id}>
+                    {reg.label}
+                  </option>
+                ))}
+              </select>
+              <select
+                aria-label="Filtrer par ville"
+                data-testid="admin-directory-city-filter"
+                value={directoryCityFilter}
+                onChange={(e) => setDirectoryCityFilter(e.target.value)}
+                className="px-2.5 py-1.5 rounded-lg border border-stone-300 bg-stone-50 text-xs font-semibold text-stone-800 focus:outline-none focus:border-orange-600 max-w-[140px]"
+              >
+                <option value="all">Ville : Toutes</option>
+                {filterCitiesByRegion(directoryRegionFilter, [
+                  ...ALL_MOROCCO_CITY_NAMES,
+                  ...villesOptions,
+                ]).map((v) => (
+                  <option key={v} value={v}>
+                    {v}
+                  </option>
+                ))}
               </select>
               <div className="relative flex-1 sm:w-52">
                 <Search className="w-3.5 h-3.5 text-stone-400 absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
@@ -1689,63 +1834,122 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
                     </div>
 
                     {isEditing && (
-                      <div className="rounded-lg border border-orange-200 bg-orange-50/50 p-2.5 grid grid-cols-1 sm:grid-cols-4 gap-2 items-end">
-                        <div>
-                          <label className="block text-[10px] font-semibold text-stone-600 mb-0.5">
-                            Nom &amp; Prénom
-                          </label>
-                          <input
-                            type="text"
-                            value={editUserForm.displayName}
-                            onChange={(e) =>
-                              setEditUserForm((prev) => ({ ...prev, displayName: e.target.value }))
-                            }
-                            className="w-full px-2 py-1 rounded border border-stone-300 bg-white text-xs"
-                          />
+                      <div className="rounded-lg border border-orange-200 bg-orange-50/50 p-2.5 space-y-2">
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                          <div>
+                            <label className="block text-[10px] font-semibold text-stone-600 mb-0.5">
+                              Nom &amp; Prénom
+                            </label>
+                            <input
+                              type="text"
+                              value={editUserForm.displayName}
+                              onChange={(e) =>
+                                setEditUserForm((prev) => ({ ...prev, displayName: e.target.value }))
+                              }
+                              className="w-full px-2 py-1 rounded border border-stone-300 bg-white text-xs"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-[10px] font-semibold text-stone-600 mb-0.5">
+                              Téléphone
+                            </label>
+                            <input
+                              type="tel"
+                              value={editUserForm.phonePro}
+                              onChange={(e) =>
+                                setEditUserForm((prev) => ({ ...prev, phonePro: e.target.value }))
+                              }
+                              placeholder="06 61 ..."
+                              className="w-full px-2 py-1 rounded border border-stone-300 bg-white text-xs"
+                            />
+                          </div>
                         </div>
-                        <div>
-                          <label className="block text-[10px] font-semibold text-stone-600 mb-0.5">
-                            Téléphone
-                          </label>
-                          <input
-                            type="tel"
-                            value={editUserForm.phonePro}
-                            onChange={(e) =>
-                              setEditUserForm((prev) => ({ ...prev, phonePro: e.target.value }))
-                            }
-                            placeholder="06 61 ..."
-                            className="w-full px-2 py-1 rounded border border-stone-300 bg-white text-xs"
-                          />
+                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 items-end">
+                          <div>
+                            <label className="block text-[10px] font-semibold text-stone-600 mb-0.5">
+                              Région Maroc
+                            </label>
+                            <select
+                              value={editUserRegion}
+                              onChange={(e) => {
+                                const rId = e.target.value;
+                                setEditUserRegion(rId);
+                                const rMeta = MOROCCO_REGIONS.find((r) => r.id === rId);
+                                if (rMeta) {
+                                  setEditUserForm((prev) => ({
+                                    ...prev,
+                                    zone: `${rMeta.majorCity} · ${rMeta.label}`,
+                                  }));
+                                }
+                              }}
+                              className="w-full px-2 py-1 rounded border border-stone-300 bg-white text-xs font-semibold text-stone-800"
+                            >
+                              <option value="all">Toutes régions (12)</option>
+                              {MOROCCO_REGIONS.map((reg) => (
+                                <option key={reg.id} value={reg.id}>
+                                  {reg.label}
+                                </option>
+                              ))}
+                            </select>
+                          </div>
+                          <div>
+                            <label className="block text-[10px] font-semibold text-stone-600 mb-0.5">
+                              Ville
+                            </label>
+                            <select
+                              value={resolveCityAndRegionFromZoneString(editUserForm.zone).city}
+                              onChange={(e) => {
+                                const picked = e.target.value;
+                                const resolved = resolveCityAndRegionFromZoneString(picked);
+                                setEditUserRegion(resolved.regionId);
+                                setEditUserForm((prev) => ({
+                                  ...prev,
+                                  zone: resolved.formattedZone,
+                                }));
+                              }}
+                              className="w-full px-2 py-1 rounded border border-stone-300 bg-white text-xs font-semibold text-stone-900"
+                            >
+                              {filterCitiesByRegion(editUserRegion, [
+                                ...ALL_MOROCCO_CITY_NAMES,
+                                ...villesOptions,
+                              ]).map((v) => (
+                                <option key={v} value={v}>
+                                  {v}
+                                </option>
+                              ))}
+                            </select>
+                          </div>
+                          <div>
+                            <label className="block text-[10px] font-semibold text-stone-600 mb-0.5">
+                              Zone affichée
+                            </label>
+                            <input
+                              type="text"
+                              value={editUserForm.zone}
+                              onChange={(e) =>
+                                setEditUserForm((prev) => ({ ...prev, zone: e.target.value }))
+                              }
+                              placeholder="Ville · Région"
+                              className="w-full px-2 py-1 rounded border border-stone-300 bg-white text-xs"
+                            />
+                          </div>
                         </div>
-                        <div>
-                          <label className="block text-[10px] font-semibold text-stone-600 mb-0.5">
-                            Zone / Ville
-                          </label>
-                          <input
-                            type="text"
-                            value={editUserForm.zone}
-                            onChange={(e) =>
-                              setEditUserForm((prev) => ({ ...prev, zone: e.target.value }))
-                            }
-                            className="w-full px-2 py-1 rounded border border-stone-300 bg-white text-xs"
-                          />
-                        </div>
-                        <div className="flex items-center gap-1.5">
-                          <button
-                            type="button"
-                            disabled={isBusy}
-                            onClick={() => void handleSaveUserDetails(u)}
-                            className="flex-1 py-1 px-2.5 rounded bg-orange-600 hover:bg-orange-700 text-white text-[11px] font-semibold"
-                          >
-                            Enregistrer
-                          </button>
+                        <div className="flex items-center justify-end gap-1.5 pt-1">
                           <button
                             type="button"
                             onClick={() => setEditingUserUid(null)}
                             aria-label="Fermer l'édition"
-                            className="p-1 rounded border border-stone-300 bg-white text-stone-600 hover:bg-stone-50"
+                            className="py-1 px-3 rounded border border-stone-300 bg-white text-stone-600 hover:bg-stone-50 text-[11px]"
                           >
-                            <X className="w-3.5 h-3.5" />
+                            Annuler
+                          </button>
+                          <button
+                            type="button"
+                            disabled={isBusy}
+                            onClick={() => void handleSaveUserDetails(u)}
+                            className="py-1 px-4 rounded bg-orange-600 hover:bg-orange-700 text-white text-[11px] font-semibold"
+                          >
+                            Enregistrer
                           </button>
                         </div>
                       </div>
@@ -1803,6 +2007,44 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
                 Hors ligne ({attendanceSummary.totalMembers - attendanceSummary.onlineCount})
               </option>
               <option value="work_disconnect">Avec déconnexion heures travail</option>
+            </select>
+            <select
+              aria-label="Filtrer présence par région"
+              data-testid="admin-radar-region-filter"
+              value={radarRegionFilter}
+              onChange={(e) => {
+                const nextReg = e.target.value;
+                setRadarRegionFilter(nextReg);
+                if (nextReg !== 'all' && radarCityFilter !== 'all') {
+                  const ok = doesCityBelongToRegion(radarCityFilter, nextReg);
+                  if (!ok) setRadarCityFilter('all');
+                }
+              }}
+              className="px-2.5 py-1.5 rounded-lg border border-stone-300 bg-stone-50 text-xs font-semibold text-stone-800 focus:outline-none focus:border-orange-600"
+            >
+              <option value="all">Région : Toutes (12)</option>
+              {MOROCCO_REGIONS.map((reg) => (
+                <option key={reg.id} value={reg.id}>
+                  {reg.label}
+                </option>
+              ))}
+            </select>
+            <select
+              aria-label="Filtrer présence par ville"
+              data-testid="admin-radar-city-filter"
+              value={radarCityFilter}
+              onChange={(e) => setRadarCityFilter(e.target.value)}
+              className="px-2.5 py-1.5 rounded-lg border border-stone-300 bg-stone-50 text-xs font-semibold text-stone-800 focus:outline-none focus:border-orange-600 max-w-[140px]"
+            >
+              <option value="all">Ville : Toutes</option>
+              {filterCitiesByRegion(radarRegionFilter, [
+                ...ALL_MOROCCO_CITY_NAMES,
+                ...villesOptions,
+              ]).map((v) => (
+                <option key={v} value={v}>
+                  {v}
+                </option>
+              ))}
             </select>
             <div className="relative w-56">
               <Search className="w-3.5 h-3.5 text-stone-400 absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />

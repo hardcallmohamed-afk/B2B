@@ -28,6 +28,14 @@ import {
   type TeamStatRecord,
 } from '../utils/gamification';
 import { getUserInitials } from '../utils/avatarResize';
+import {
+  ALL_MOROCCO_CITY_NAMES,
+  MOROCCO_REGIONS,
+  doesCityBelongToRegion,
+  filterCitiesByRegion,
+  normalizeCityKey,
+  resolveCityAndRegionFromZoneString,
+} from '../utils/moroccoCities';
 import { BadgeChipWithDrawing } from './BadgeArtwork';
 import { RoleBadge } from './RoleBadge';
 
@@ -63,19 +71,28 @@ export const TeamPerformancePanel: React.FC<TeamPerformancePanelProps> = ({
   onJumpToBadges,
 }) => {
   const [selectedRole, setSelectedRole] = useState<'all' | TeamRole>('all');
+  const [selectedRegion, setSelectedRegion] = useState<string>('all');
+  const [selectedCity, setSelectedCity] = useState<string>('all');
   const [selectedUid, setSelectedUid] = useState<string>('all');
   const [editingContractId, setEditingContractId] = useState<string | null>(null);
   const [editPayout, setEditPayout] = useState<number>(0);
   const [editStatus, setEditStatus] = useState<PayoutStatus>('En attente');
   const [savingContractId, setSavingContractId] = useState<string | null>(null);
 
-  const roleFilteredStats = useMemo(
-    () =>
-      selectedRole === 'all'
-        ? teamStats
-        : teamStats.filter((m) => m.role === selectedRole),
-    [teamStats, selectedRole]
-  );
+  const roleFilteredStats = useMemo(() => {
+    return teamStats.filter((m) => {
+      if (selectedRole !== 'all' && m.role !== selectedRole) return false;
+      const resolved = resolveCityAndRegionFromZoneString(m.zone || 'Meknès');
+      if (selectedRegion !== 'all' && resolved.regionId !== selectedRegion) return false;
+      if (
+        selectedCity !== 'all' &&
+        normalizeCityKey(resolved.city) !== normalizeCityKey(selectedCity)
+      ) {
+        return false;
+      }
+      return true;
+    });
+  }, [teamStats, selectedRole, selectedRegion, selectedCity]);
 
   const roleAllowedUids = useMemo(
     () => new Set(roleFilteredStats.map((m) => m.uid)),
@@ -84,10 +101,23 @@ export const TeamPerformancePanel: React.FC<TeamPerformancePanelProps> = ({
 
   const roleFilteredContracts = useMemo(
     () =>
-      selectedRole === 'all'
+      selectedRole === 'all' && selectedRegion === 'all' && selectedCity === 'all'
         ? signedContracts
-        : signedContracts.filter((c) => roleAllowedUids.has(c.ownerId)),
-    [signedContracts, selectedRole, roleAllowedUids]
+        : signedContracts.filter((c) => {
+            if (!roleAllowedUids.has(c.ownerId)) return false;
+            if (selectedRegion !== 'all' && c.ville && !doesCityBelongToRegion(c.ville, selectedRegion)) {
+              return false;
+            }
+            if (
+              selectedCity !== 'all' &&
+              c.ville &&
+              normalizeCityKey(c.ville) !== normalizeCityKey(selectedCity)
+            ) {
+              return false;
+            }
+            return true;
+          }),
+    [signedContracts, selectedRole, selectedRegion, selectedCity, roleAllowedUids]
   );
 
   const leaderboard = useMemo(
@@ -204,6 +234,11 @@ export const TeamPerformancePanel: React.FC<TeamPerformancePanelProps> = ({
     }
   };
 
+  const regionFilteredCities = useMemo(
+    () => filterCitiesByRegion(selectedRegion, ALL_MOROCCO_CITY_NAMES),
+    [selectedRegion]
+  );
+
   return (
     <div className="space-y-5">
       {/* Header & Collaborator Scope Filter */}
@@ -212,17 +247,62 @@ export const TeamPerformancePanel: React.FC<TeamPerformancePanelProps> = ({
           <div className="flex items-center gap-2">
             <Users className="h-5 w-5 text-orange-600" />
             <h2 className="text-base font-bold text-stone-900">
-              Classement Équipe, Évolution &amp; Payouts
+              Classement Équipe, Disponibilité Régionale &amp; Payouts
             </h2>
           </div>
           <p className="mt-0.5 text-xs text-stone-500">
             {selectedMember
-              ? `Résultats individuels de ${selectedMember.displayName} (${selectedMember.zone || 'Meknès'})`
-              : `Vue globale de toute l’équipe commerciale (${leaderboard.length} membre${leaderboard.length > 1 ? 's' : ''})`}
+              ? `Résultats & zone de disponibilité Orange Pro de ${selectedMember.displayName} (${resolveCityAndRegionFromZoneString(selectedMember.zone).formattedZone})`
+              : `Vue globale de l’équipe commerciale et de leur disponibilité par Ville & Région (${leaderboard.length} membre${leaderboard.length > 1 ? 's' : ''})`}
           </p>
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
+          {/* Filtrage de la Région à part */}
+          <div className="flex items-center gap-1.5 rounded-xl border border-stone-300 bg-stone-50 px-3 py-2">
+            <Filter className="h-3.5 w-3.5 text-orange-600" />
+            <select
+              aria-label="Filtrer l'équipe par région"
+              data-testid="team-region-filter"
+              value={selectedRegion}
+              onChange={(e) => {
+                const nextReg = e.target.value;
+                setSelectedRegion(nextReg);
+                setSelectedCity('all');
+                setSelectedUid('all');
+              }}
+              className="bg-transparent text-xs font-semibold text-stone-800 focus:outline-none"
+            >
+              <option value="all">Toutes les régions (12)</option>
+              {MOROCCO_REGIONS.map((reg) => (
+                <option key={reg.id} value={reg.id}>
+                  {reg.label}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          {/* Choix de l'ensemble des villes (filtrées par région) */}
+          <div className="flex items-center gap-1.5 rounded-xl border border-stone-300 bg-stone-50 px-3 py-2">
+            <select
+              aria-label="Filtrer l'équipe par ville"
+              data-testid="team-city-filter"
+              value={selectedCity}
+              onChange={(e) => {
+                setSelectedCity(e.target.value);
+                setSelectedUid('all');
+              }}
+              className="bg-transparent text-xs font-semibold text-stone-800 focus:outline-none"
+            >
+              <option value="all">Toutes les villes ({regionFilteredCities.length})</option>
+              {regionFilteredCities.map((city) => (
+                <option key={city} value={city}>
+                  {city}
+                </option>
+              ))}
+            </select>
+          </div>
+
           {/* Sélecteur de rôle */}
           <div className="flex items-center gap-1.5 rounded-xl border border-stone-300 bg-stone-50 px-3 py-2">
             <Filter className="h-3.5 w-3.5 text-orange-600" />
@@ -265,11 +345,16 @@ export const TeamPerformancePanel: React.FC<TeamPerformancePanelProps> = ({
               ))}
             </select>
           </div>
-          {(effectiveSelectedUid !== 'all' || selectedRole !== 'all') && (
+          {(effectiveSelectedUid !== 'all' ||
+            selectedRole !== 'all' ||
+            selectedRegion !== 'all' ||
+            selectedCity !== 'all') && (
             <button
               type="button"
               onClick={() => {
                 setSelectedRole('all');
+                setSelectedRegion('all');
+                setSelectedCity('all');
                 setSelectedUid('all');
               }}
               className="rounded-xl border border-orange-200 bg-orange-50 px-3 py-2 text-xs font-semibold text-orange-700 hover:bg-orange-100"
@@ -587,7 +672,15 @@ export const TeamPerformancePanel: React.FC<TeamPerformancePanelProps> = ({
                             </div>
                             <div className="mt-0.5 flex items-center gap-1.5 flex-wrap">
                               <RoleBadge role={row.role} showShort />
-                              <span className="text-[11px] text-stone-500">· {row.zone || 'Meknès'}</span>
+                              <span
+                                data-testid={`team-member-availability-zone-${row.uid}`}
+                                className="text-[11px] font-medium text-stone-600"
+                              >
+                                · {resolveCityAndRegionFromZoneString(row.zone || 'Meknès').formattedZone}
+                              </span>
+                              <span className="text-[10px] text-emerald-700 font-semibold">
+                                · Disponible Services Orange Pro
+                              </span>
                             </div>
                           </div>
                         </div>

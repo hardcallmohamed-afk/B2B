@@ -128,7 +128,7 @@ test('encodeLiveFieldTelemetry, parseLiveFieldTelemetry, and resolveCollaborator
   const parsedOffline = parseLiveFieldTelemetry(encoded, false);
   assert.equal(parsedOffline.status, 'hors_ligne');
 
-  // Zone fallback when GPS is null
+  // Zone fallback when GPS is null (formatted as Ville · Région for collaborator Orange Pro presentation)
   const fallbackCoords = resolveCollaboratorCoordinates({
     uid: 'user_fes_01',
     zone: 'Fès',
@@ -136,7 +136,8 @@ test('encodeLiveFieldTelemetry, parseLiveFieldTelemetry, and resolveCollaborator
     lng: null,
   });
   assert.equal(fallbackCoords.source, 'zone_reseau');
-  assert.equal(fallbackCoords.cityLabel, 'Fès');
+  assert.equal(fallbackCoords.cityLabel, 'Fès · Fès-Meknès');
+  assert.equal(fallbackCoords.regionLabel, 'Fès-Meknès');
   assert.ok(Math.abs(fallbackCoords.lat - 34.0331) < 0.05);
 
   const distFesMeknes = computeDistanceKm(34.0331, -5.0003, 33.8935, -5.5473);
