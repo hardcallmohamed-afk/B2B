@@ -1113,9 +1113,9 @@
         "ficheId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
         "action": {
           "type": "string",
-          "enum": ["creation", "modification", "statut", "secteur", "attribution", "restitution", "signature", "verification_web", "enrichissement", "devis", "rdv", "email", "acces"]
+          "enum": ["created", "field_updated", "status_changed", "assigned", "restored", "signed", "accessed", "activity_logged", "rdv_scheduled", "quote_generated", "web_verified", "enriched"]
         },
-        "field": { "type": "string", "maxLength": 64 },
+        "field": { "type": "string", "maxLength": 80 },
         "oldValue": { "type": "string", "maxLength": 300 },
         "newValue": { "type": "string", "maxLength": 300 },
         "summary": { "type": "string", "minLength": 1, "maxLength": 600 },
@@ -1126,7 +1126,7 @@
         "createdAt": { "type": "string", "format": "date-time" },
         "updatedAt": { "type": "string", "format": "date-time" }
       },
-      "required": ["id", "ownerId", "ficheId", "action", "summary", "actorUid", "actorName", "createdAtIso", "createdAt", "updatedAt"]
+      "required": ["id", "ownerId", "ficheId", "action", "summary", "actorUid", "actorName", "createdAtIso", "createdAt"]
     },
     "DirectChatChannel": {
       "title": "DirectChatChannel",
@@ -1136,15 +1136,18 @@
         "collabUid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
         "orgScope": { "type": "string", "enum": ["orange_pro_team"] },
         "collabName": { "type": "string", "minLength": 1, "maxLength": 120 },
-        "lastMessagePreview": { "type": "string", "maxLength": 240 },
-        "lastMessageAtIso": { "type": "string", "maxLength": 64 },
+        "collabEmail": { "type": "string", "maxLength": 160 },
+        "collabZone": { "type": "string", "maxLength": 100 },
+        "lastMessageText": { "type": "string", "maxLength": 500 },
+        "lastMessageAt": { "type": "string", "maxLength": 64 },
         "lastSenderUid": { "type": "string", "maxLength": 128 },
-        "unreadForAdmin": { "type": "integer" },
-        "unreadForCollab": { "type": "integer" },
+        "lastSenderName": { "type": "string", "maxLength": 120 },
+        "unreadByAdmin": { "type": "integer" },
+        "unreadByCollab": { "type": "integer" },
         "createdAt": { "type": "string", "format": "date-time" },
         "updatedAt": { "type": "string", "format": "date-time" }
       },
-      "required": ["collabUid", "orgScope", "collabName", "lastMessagePreview", "lastMessageAtIso", "lastSenderUid", "unreadForAdmin", "unreadForCollab", "createdAt", "updatedAt"]
+      "required": ["collabUid", "orgScope", "collabName", "lastMessageText", "lastMessageAt", "lastSenderUid", "unreadByAdmin", "unreadByCollab", "createdAt", "updatedAt"]
     },
     "DirectChatMessage": {
       "title": "DirectChatMessage",
@@ -1152,18 +1155,16 @@
       "type": "object",
       "properties": {
         "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
-        "channelUid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "collabUid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
         "orgScope": { "type": "string", "enum": ["orange_pro_team"] },
         "senderUid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
         "senderName": { "type": "string", "minLength": 1, "maxLength": 120 },
         "senderRole": { "type": "string", "maxLength": 40 },
-        "text": { "type": "string", "minLength": 1, "maxLength": 1500 },
-        "read": { "type": "boolean" },
+        "text": { "type": "string", "minLength": 1, "maxLength": 2000 },
         "createdAtIso": { "type": "string", "maxLength": 64 },
-        "createdAt": { "type": "string", "format": "date-time" },
-        "updatedAt": { "type": "string", "format": "date-time" }
+        "createdAt": { "type": "string", "format": "date-time" }
       },
-      "required": ["id", "channelUid", "orgScope", "senderUid", "senderName", "text", "read", "createdAtIso", "createdAt", "updatedAt"]
+      "required": ["id", "collabUid", "orgScope", "senderUid", "senderName", "text", "createdAtIso", "createdAt"]
     },
     "CoachingSession": {
       "title": "CoachingSession",
@@ -1174,18 +1175,18 @@
         "orgScope": { "type": "string", "enum": ["orange_pro_team"] },
         "collabName": { "type": "string", "minLength": 1, "maxLength": 120 },
         "collabConsentActive": { "type": "boolean" },
-        "status": { "type": "string", "enum": ["idle", "ready", "active", "ended"] },
+        "status": { "type": "string", "enum": ["idle", "collab_ready", "live", "ended"] },
         "adminUid": { "type": "string", "maxLength": 128 },
         "adminName": { "type": "string", "maxLength": 120 },
         "adminPttActive": { "type": "boolean" },
-        "offerSdp": { "type": "string", "maxLength": 16000 },
-        "answerSdp": { "type": "string", "maxLength": 16000 },
+        "offerSdp": { "type": "string", "maxLength": 24000 },
+        "answerSdp": { "type": "string", "maxLength": 24000 },
         "startedAtIso": { "type": "string", "maxLength": 64 },
         "updatedAtIso": { "type": "string", "maxLength": 64 },
         "createdAt": { "type": "string", "format": "date-time" },
         "updatedAt": { "type": "string", "format": "date-time" }
       },
-      "required": ["collabUid", "orgScope", "collabName", "collabConsentActive", "status", "adminPttActive", "updatedAtIso", "createdAt", "updatedAt"]
+      "required": ["collabUid", "orgScope", "collabName", "collabConsentActive", "status", "updatedAtIso", "createdAt", "updatedAt"]
     },
     "CoachingIceCandidate": {
       "title": "CoachingIceCandidate",
@@ -1193,14 +1194,13 @@
       "type": "object",
       "properties": {
         "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
-        "sessionUid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
-        "senderRole": { "type": "string", "enum": ["collab", "admin"] },
         "senderUid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "fromRole": { "type": "string", "enum": ["collab", "admin"] },
         "candidateJson": { "type": "string", "minLength": 1, "maxLength": 4000 },
-        "createdAt": { "type": "string", "format": "date-time" },
-        "updatedAt": { "type": "string", "format": "date-time" }
+        "createdAtIso": { "type": "string", "maxLength": 64 },
+        "createdAt": { "type": "string", "format": "date-time" }
       },
-      "required": ["id", "sessionUid", "senderRole", "senderUid", "candidateJson", "createdAt", "updatedAt"]
+      "required": ["id", "senderUid", "fromRole", "candidateJson", "createdAtIso", "createdAt"]
     }
   },
   "firestore": {

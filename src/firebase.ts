@@ -1263,27 +1263,6 @@ export async function syncMyUserPresenceProfile(params: {
 
   try {
     const snap = await getDoc(ref);
-    if (!snap.exists()) {
-      const clean = sanitizeUserPresencePayload({
-        uid: params.uid,
-        email: params.email,
-        displayName: params.displayName,
-        firstName,
-        lastName,
-        phonePro: params.phonePro,
-        avatarDataUrl: params.avatarDataUrl,
-        role: params.role,
-        zone: params.zone,
-        isOnline: true,
-      });
-      await setDoc(ref, {
-        ...clean,
-        createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
-      });
-      return;
-    }
-
     const cleanProfile = sanitizeUserPresencePayload({
       uid: params.uid,
       email: params.email,
@@ -1294,16 +1273,87 @@ export async function syncMyUserPresenceProfile(params: {
       avatarDataUrl: params.avatarDataUrl,
       role: params.role,
       zone: params.zone,
+      isOnline: true,
     });
-    await updateDoc(ref, {
-      displayName: cleanProfile.displayName,
-      firstName: cleanProfile.firstName,
-      lastName: cleanProfile.lastName,
-      phonePro: cleanProfile.phonePro,
-      avatarDataUrl: cleanProfile.avatarDataUrl,
-      zone: cleanProfile.zone,
-      updatedAt: serverTimestamp(),
-    });
+
+    if (!snap.exists()) {
+      try {
+        await setDoc(ref, {
+          ...cleanProfile,
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        });
+        return;
+      } catch {
+        // Race condition: document may have been created concurrently by startAttendanceSession
+        const freshSnap = await getDocFromServer(ref);
+        if (!freshSnap.exists()) throw new Error('Failed to create user_presence');
+        await updateDoc(ref, {
+          displayName: cleanProfile.displayName,
+          firstName: cleanProfile.firstName,
+          lastName: cleanProfile.lastName,
+          phonePro: cleanProfile.phonePro,
+          avatarDataUrl: cleanProfile.avatarDataUrl,
+          zone: cleanProfile.zone,
+          updatedAt: serverTimestamp(),
+        });
+        return;
+      }
+    }
+
+    const prev = snap.data();
+    const hasCoreSchema =
+      typeof prev.uid === 'string' &&
+      prev.orgScope === 'orange_pro_team' &&
+      typeof prev.email === 'string' &&
+      prev.email.length >= 3 &&
+      typeof prev.role === 'string' &&
+      Boolean(prev.createdAt);
+
+    if (hasCoreSchema) {
+      await updateDoc(ref, {
+        displayName: cleanProfile.displayName,
+        firstName: cleanProfile.firstName,
+        lastName: cleanProfile.lastName,
+        phonePro: cleanProfile.phonePro,
+        avatarDataUrl: cleanProfile.avatarDataUrl,
+        zone: cleanProfile.zone,
+        updatedAt: serverTimestamp(),
+      });
+    } else {
+      // Self-heal legacy partial presence doc while preserving existing createdAt/email if present
+      const repaired = sanitizeUserPresencePayload({
+        uid: params.uid,
+        email: typeof prev.email === 'string' && prev.email.length >= 3 ? prev.email : params.email,
+        displayName: cleanProfile.displayName,
+        firstName: cleanProfile.firstName,
+        lastName: cleanProfile.lastName,
+        phonePro: cleanProfile.phonePro,
+        avatarDataUrl: cleanProfile.avatarDataUrl,
+        role: typeof prev.role === 'string' ? prev.role : params.role,
+        zone: cleanProfile.zone,
+        isOnline: typeof prev.isOnline === 'boolean' ? prev.isOnline : true,
+        currentDevice: typeof prev.currentDevice === 'string' ? prev.currentDevice : '',
+        devicesUsed: Array.isArray(prev.devicesUsed) ? (prev.devicesUsed as string[]) : [],
+        lastLoginAt: typeof prev.lastLoginAt === 'string' ? prev.lastLoginAt : '',
+        lastLogoutAt: typeof prev.lastLogoutAt === 'string' ? prev.lastLogoutAt : '',
+        lastSeenAt: typeof prev.lastSeenAt === 'string' ? prev.lastSeenAt : '',
+        lastWorkDisconnectAt: typeof prev.lastWorkDisconnectAt === 'string' ? prev.lastWorkDisconnectAt : '',
+        workHoursDisconnectCount: Number(prev.workHoursDisconnectCount) || 0,
+        workHoursDisconnectTimes: Array.isArray(prev.workHoursDisconnectTimes)
+          ? (prev.workHoursDisconnectTimes as string[])
+          : [],
+        activeDateKey: typeof prev.activeDateKey === 'string' ? prev.activeDateKey : '',
+        todayWorkedSeconds: Number(prev.todayWorkedSeconds) || 0,
+        totalWorkedSeconds: Number(prev.totalWorkedSeconds) || 0,
+        currentSessionId: typeof prev.currentSessionId === 'string' ? prev.currentSessionId : '',
+      });
+      await setDoc(ref, {
+        ...repaired,
+        createdAt: prev.createdAt || serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+    }
   } catch (error) {
     handleFirestoreError(error, OperationType.WRITE, path);
   }
@@ -1399,13 +1449,13 @@ export async function startAttendanceSession(params: {
 
       const cleanPres = sanitizeUserPresencePayload({
         uid: params.uid,
-        email: params.email,
+        email: typeof prev.email === 'string' && prev.email.length >= 3 ? prev.email : params.email,
         displayName: params.displayName,
         firstName,
         lastName,
         phonePro: params.phonePro,
         avatarDataUrl: params.avatarDataUrl,
-        role: params.role,
+        role: typeof prev.role === 'string' ? prev.role : params.role,
         zone: params.zone,
         isOnline: true,
         currentDevice: params.deviceLabel,
@@ -1422,28 +1472,53 @@ export async function startAttendanceSession(params: {
         currentSessionId: params.sessionId,
       });
 
-      await updateDoc(presRef, {
-        displayName: cleanPres.displayName,
-        firstName: cleanPres.firstName,
-        lastName: cleanPres.lastName,
-        phonePro: cleanPres.phonePro,
-        avatarDataUrl: cleanPres.avatarDataUrl,
-        zone: cleanPres.zone,
-        isOnline: true,
-        currentDevice: cleanPres.currentDevice,
-        devicesUsed: cleanPres.devicesUsed,
-        lastLoginAt: cleanPres.lastLoginAt,
-        lastLogoutAt: cleanPres.lastLogoutAt,
-        lastSeenAt: cleanPres.lastSeenAt,
-        lastWorkDisconnectAt: cleanPres.lastWorkDisconnectAt,
-        workHoursDisconnectCount: cleanPres.workHoursDisconnectCount,
-        workHoursDisconnectTimes: cleanPres.workHoursDisconnectTimes,
-        activeDateKey: cleanPres.activeDateKey,
-        todayWorkedSeconds: cleanPres.todayWorkedSeconds,
-        totalWorkedSeconds: cleanPres.totalWorkedSeconds,
-        currentSessionId: cleanPres.currentSessionId,
-        updatedAt: serverTimestamp(),
-      });
+      const hasValidImmutableHeader =
+        prev.uid === params.uid &&
+        prev.orgScope === 'orange_pro_team' &&
+        typeof prev.email === 'string' &&
+        prev.email.length >= 3 &&
+        typeof prev.role === 'string' &&
+        Boolean(prev.createdAt);
+
+      if (hasValidImmutableHeader) {
+        try {
+          await updateDoc(presRef, {
+            displayName: cleanPres.displayName,
+            firstName: cleanPres.firstName,
+            lastName: cleanPres.lastName,
+            phonePro: cleanPres.phonePro,
+            avatarDataUrl: cleanPres.avatarDataUrl,
+            zone: cleanPres.zone,
+            isOnline: true,
+            currentDevice: cleanPres.currentDevice,
+            devicesUsed: cleanPres.devicesUsed,
+            lastLoginAt: cleanPres.lastLoginAt,
+            lastLogoutAt: cleanPres.lastLogoutAt,
+            lastSeenAt: cleanPres.lastSeenAt,
+            lastWorkDisconnectAt: cleanPres.lastWorkDisconnectAt,
+            workHoursDisconnectCount: cleanPres.workHoursDisconnectCount,
+            workHoursDisconnectTimes: cleanPres.workHoursDisconnectTimes,
+            activeDateKey: cleanPres.activeDateKey,
+            todayWorkedSeconds: cleanPres.todayWorkedSeconds,
+            totalWorkedSeconds: cleanPres.totalWorkedSeconds,
+            currentSessionId: cleanPres.currentSessionId,
+            updatedAt: serverTimestamp(),
+          });
+        } catch {
+          // Self-heal if legacy doc contained extra/malformed keys
+          await setDoc(presRef, {
+            ...cleanPres,
+            createdAt: prev.createdAt || serverTimestamp(),
+            updatedAt: serverTimestamp(),
+          });
+        }
+      } else {
+        await setDoc(presRef, {
+          ...cleanPres,
+          createdAt: prev.createdAt || serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        });
+      }
     } else {
       const cleanPres = sanitizeUserPresencePayload({
         uid: params.uid,
@@ -1469,11 +1544,33 @@ export async function startAttendanceSession(params: {
         totalWorkedSeconds: 0,
         currentSessionId: params.sessionId,
       });
-      await setDoc(presRef, {
-        ...cleanPres,
-        createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
-      });
+      try {
+        await setDoc(presRef, {
+          ...cleanPres,
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        });
+      } catch {
+        // Race condition: document was created concurrently on server; switch to clean updateDoc
+        const freshSnap = await getDocFromServer(presRef);
+        if (!freshSnap.exists()) throw new Error('Unable to initialize user_presence');
+        await updateDoc(presRef, {
+          displayName: cleanPres.displayName,
+          firstName: cleanPres.firstName,
+          lastName: cleanPres.lastName,
+          phonePro: cleanPres.phonePro,
+          avatarDataUrl: cleanPres.avatarDataUrl,
+          zone: cleanPres.zone,
+          isOnline: true,
+          currentDevice: cleanPres.currentDevice,
+          devicesUsed: cleanPres.devicesUsed,
+          lastLoginAt: cleanPres.lastLoginAt,
+          lastSeenAt: cleanPres.lastSeenAt,
+          activeDateKey: cleanPres.activeDateKey,
+          currentSessionId: cleanPres.currentSessionId,
+          updatedAt: serverTimestamp(),
+        });
+      }
     }
   } catch (error) {
     handleFirestoreError(error, OperationType.WRITE, presPath);
@@ -2401,7 +2498,8 @@ export function getDirectChatChannelDocRef(collabUid: string) {
 export function getDirectChatMessagesQuery(collabUid: string) {
   return query(
     collection(db, 'direct_chats', collabUid, 'messages'),
-    where('orgScope', '==', 'orange_pro_team')
+    where('orgScope', '==', 'orange_pro_team'),
+    where('collabUid', '==', collabUid)
   );
 }
 
@@ -2456,11 +2554,25 @@ export async function sendDirectChatMessage(params: {
         unreadByAdmin: params.isSenderSuperAdmin ? 0 : 1,
         unreadByCollab: params.isSenderSuperAdmin ? 1 : 0,
       });
-      await setDoc(channelRef, {
-        ...channelDoc,
-        createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
-      });
+      try {
+        await setDoc(channelRef, {
+          ...channelDoc,
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        });
+      } catch {
+        // Race condition: channel created concurrently; update cleanly instead
+        await updateDoc(channelRef, {
+          collabName: channelDoc.collabName,
+          lastMessageText: channelDoc.lastMessageText,
+          lastMessageAt: channelDoc.lastMessageAt,
+          lastSenderUid: channelDoc.lastSenderUid,
+          lastSenderName: channelDoc.lastSenderName || params.senderName.slice(0, 120),
+          unreadByAdmin: channelDoc.unreadByAdmin,
+          unreadByCollab: channelDoc.unreadByCollab,
+          updatedAt: serverTimestamp(),
+        });
+      }
     }
   } catch (error) {
     handleFirestoreError(error, OperationType.WRITE, `direct_chats/${params.collabUid}`);
