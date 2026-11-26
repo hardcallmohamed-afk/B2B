@@ -138,6 +138,406 @@ export function computeDefaultPayoutMad(
   return base;
 }
 
+export interface DiversifiaFixeCommissionItem {
+  id: string;
+  label: string;
+  category: 'Fibre / Fixe' | 'Box 4G / 5G';
+  commissionTotal: number;
+  firstInvoiceMad: number;
+  fourthInvoiceMad: number;
+  tier: OrangeProTier;
+}
+
+export interface DiversifiaMobileForfaitItem {
+  id: string;
+  label: string;
+  commissionTotal: number;
+  firstInvoiceMad: number;
+  fourthInvoiceMad: number;
+}
+
+export const DIVERSIFIA_FIXE_LINES: DiversifiaFixeCommissionItem[] = [
+  {
+    id: 'ftth_200',
+    label: 'FTTH 200 Mega / PARTAGE',
+    category: 'Fibre / Fixe',
+    commissionTotal: 400,
+    firstInvoiceMad: 400,
+    fourthInvoiceMad: 0,
+    tier: 'Grand Compte',
+  },
+  {
+    id: 'ftth_100',
+    label: 'FTTH 100 Mega / PARTAGE',
+    category: 'Fibre / Fixe',
+    commissionTotal: 300,
+    firstInvoiceMad: 300,
+    fourthInvoiceMad: 0,
+    tier: 'PME',
+  },
+  {
+    id: 'ftth_50',
+    label: 'FTTH 50 Mega / PARTAGE',
+    category: 'Fibre / Fixe',
+    commissionTotal: 250,
+    firstInvoiceMad: 250,
+    fourthInvoiceMad: 0,
+    tier: 'PME',
+  },
+  {
+    id: 'ftth_20',
+    label: 'FTTH 20Mega / PARTAGE',
+    category: 'Fibre / Fixe',
+    commissionTotal: 200,
+    firstInvoiceMad: 200,
+    fourthInvoiceMad: 0,
+    tier: 'TPE / Libéral',
+  },
+  {
+    id: 'tdlte',
+    label: 'TDLTE',
+    category: 'Fibre / Fixe',
+    commissionTotal: 250,
+    firstInvoiceMad: 250,
+    fourthInvoiceMad: 0,
+    tier: 'PME',
+  },
+  {
+    id: 'box_5g',
+    label: 'BOX 5G',
+    category: 'Box 4G / 5G',
+    commissionTotal: 250,
+    firstInvoiceMad: 125,
+    fourthInvoiceMad: 125,
+    tier: 'PME',
+  },
+  {
+    id: 'box_30_4g_prem',
+    label: 'BOX 30MG / 4G Prem',
+    category: 'Box 4G / 5G',
+    commissionTotal: 250,
+    firstInvoiceMad: 125,
+    fourthInvoiceMad: 125,
+    tier: 'PME',
+  },
+  {
+    id: 'box_12_4g',
+    label: 'BOX 12 MG / 4G',
+    category: 'Box 4G / 5G',
+    commissionTotal: 150,
+    firstInvoiceMad: 100,
+    fourthInvoiceMad: 50,
+    tier: 'TPE / Libéral',
+  },
+  {
+    id: 'adsl',
+    label: 'ADSL',
+    category: 'Fibre / Fixe',
+    commissionTotal: 99,
+    firstInvoiceMad: 99,
+    fourthInvoiceMad: 0,
+    tier: 'TPE / Libéral',
+  },
+];
+
+export const DIVERSIFIA_MOBILE_FORFAITS: DiversifiaMobileForfaitItem[] = [
+  {
+    id: 'illimite_inter',
+    label: 'ILLIMITE INTER',
+    commissionTotal: 250,
+    firstInvoiceMad: 125,
+    fourthInvoiceMad: 125,
+  },
+  {
+    id: 'illimite_na',
+    label: 'ILLIMITE NA',
+    commissionTotal: 200,
+    firstInvoiceMad: 100,
+    fourthInvoiceMad: 100,
+  },
+  {
+    id: '31_heure',
+    label: '31 HEURE',
+    commissionTotal: 200,
+    firstInvoiceMad: 100,
+    fourthInvoiceMad: 100,
+  },
+  {
+    id: '21_heure',
+    label: '21 HEURE',
+    commissionTotal: 150,
+    firstInvoiceMad: 75,
+    fourthInvoiceMad: 75,
+  },
+  {
+    id: '15_heure',
+    label: '15 HEURE',
+    commissionTotal: 120,
+    firstInvoiceMad: 60,
+    fourthInvoiceMad: 60,
+  },
+  {
+    id: '6_heure',
+    label: '6 HEURE',
+    commissionTotal: 80,
+    firstInvoiceMad: 40,
+    fourthInvoiceMad: 40,
+  },
+];
+
+export interface SectorCommissionProfile {
+  secteur: string;
+  label: string;
+  defaultEffectif: number;
+  mobileAdoptionRate: number;
+  preferredMobileForfaitId: string;
+  highBandwidthBias: boolean;
+}
+
+export const COMMISSION_SECTOR_PROFILES: Record<string, SectorCommissionProfile> = {
+  clinique: {
+    secteur: 'clinique',
+    label: 'Clinique privée',
+    defaultEffectif: 35,
+    mobileAdoptionRate: 0.35,
+    preferredMobileForfaitId: 'illimite_na',
+    highBandwidthBias: true,
+  },
+  industrie: {
+    secteur: 'industrie',
+    label: 'Industrie / Agro',
+    defaultEffectif: 30,
+    mobileAdoptionRate: 0.35,
+    preferredMobileForfaitId: 'illimite_inter',
+    highBandwidthBias: true,
+  },
+  btp: {
+    secteur: 'btp',
+    label: 'BTP / Construction',
+    defaultEffectif: 20,
+    mobileAdoptionRate: 0.45,
+    preferredMobileForfaitId: 'illimite_na',
+    highBandwidthBias: true,
+  },
+  gros: {
+    secteur: 'gros',
+    label: 'Commerce de gros',
+    defaultEffectif: 15,
+    mobileAdoptionRate: 0.45,
+    preferredMobileForfaitId: 'illimite_inter',
+    highBandwidthBias: false,
+  },
+  pme: {
+    secteur: 'pme',
+    label: 'PME Services',
+    defaultEffectif: 15,
+    mobileAdoptionRate: 0.4,
+    preferredMobileForfaitId: 'illimite_na',
+    highBandwidthBias: true,
+  },
+  enseignement: {
+    secteur: 'enseignement',
+    label: 'Enseignement / École',
+    defaultEffectif: 18,
+    mobileAdoptionRate: 0.25,
+    preferredMobileForfaitId: '21_heure',
+    highBandwidthBias: true,
+  },
+  riad_hotellerie: {
+    secteur: 'riad_hotellerie',
+    label: 'Riad / Hôtel',
+    defaultEffectif: 14,
+    mobileAdoptionRate: 0.3,
+    preferredMobileForfaitId: 'illimite_inter',
+    highBandwidthBias: true,
+  },
+  fiduciaire: {
+    secteur: 'fiduciaire',
+    label: 'Fiduciaire / Comptable',
+    defaultEffectif: 8,
+    mobileAdoptionRate: 0.35,
+    preferredMobileForfaitId: '21_heure',
+    highBandwidthBias: false,
+  },
+  immobilier: {
+    secteur: 'immobilier',
+    label: 'Immobilier / Promoteur',
+    defaultEffectif: 8,
+    mobileAdoptionRate: 0.4,
+    preferredMobileForfaitId: '31_heure',
+    highBandwidthBias: false,
+  },
+  notaire: {
+    secteur: 'notaire',
+    label: 'Notaire',
+    defaultEffectif: 6,
+    mobileAdoptionRate: 0.35,
+    preferredMobileForfaitId: '21_heure',
+    highBandwidthBias: false,
+  },
+  liberal: {
+    secteur: 'liberal',
+    label: 'Profession libérale',
+    defaultEffectif: 4,
+    mobileAdoptionRate: 0.3,
+    preferredMobileForfaitId: '21_heure',
+    highBandwidthBias: false,
+  },
+  commerce: {
+    secteur: 'commerce',
+    label: 'Pharmacie & Commerce',
+    defaultEffectif: 4,
+    mobileAdoptionRate: 0.25,
+    preferredMobileForfaitId: '15_heure',
+    highBandwidthBias: false,
+  },
+  auto_ecole: {
+    secteur: 'auto_ecole',
+    label: 'Auto-école',
+    defaultEffectif: 3,
+    mobileAdoptionRate: 0.35,
+    preferredMobileForfaitId: '6_heure',
+    highBandwidthBias: false,
+  },
+};
+
+export interface ForecastCommissionInput {
+  secteur: string;
+  effectifNum: number;
+  fixeLineId: string;
+  fixeQty: number;
+  mobileForfaitId: string;
+  mobileQty: number;
+}
+
+export interface ForecastCommissionBreakdown {
+  secteurLabel: string;
+  effectifUsed: number;
+  isEffectifEstimated: boolean;
+  fixeLine: DiversifiaFixeCommissionItem;
+  fixeQty: number;
+  fixeTotalMad: number;
+  fixeFirstInvoiceMad: number;
+  fixeFourthInvoiceMad: number;
+  mobileForfait: DiversifiaMobileForfaitItem;
+  mobileQty: number;
+  mobileTotalMad: number;
+  mobileFirstInvoiceMad: number;
+  mobileFourthInvoiceMad: number;
+  totalCommissionMad: number;
+  firstInvoiceMad: number;
+  fourthInvoiceMad: number;
+  recommendedTier: OrangeProTier;
+  summaryLabel: string;
+}
+
+export function getSectorCommissionProfile(secteur: string): SectorCommissionProfile {
+  return COMMISSION_SECTOR_PROFILES[secteur] || COMMISSION_SECTOR_PROFILES.pme;
+}
+
+export function parseEffectifNumber(effectifStr?: string): number {
+  const digits = String(effectifStr || '').replace(/\D+/g, '');
+  const n = parseInt(digits, 10);
+  return Number.isFinite(n) && n > 0 ? Math.min(5000, n) : 0;
+}
+
+export function buildDefaultForecastParams(
+  secteur: string,
+  effectifStr?: string
+): ForecastCommissionInput & { isEffectifEstimated: boolean } {
+  const profile = getSectorCommissionProfile(secteur);
+  const parsedEff = parseEffectifNumber(effectifStr);
+  const isEffectifEstimated = parsedEff <= 0;
+  const effectifNum = isEffectifEstimated ? profile.defaultEffectif : parsedEff;
+
+  let fixeLineId = 'ftth_50';
+  if (effectifNum >= 30 || (effectifNum >= 15 && profile.highBandwidthBias)) {
+    fixeLineId = 'ftth_200';
+  } else if (
+    effectifNum >= 10 ||
+    ['fiduciaire', 'notaire', 'immobilier', 'gros', 'btp'].includes(profile.secteur)
+  ) {
+    fixeLineId = 'ftth_100';
+  } else if (effectifNum >= 4) {
+    fixeLineId = 'ftth_50';
+  } else {
+    fixeLineId = 'ftth_20';
+  }
+
+  const fixeQty = effectifNum >= 60 ? 2 : 1;
+  const mobileQty = Math.max(1, Math.min(80, Math.round(effectifNum * profile.mobileAdoptionRate)));
+
+  return {
+    secteur: profile.secteur,
+    effectifNum,
+    isEffectifEstimated,
+    fixeLineId,
+    fixeQty,
+    mobileForfaitId: profile.preferredMobileForfaitId,
+    mobileQty,
+  };
+}
+
+export function calculateForecastCommission(
+  input: ForecastCommissionInput & { isEffectifEstimated?: boolean }
+): ForecastCommissionBreakdown {
+  const profile = getSectorCommissionProfile(input.secteur);
+  const effectifUsed = Math.max(1, Math.min(5000, Math.round(Number(input.effectifNum) || 1)));
+  const fixeLine =
+    DIVERSIFIA_FIXE_LINES.find((l) => l.id === input.fixeLineId) || DIVERSIFIA_FIXE_LINES[1];
+  const mobileForfait =
+    DIVERSIFIA_MOBILE_FORFAITS.find((m) => m.id === input.mobileForfaitId) ||
+    DIVERSIFIA_MOBILE_FORFAITS[1];
+
+  const fixeQty = Math.max(0, Math.min(50, Math.round(Number(input.fixeQty) || 0)));
+  const mobileQty = Math.max(0, Math.min(200, Math.round(Number(input.mobileQty) || 0)));
+
+  const fixeTotalMad = fixeLine.commissionTotal * fixeQty;
+  const fixeFirstInvoiceMad = fixeLine.firstInvoiceMad * fixeQty;
+  const fixeFourthInvoiceMad = fixeLine.fourthInvoiceMad * fixeQty;
+
+  const mobileTotalMad = mobileForfait.commissionTotal * mobileQty;
+  const mobileFirstInvoiceMad = mobileForfait.firstInvoiceMad * mobileQty;
+  const mobileFourthInvoiceMad = mobileForfait.fourthInvoiceMad * mobileQty;
+
+  const totalCommissionMad = fixeTotalMad + mobileTotalMad;
+  const firstInvoiceMad = fixeFirstInvoiceMad + mobileFirstInvoiceMad;
+  const fourthInvoiceMad = fixeFourthInvoiceMad + mobileFourthInvoiceMad;
+
+  const recommendedTier: OrangeProTier =
+    effectifUsed >= 30 || totalCommissionMad >= 2000
+      ? 'Grand Compte'
+      : effectifUsed >= 10 || totalCommissionMad >= 700
+      ? 'PME'
+      : 'TPE / Libéral';
+
+  const parts: string[] = [];
+  if (fixeQty > 0) parts.push(`${fixeQty}× ${fixeLine.label}`);
+  if (mobileQty > 0) parts.push(`${mobileQty}× Forfait ${mobileForfait.label}`);
+  const summaryLabel = parts.length > 0 ? parts.join(' + ') : 'Aucune ligne sélectionnée';
+
+  return {
+    secteurLabel: profile.label,
+    effectifUsed,
+    isEffectifEstimated: Boolean(input.isEffectifEstimated),
+    fixeLine,
+    fixeQty,
+    fixeTotalMad,
+    fixeFirstInvoiceMad,
+    fixeFourthInvoiceMad,
+    mobileForfait,
+    mobileQty,
+    mobileTotalMad,
+    mobileFirstInvoiceMad,
+    mobileFourthInvoiceMad,
+    totalCommissionMad,
+    firstInvoiceMad,
+    fourthInvoiceMad,
+    recommendedTier,
+    summaryLabel,
+  };
+}
+
 export interface SignedContractRecord {
   id: string;
   orgScope: 'orange_pro_team';

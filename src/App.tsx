@@ -6729,11 +6729,18 @@ ${assistPasteText.slice(0, 6000)}`;
     produitOrangePro: string;
     tier: OrangeProTier;
     payoutMad: number;
+    secteur?: string;
+    effectif?: string;
   }) => {
     if (!signContractTarget || !cloudUser) return;
     setSigningContractBusy(true);
     try {
       const contractId = `ctr_${signContractTarget.id}_${Date.now().toString(36)}`;
+      const resolvedSecteur =
+        payload.secteur && payload.secteur in SECTEURS_META
+          ? (payload.secteur as SecteurCode)
+          : signContractTarget.secteur;
+      const resolvedEffectif = payload.effectif?.trim() || signContractTarget.effectif;
       await createSignedContract({
         id: contractId,
         ownerId: cloudUser.uid,
@@ -6742,10 +6749,10 @@ ${assistPasteText.slice(0, 6000)}`;
         numeroFiche: signContractTarget.numeroFiche || '',
         societe: signContractTarget.societe,
         ville: signContractTarget.ville,
-        secteur: signContractTarget.secteur,
+        secteur: resolvedSecteur,
         produitOrangePro: payload.produitOrangePro,
         tier: payload.tier,
-        effectif: signContractTarget.effectif,
+        effectif: resolvedEffectif,
         payoutMad: payload.payoutMad,
         payoutStatus: isSuperAdmin ? 'Validé' : 'En attente',
         signedAt: new Date().toISOString(),
@@ -6754,7 +6761,13 @@ ${assistPasteText.slice(0, 6000)}`;
       setFiches((prev) =>
         prev.map((x) =>
           x.id === signContractTarget.id
-            ? { ...x, statut: 'Signé Orange Pro', statutUpdatedAt: new Date().toISOString() }
+            ? {
+                ...x,
+                secteur: resolvedSecteur as SecteurCode,
+                effectif: resolvedEffectif,
+                statut: 'Signé Orange Pro',
+                statutUpdatedAt: new Date().toISOString(),
+              }
             : x
         )
       );
@@ -7864,6 +7877,102 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
                 </div>
               </div>
 
+              {/* Boutons de filtrage rapide par statut CRM directement sous la barre de recherche */}
+              <div
+                data-testid="quick-statut-filter-bar"
+                role="group"
+                aria-label="Filtrage rapide par statut CRM"
+                className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-stone-100"
+              >
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <span className="text-xs font-semibold text-stone-500 mr-1">Statut CRM :</span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setStatutFilter('');
+                      if (crmViewMode !== 'table') setCrmViewMode('table');
+                    }}
+                    aria-pressed={statutFilter === ''}
+                    className={`px-2.5 py-1.5 rounded-lg text-xs font-semibold tabular-nums whitespace-nowrap transition-colors ${
+                      statutFilter === ''
+                        ? 'bg-stone-900 text-white'
+                        : 'bg-stone-100 text-stone-700 hover:bg-stone-200'
+                    }`}
+                  >
+                    Tous ({fiches.length})
+                  </button>
+                  {STATUTS_CRM.map((st) => {
+                    const isActive = statutFilter === st;
+                    return (
+                      <button
+                        key={st}
+                        type="button"
+                        onClick={() => {
+                          setStatutFilter(isActive ? '' : st);
+                          if (crmViewMode !== 'table') setCrmViewMode('table');
+                        }}
+                        aria-pressed={isActive}
+                        className={`px-2.5 py-1.5 rounded-lg text-xs font-semibold tabular-nums whitespace-nowrap transition-colors ${
+                          isActive
+                            ? 'bg-orange-600 text-white shadow-xs'
+                            : 'bg-stone-100 text-stone-700 hover:bg-stone-200'
+                        }`}
+                      >
+                        {st} ({kpiByStatut[st]})
+                      </button>
+                    );
+                  })}
+                </div>
+
+                <div className="flex items-center gap-3 text-xs tabular-nums">
+                  <div
+                    role="group"
+                    aria-label="Mode d'affichage CRM"
+                    className="inline-flex items-center p-0.5 bg-stone-100 rounded-lg border border-stone-200"
+                  >
+                    <button
+                      type="button"
+                      onClick={() => setCrmViewMode('table')}
+                      aria-pressed={crmViewMode === 'table'}
+                      className={`px-2.5 py-1 rounded-md text-xs font-semibold flex items-center gap-1 transition-colors ${
+                        crmViewMode === 'table'
+                          ? 'bg-white text-stone-900 shadow-xs'
+                          : 'text-stone-600 hover:text-stone-900'
+                      }`}
+                    >
+                      <Table2 className="w-3.5 h-3.5" />
+                      Tableau
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setCrmViewMode('kanban')}
+                      aria-pressed={crmViewMode === 'kanban'}
+                      className={`px-2.5 py-1 rounded-md text-xs font-semibold flex items-center gap-1 transition-colors ${
+                        crmViewMode === 'kanban'
+                          ? 'bg-white text-stone-900 shadow-xs'
+                          : 'text-stone-600 hover:text-stone-900'
+                      }`}
+                    >
+                      <KanbanSquare className="w-3.5 h-3.5" />
+                      Kanban
+                    </button>
+                  </div>
+                  <span className="text-stone-600 font-medium whitespace-nowrap" data-testid="portfolio-count">
+                    {filteredFiches.length} / {fiches.length} fiches
+                  </span>
+                  {hasActiveFilters && (
+                    <button
+                      type="button"
+                      onClick={resetAllFilters}
+                      className="text-orange-700 hover:text-orange-900 font-semibold flex items-center gap-1 whitespace-nowrap"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                      Réinitialiser
+                    </button>
+                  )}
+                </div>
+              </div>
+
               {/* 6 Filtres Multi-Critères Combinables */}
               <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2 pt-2 border-t border-stone-100 text-xs">
                 <select
@@ -7966,84 +8075,6 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
                     </option>
                   ))}
                 </select>
-              </div>
-
-              {/* Pipeline Statuts CRM + Compteur X / Y fiches */}
-              <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-stone-100">
-                <div className="flex flex-wrap items-center gap-1.5">
-                  <span className="text-xs font-semibold text-stone-500 mr-1">Pipeline :</span>
-                  <button
-                    type="button"
-                    onClick={() => setStatutFilter('')}
-                    className={`px-2.5 py-1 rounded-lg text-xs font-semibold tabular-nums ${
-                      statutFilter === '' ? 'bg-stone-900 text-white' : 'bg-stone-100 text-stone-600 hover:bg-stone-200'
-                    }`}
-                  >
-                    Tous ({fiches.length})
-                  </button>
-                  {STATUTS_CRM.map((st) => (
-                    <button
-                      key={st}
-                      type="button"
-                      onClick={() => setStatutFilter(statutFilter === st ? '' : st)}
-                      className={`px-2.5 py-1 rounded-lg text-xs font-medium tabular-nums ${
-                        statutFilter === st
-                          ? 'bg-orange-600 text-white'
-                          : 'bg-stone-100 text-stone-700 hover:bg-stone-200'
-                      }`}
-                    >
-                      {st} ({kpiByStatut[st]})
-                    </button>
-                  ))}
-                </div>
-
-                <div className="flex items-center gap-3 text-xs tabular-nums">
-                  <div
-                    role="group"
-                    aria-label="Mode d'affichage CRM"
-                    className="inline-flex items-center p-0.5 bg-stone-100 rounded-lg border border-stone-200"
-                  >
-                    <button
-                      type="button"
-                      onClick={() => setCrmViewMode('table')}
-                      aria-pressed={crmViewMode === 'table'}
-                      className={`px-2.5 py-1 rounded-md text-xs font-semibold flex items-center gap-1 transition-colors ${
-                        crmViewMode === 'table'
-                          ? 'bg-white text-stone-900 shadow-xs'
-                          : 'text-stone-600 hover:text-stone-900'
-                      }`}
-                    >
-                      <Table2 className="w-3.5 h-3.5" />
-                      Tableau
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setCrmViewMode('kanban')}
-                      aria-pressed={crmViewMode === 'kanban'}
-                      className={`px-2.5 py-1 rounded-md text-xs font-semibold flex items-center gap-1 transition-colors ${
-                        crmViewMode === 'kanban'
-                          ? 'bg-white text-stone-900 shadow-xs'
-                          : 'text-stone-600 hover:text-stone-900'
-                      }`}
-                    >
-                      <KanbanSquare className="w-3.5 h-3.5" />
-                      Kanban
-                    </button>
-                  </div>
-                  <span className="text-stone-600 font-medium" data-testid="portfolio-count">
-                    {filteredFiches.length} / {fiches.length} fiches
-                  </span>
-                  {hasActiveFilters && (
-                    <button
-                      type="button"
-                      onClick={resetAllFilters}
-                      className="text-orange-700 hover:text-orange-900 font-semibold flex items-center gap-1"
-                    >
-                      <X className="w-3.5 h-3.5" />
-                      Réinitialiser tous les filtres
-                    </button>
-                  )}
-                </div>
               </div>
             </section>
 

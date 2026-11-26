@@ -1,6 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  DIVERSIFIA_FIXE_LINES,
+  DIVERSIFIA_MOBILE_FORFAITS,
+  buildDefaultForecastParams,
+  calculateForecastCommission,
   computeDefaultPayoutMad,
   evaluateAchievements,
   buildTeamLeaderboard,
@@ -155,4 +159,50 @@ test('ROLE_BADGE_META defines distinct Admin, Commercial, and team role labels a
   const classes = new Set(TEAM_ROLE_ORDER.map((r) => ROLE_BADGE_META[r].className));
   assert.equal(shortLabels.size, TEAM_ROLE_ORDER.length);
   assert.equal(classes.size, TEAM_ROLE_ORDER.length);
+});
+
+test('DIVERSIFIA commission grid and sector+headcount forecast calculator compute exact payouts and invoice splits', () => {
+  // Exact DIVERSIFIA grid checks from Engagement sheet
+  assert.equal(DIVERSIFIA_FIXE_LINES.find((l) => l.id === 'ftth_200')?.commissionTotal, 400);
+  assert.equal(DIVERSIFIA_FIXE_LINES.find((l) => l.id === 'adsl')?.commissionTotal, 99);
+  const box12 = DIVERSIFIA_FIXE_LINES.find((l) => l.id === 'box_12_4g');
+  assert.equal(box12?.commissionTotal, 150);
+  assert.equal(box12?.firstInvoiceMad, 100);
+  assert.equal(box12?.fourthInvoiceMad, 50);
+
+  const illimiteInter = DIVERSIFIA_MOBILE_FORFAITS.find((m) => m.id === 'illimite_inter');
+  assert.equal(illimiteInter?.commissionTotal, 250);
+  assert.equal(illimiteInter?.firstInvoiceMad, 125);
+  assert.equal(illimiteInter?.fourthInvoiceMad, 125);
+
+  // Clinique 45 salariés -> FTTH 200M (400) + 16× ILLIMITE NA (200)
+  const cliniqueParams = buildDefaultForecastParams('clinique', '45');
+  assert.equal(cliniqueParams.fixeLineId, 'ftth_200');
+  assert.equal(cliniqueParams.isEffectifEstimated, false);
+  const cliniqueCalc = calculateForecastCommission(cliniqueParams);
+  assert.equal(cliniqueCalc.recommendedTier, 'Grand Compte');
+  assert.equal(
+    cliniqueCalc.firstInvoiceMad + cliniqueCalc.fourthInvoiceMad,
+    cliniqueCalc.totalCommissionMad
+  );
+
+  // Blank headcount -> estimated from sector default (auto_ecole = 3)
+  const autoEcoleParams = buildDefaultForecastParams('auto_ecole', '');
+  assert.equal(autoEcoleParams.isEffectifEstimated, true);
+  assert.equal(autoEcoleParams.effectifNum, 3);
+  const autoEcoleCalc = calculateForecastCommission(autoEcoleParams);
+  assert.equal(autoEcoleCalc.recommendedTier, 'TPE / Libéral');
+
+  // Exact Box 5G (250: 125 + 125) + 2× 21 HEURE (300: 150 + 150) = 550 DH (275 + 275)
+  const customCalc = calculateForecastCommission({
+    secteur: 'pme',
+    effectifNum: 12,
+    fixeLineId: 'box_5g',
+    fixeQty: 1,
+    mobileForfaitId: '21_heure',
+    mobileQty: 2,
+  });
+  assert.equal(customCalc.totalCommissionMad, 550);
+  assert.equal(customCalc.firstInvoiceMad, 275);
+  assert.equal(customCalc.fourthInvoiceMad, 275);
 });
