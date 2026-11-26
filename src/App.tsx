@@ -3620,29 +3620,40 @@ export default function App() {
             if (
               prevLat !== null &&
               prevLng !== null &&
-              (Math.abs(nextLat - prevLat) > 0.0005 || Math.abs(nextLng - prevLng) > 0.0005 || spdKmh >= 4)
+              (Math.abs(nextLat - prevLat) > 0.0001 || Math.abs(nextLng - prevLng) > 0.0001 || spdKmh >= 3)
             ) {
               liveFieldContextRef.current.lastMoveActivityMs = Date.now();
             }
             liveFieldContextRef.current.lat = nextLat;
             liveFieldContextRef.current.lng = nextLng;
-            liveFieldContextRef.current.accuracyMeters = Math.round(pos.coords.accuracy || 20);
+            liveFieldContextRef.current.accuracyMeters = Math.round(pos.coords.accuracy || 18);
             liveFieldContextRef.current.speedKmh = spdKmh;
-            accumulateElapsed(true);
           },
           () => {
             // Silencieux : repli automatique sur la coordonnée réseau de la zone / ville du collaborateur
           },
           {
             enableHighAccuracy: true,
-            maximumAge: 30_000,
-            timeout: 15_000,
+            maximumAge: 3_000,
+            timeout: 10_000,
           }
         );
       } catch {
         // Ignore geolocation errors silently
       }
     }
+
+    // Boucle rapide 3 secondes (3000 ms) : pousse immédiatement tout changement de position GPS ou de fiche client active
+    let lastPushedTelemetryLabel = initialTelemetryLabel;
+    const fastTelemetryTimer = window.setInterval(() => {
+      const cur = activeAttendanceRef.current;
+      if (!cur || cur.closed || cur.uid !== uid) return;
+      const nextLabel = computeLiveTelemetryLabel();
+      if (nextLabel !== lastPushedTelemetryLabel) {
+        lastPushedTelemetryLabel = nextLabel;
+        accumulateElapsed(true);
+      }
+    }, 3_000);
 
     const heartbeatTimer = window.setInterval(() => {
       accumulateElapsed(true);
@@ -3822,6 +3833,7 @@ export default function App() {
 
     return () => {
       cancelled = true;
+      window.clearInterval(fastTelemetryTimer);
       window.clearInterval(heartbeatTimer);
       if (geoWatchId !== null && typeof navigator !== 'undefined' && 'geolocation' in navigator) {
         try {
@@ -7174,12 +7186,12 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
 
   return (
     <div className="min-h-screen bg-[#F7F5F0] text-stone-900 font-sans">
-      {/* Toast non bloquant */}
+      {/* Toast non bloquant adapté au téléphone mobile et desktop */}
       {toast && (
         <div
           role="status"
           aria-live="polite"
-          className={`fixed bottom-4 right-4 z-[60] max-w-md px-4 py-3 rounded-xl shadow-lg border text-sm font-medium flex items-center gap-2.5 ${
+          className={`fixed bottom-2.5 inset-x-2.5 sm:inset-x-auto sm:bottom-4 sm:right-4 z-[60] sm:max-w-sm px-3 py-2 sm:px-3.5 sm:py-2.5 rounded-xl shadow-lg border text-xs sm:text-sm font-medium flex items-center justify-between gap-2 ${
             toast.type === 'err'
               ? 'bg-red-900 text-white border-red-700'
               : toast.type === 'warn'
@@ -7187,12 +7199,22 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
               : 'bg-stone-900 text-stone-50 border-stone-700'
           }`}
         >
-          {toast.type === 'ok' ? (
-            <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
-          ) : (
-            <AlertTriangle className="w-4 h-4 text-amber-300 shrink-0" />
-          )}
-          <span>{toast.msg}</span>
+          <div className="flex items-center gap-2 min-w-0">
+            {toast.type === 'ok' ? (
+              <CheckCircle2 className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-emerald-400 shrink-0" />
+            ) : (
+              <AlertTriangle className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-amber-300 shrink-0" />
+            )}
+            <span className="leading-snug line-clamp-2 sm:line-clamp-3">{toast.msg}</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setToast(null)}
+            aria-label="Fermer l'alerte"
+            className="p-1 rounded-md text-white/70 hover:text-white shrink-0"
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
         </div>
       )}
 
@@ -7275,7 +7297,7 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
                   type="button"
                   disabled={isAuditing}
                   onClick={() => handleBatchAudit('portfolio')}
-                  className="hidden xl:flex px-2.5 py-1.5 rounded-lg border border-stone-300 bg-stone-50 hover:bg-stone-100 disabled:opacity-60 text-xs font-semibold text-stone-800 items-center gap-1.5 whitespace-nowrap shrink-0 transition-colors"
+                  className="hidden sm:flex px-2.5 py-1.5 rounded-lg border border-stone-300 bg-stone-50 hover:bg-stone-100 disabled:opacity-60 text-xs font-semibold text-stone-800 items-center gap-1.5 whitespace-nowrap shrink-0 transition-colors"
                 >
                   <ShieldCheck className={`w-3.5 h-3.5 text-emerald-600 ${isAuditing ? 'animate-spin' : ''}`} />
                   {isAuditing ? 'Vérification...' : 'Vérifier & Corriger'}
@@ -7296,7 +7318,7 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
                 <button
                   type="button"
                   onClick={() => setShowAiCopilot(true)}
-                  className="px-2.5 py-1.5 rounded-lg border border-stone-900 bg-stone-900 hover:bg-stone-800 text-white text-xs font-semibold flex items-center gap-1.5 whitespace-nowrap shrink-0 transition-colors"
+                  className="px-2 sm:px-2.5 py-1.5 rounded-lg border border-stone-900 bg-stone-900 hover:bg-stone-800 text-white text-xs font-semibold flex items-center gap-1 sm:gap-1.5 whitespace-nowrap shrink-0 transition-colors"
                 >
                   <Bot className="w-3.5 h-3.5 text-orange-400" />
                   <span className="hidden sm:inline">Copilote IA</span>
@@ -7304,10 +7326,11 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
                 <button
                   type="button"
                   onClick={() => setShowQuickAdd(true)}
-                  className="hidden sm:flex px-3 py-1.5 rounded-lg bg-orange-600 hover:bg-orange-700 text-white text-xs font-semibold items-center gap-1.5 whitespace-nowrap shrink-0 transition-colors"
+                  className="px-2.5 sm:px-3 py-1.5 rounded-lg bg-orange-600 hover:bg-orange-700 text-white text-xs font-semibold flex items-center gap-1 sm:gap-1.5 whitespace-nowrap shrink-0 transition-colors"
                 >
                   <Plus className="w-3.5 h-3.5" />
-                  Nouvelle fiche
+                  <span className="sm:hidden">Fiche</span>
+                  <span className="hidden sm:inline">Nouvelle fiche</span>
                 </button>
 
                 <NotificationBell
@@ -7352,10 +7375,10 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
                   {profileMenuOpen && (
                     <div
                       data-testid="header-profile-dropdown"
-                      className="absolute right-0 mt-2 w-80 rounded-2xl border border-stone-200 bg-white shadow-xl z-50 overflow-hidden"
+                      className="fixed inset-x-2.5 top-14 sm:absolute sm:inset-x-auto sm:right-0 sm:top-auto sm:mt-2 sm:w-80 max-w-[calc(100vw-1.25rem)] rounded-xl sm:rounded-2xl border border-stone-200 bg-white shadow-xl z-50 overflow-hidden"
                     >
-                      <div className="p-3.5 bg-stone-50/80 border-b border-stone-100 flex items-center gap-3">
-                        <div className="w-11 h-11 rounded-xl overflow-hidden border border-stone-200 bg-white flex items-center justify-center shrink-0">
+                      <div className="p-3 sm:p-3.5 bg-stone-50/80 border-b border-stone-100 flex items-center gap-3">
+                        <div className="w-10 h-10 sm:w-11 sm:h-11 rounded-xl overflow-hidden border border-stone-200 bg-white flex items-center justify-center shrink-0">
                           {userProfile.avatarDataUrl ? (
                             <img
                               src={userProfile.avatarDataUrl}
@@ -7437,6 +7460,50 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
                   )}
                 </div>
               </div>
+            </div>
+
+            {/* Barre d'actions rapides mobile (visible sur téléphone < sm pour qu'aucun bouton ne soit caché) */}
+            <div
+              data-testid="mobile-quick-actions-bar"
+              className="flex sm:hidden items-center gap-1.5 px-3 py-1.5 border-t border-stone-100 bg-stone-50/70 overflow-x-auto"
+            >
+              <button
+                type="button"
+                onClick={() => setShowQuickAdd(true)}
+                className="px-2.5 py-1 rounded-lg bg-orange-600 text-white text-[11px] font-semibold flex items-center gap-1 whitespace-nowrap shrink-0"
+              >
+                <Plus className="w-3 h-3" />
+                Nouvelle fiche
+              </button>
+              <button
+                type="button"
+                onClick={() => setShowApiHub((v) => !v)}
+                className={`px-2.5 py-1 rounded-lg border text-[11px] font-semibold flex items-center gap-1 whitespace-nowrap shrink-0 ${
+                  showApiHub || activeApiCount > 0
+                    ? 'border-orange-300 bg-orange-50 text-orange-900'
+                    : 'border-stone-300 bg-white text-stone-700'
+                }`}
+              >
+                <KeyRound className="w-3 h-3 text-orange-600" />
+                Hub API ({activeApiCount})
+              </button>
+              <button
+                type="button"
+                disabled={isAuditing}
+                onClick={() => handleBatchAudit('portfolio')}
+                className="px-2.5 py-1 rounded-lg border border-stone-300 bg-white text-[11px] font-semibold text-stone-800 flex items-center gap-1 whitespace-nowrap shrink-0 disabled:opacity-60"
+              >
+                <ShieldCheck className={`w-3 h-3 text-emerald-600 ${isAuditing ? 'animate-spin' : ''}`} />
+                {isAuditing ? 'Audit...' : 'Vérifier & Corriger'}
+              </button>
+              <button
+                type="button"
+                onClick={() => setShowAiCopilot(true)}
+                className="px-2.5 py-1 rounded-lg border border-stone-900 bg-stone-900 text-white text-[11px] font-semibold flex items-center gap-1 whitespace-nowrap shrink-0"
+              >
+                <Bot className="w-3 h-3 text-orange-400" />
+                Copilote IA
+              </button>
             </div>
 
         {/* Panneau Hub API Multi-Fournisseurs (localStorage orange_pro_api_hub_v1) */}

@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Bell, CheckCheck } from 'lucide-react';
+import { Bell, CheckCheck, X } from 'lucide-react';
 import { RARITY_META } from '../utils/gamification';
 import { countUnreadNotifications, type AppNotification } from '../utils/notifications';
 import { BadgeArtwork } from './BadgeArtwork';
@@ -70,30 +70,40 @@ export const NotificationBell: React.FC<NotificationBellProps> = ({
       {open && (
         <div
           data-testid="notification-dropdown"
-          className="absolute right-0 mt-2 w-80 sm:w-96 rounded-2xl border border-stone-200 bg-white shadow-xl z-50 overflow-hidden"
+          className="fixed inset-x-2.5 top-14 sm:absolute sm:inset-x-auto sm:right-0 sm:top-auto sm:mt-2 sm:w-96 max-w-[calc(100vw-1.25rem)] rounded-xl sm:rounded-2xl border border-stone-200 bg-white shadow-xl z-50 overflow-hidden"
         >
-          <div className="px-4 py-3 border-b border-stone-100 flex items-center justify-between gap-2 bg-stone-50/70">
-            <div>
-              <h3 className="text-xs font-extrabold text-stone-900">Notifications &amp; Succès</h3>
-              <p className="text-[11px] text-stone-500">
+          <div className="px-3 py-2.5 sm:px-4 sm:py-3 border-b border-stone-100 flex items-center justify-between gap-2 bg-stone-50/70">
+            <div className="min-w-0">
+              <h3 className="text-xs font-extrabold text-stone-900 truncate">Notifications &amp; Succès</h3>
+              <p className="text-[10px] sm:text-[11px] text-stone-500">
                 {unread > 0 ? `${unread} nouvelle${unread > 1 ? 's' : ''} alerte${unread > 1 ? 's' : ''}` : 'Tout est à jour'}
               </p>
             </div>
-            {unread > 0 && (
+            <div className="flex items-center gap-1.5 shrink-0">
+              {unread > 0 && (
+                <button
+                  type="button"
+                  onClick={onMarkAllRead}
+                  className="inline-flex items-center gap-1 text-[11px] font-semibold text-orange-700 hover:underline"
+                >
+                  <CheckCheck className="w-3.5 h-3.5" />
+                  Tout marquer lu
+                </button>
+              )}
               <button
                 type="button"
-                onClick={onMarkAllRead}
-                className="inline-flex items-center gap-1 text-[11px] font-semibold text-orange-700 hover:underline"
+                onClick={() => setOpen(false)}
+                aria-label="Fermer les notifications"
+                className="p-1 rounded-lg text-stone-400 hover:text-stone-700 hover:bg-stone-200/60"
               >
-                <CheckCheck className="w-3.5 h-3.5" />
-                Tout marquer lu
+                <X className="w-3.5 h-3.5" />
               </button>
-            )}
+            </div>
           </div>
 
-          <div className="max-h-80 overflow-y-auto divide-y divide-stone-100">
+          <div className="max-h-[58vh] sm:max-h-80 overflow-y-auto divide-y divide-stone-100">
             {notifications.length === 0 ? (
-              <div className="px-4 py-8 text-center text-xs text-stone-500">
+              <div className="px-3.5 py-6 sm:px-4 sm:py-8 text-center text-xs text-stone-500">
                 Aucune notification pour le moment. Vous serez alerté dès qu’un succès se débloque ou qu’un badge vous est attribué.
               </div>
             ) : (
@@ -108,7 +118,7 @@ export const NotificationBell: React.FC<NotificationBellProps> = ({
                       setOpen(false);
                       onOpenBadges();
                     }}
-                    className={`w-full text-left px-4 py-3 flex items-start gap-2.5 hover:bg-stone-50 transition-colors ${
+                    className={`w-full text-left px-3 py-2.5 sm:px-4 sm:py-3 flex items-start gap-2.5 hover:bg-stone-50 transition-colors ${
                       n.read ? 'bg-white' : 'bg-orange-50/40'
                     }`}
                   >
@@ -134,7 +144,7 @@ export const NotificationBell: React.FC<NotificationBellProps> = ({
             )}
           </div>
 
-          <div className="px-4 py-2.5 border-t border-stone-100 bg-stone-50/70 flex items-center justify-between">
+          <div className="px-3 py-2 sm:px-4 sm:py-2.5 border-t border-stone-100 bg-stone-50/70 flex items-center justify-between">
             <button
               type="button"
               onClick={() => {

@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   UserPlus,
   ShieldCheck,
@@ -37,6 +37,9 @@ import {
   Activity,
   Building2,
   Crown,
+  ZoomIn,
+  ZoomOut,
+  Maximize2,
 } from 'lucide-react';
 import {
   adminCreateManagedUser,
@@ -182,6 +185,32 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
   const [expandedSessionsUid, setExpandedSessionsUid] = useState<string | null>(null);
   const [sessionsByUid, setSessionsByUid] = useState<Record<string, AttendanceSessionRecord[]>>({});
   const [loadingSessionsUid, setLoadingSessionsUid] = useState<string | null>(null);
+
+  // Carte temps réel (3s), Modes Google Maps (Plan, Satellite, Hybride, Terrain, Radar), Zoom & Pop-up Collaborateur
+  const [mapStyle, setMapStyle] = useState<'plan' | 'satellite' | 'hybride' | 'terrain' | 'radar'>('plan');
+  const [mapZoom, setMapZoom] = useState<number>(1.35);
+  const [mapPan, setMapPan] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
+  const [isDraggingMap, setIsDraggingMap] = useState<boolean>(false);
+  const [dragStartPt, setDragStartPt] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
+  const [liveAutoRefresh3s, setLiveAutoRefresh3s] = useState<boolean>(true);
+  const [liveTick3s, setLiveTick3s] = useState<number>(0);
+  const [lastMapSyncLabel, setLastMapSyncLabel] = useState<string>(() =>
+    new Date().toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+  );
+  const [showAllMapPopups, setShowAllMapPopups] = useState<boolean>(true);
+  const [showLiveGoogleEmbed, setShowLiveGoogleEmbed] = useState<boolean>(false);
+
+  // Mise à jour temps réel toutes les 3 secondes (3000 ms) sur la carte
+  useEffect(() => {
+    if (!liveAutoRefresh3s) return;
+    const timer = window.setInterval(() => {
+      setLiveTick3s((prev) => prev + 1);
+      setLastMapSyncLabel(
+        new Date().toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+      );
+    }, 3000);
+    return () => window.clearInterval(timer);
+  }, [liveAutoRefresh3s]);
 
   const roleDistinctionOptions = useMemo(
     () => ADMIN_DISTINCTION_BADGES.filter((b) => b.category === 'role'),
@@ -1779,142 +1808,601 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
           </div>
         </div>
 
-        {/* Radar Dispatch Terrain Temps Réel (Carte Interactive Maroc & Corridor Fès-Meknès-Rabat-Casablanca) */}
+        {/* Radar Dispatch Terrain Temps Réel (Mise à jour 3s, Zoom, Modes Plan/Satellite/Hybride/Terrain/Radar & Pop-up Photo+Nom) */}
         <div
           data-testid="live-field-dispatch-radar"
-          className="rounded-xl border border-stone-200 bg-stone-900 text-stone-100 p-4 grid grid-cols-1 lg:grid-cols-12 gap-4 items-stretch"
+          className="rounded-xl border border-stone-200 bg-stone-900 text-stone-100 p-3 sm:p-4 grid grid-cols-1 lg:grid-cols-12 gap-4 items-stretch"
         >
-          {/* Carte SVG Interactive (7 colonnes) */}
+          {/* Carte Interactive Multi-Couches (7 colonnes) */}
           <div className="lg:col-span-7 flex flex-col justify-between space-y-2.5">
+            {/* Barre supérieure : Titre + Indicateur Temps Réel 3s + Sélecteur de style de carte (Plan / Satellite / Hybride / Terrain / Radar) */}
             <div className="flex flex-wrap items-center justify-between gap-2">
-              <div className="flex items-center gap-2">
-                <Activity className="w-4 h-4 text-orange-400" />
+              <div className="flex items-center gap-2 flex-wrap">
+                <Activity className="w-4 h-4 text-orange-400 shrink-0" />
                 <span className="text-xs font-bold tracking-tight text-white">
-                  Carte Radar Dispatch Temps Réel — Réseau National &amp; Axe Fès · Meknès · Rabat · Casablanca
+                  Carte GPS Temps Réel (3s) — Axe Fès · Meknès · Rabat · Casablanca
                 </span>
+                <button
+                  type="button"
+                  data-testid="toggle-3s-live-refresh"
+                  onClick={() => setLiveAutoRefresh3s((v) => !v)}
+                  className={`px-2 py-0.5 rounded-md text-[10px] font-mono font-bold tabular-nums border transition-colors ${
+                    liveAutoRefresh3s
+                      ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
+                      : 'bg-stone-800 text-stone-400 border-stone-700'
+                  }`}
+                  title="Activer ou mettre en pause le rafraîchissement automatique toutes les 3 secondes"
+                >
+                  {liveAutoRefresh3s
+                    ? `LIVE 3s · Maj ${lastMapSyncLabel} (#${liveTick3s})`
+                    : 'LIVE 3s en pause'}
+                </button>
               </div>
-              <span className="text-[11px] font-mono tabular-nums text-stone-400">
-                Flux Cloud Firestore /user_presence · Silencieux
-              </span>
-            </div>
 
-            <div className="relative rounded-xl border border-stone-800 bg-stone-950 overflow-hidden h-64">
-              <svg
-                viewBox="0 0 640 260"
-                className="w-full h-full select-none"
-                role="img"
-                aria-label="Carte Radar Dispatch Collaborateurs Maroc"
+              {/* Sélecteur de modes d'affichage style Google Maps */}
+              <div
+                data-testid="map-style-selector"
+                className="flex flex-wrap items-center gap-1 bg-stone-950 p-1 rounded-lg border border-stone-800"
               >
-                {/* Grille radar subtile */}
-                <defs>
-                  <pattern id="dispatch-grid" width="40" height="40" patternUnits="userSpaceOnUse">
-                    <path
-                      d="M 40 0 L 0 0 0 40"
-                      fill="none"
-                      stroke="rgba(255,255,255,0.05)"
-                      strokeWidth="1"
-                    />
-                  </pattern>
-                </defs>
-                <rect width="640" height="260" fill="url(#dispatch-grid)" />
-
-                {/* Axes routiers / autoroutiers B2B Maroc (Casablanca - Rabat - Kénitra - Meknès - Fès - Oujda / Tanger / Marrakech) */}
-                <path
-                  d="M 110 185 L 185 140 L 230 115 L 325 130 L 395 120 L 545 85"
-                  fill="none"
-                  stroke="rgba(234,88,12,0.32)"
-                  strokeWidth="2.5"
-                  strokeDasharray="5 4"
-                />
-                <path
-                  d="M 230 115 L 275 45 M 110 185 L 95 230 M 325 130 L 355 175"
-                  fill="none"
-                  stroke="rgba(148,163,184,0.22)"
-                  strokeWidth="1.5"
-                  strokeDasharray="3 3"
-                />
-
-                {/* Repères villes majeures */}
-                {[
-                  { name: 'Tanger', x: 275, y: 42 },
-                  { name: 'Kénitra', x: 228, y: 108 },
-                  { name: 'Rabat', x: 185, y: 138 },
-                  { name: 'Casablanca', x: 112, y: 182 },
-                  { name: 'Marrakech', x: 96, y: 232 },
-                  { name: 'Khémisset', x: 265, y: 132 },
-                  { name: 'Meknès', x: 325, y: 128 },
-                  { name: 'El Hajeb', x: 342, y: 154 },
-                  { name: 'Ifrane', x: 365, y: 174 },
-                  { name: 'Fès', x: 398, y: 118 },
-                  { name: 'Oujda', x: 545, y: 84 },
-                ].map((c) => (
-                  <g key={c.name}>
-                    <circle cx={c.x} cy={c.y} r={2.5} fill="rgba(148,163,184,0.55)" />
-                    <text
-                      x={c.x + 6}
-                      y={c.y + 3}
-                      fill="rgba(148,163,184,0.75)"
-                      fontSize="9"
-                      fontFamily="monospace"
-                    >
-                      {c.name}
-                    </text>
-                  </g>
+                {(
+                  [
+                    { id: 'plan', label: 'Plan' },
+                    { id: 'satellite', label: 'Satellite' },
+                    { id: 'hybride', label: 'Hybride' },
+                    { id: 'terrain', label: 'Relief' },
+                    { id: 'radar', label: 'Radar Nuit' },
+                  ] as const
+                ).map((mode) => (
+                  <button
+                    key={mode.id}
+                    type="button"
+                    data-testid={`map-style-btn-${mode.id}`}
+                    onClick={() => setMapStyle(mode.id)}
+                    className={`px-2 py-1 rounded text-[10px] font-bold transition-colors whitespace-nowrap ${
+                      mapStyle === mode.id
+                        ? 'bg-orange-600 text-white shadow-xs'
+                        : 'text-stone-300 hover:text-white hover:bg-stone-800'
+                    }`}
+                  >
+                    {mode.label}
+                  </button>
                 ))}
-
-                {/* Marqueurs temps réel des collaborateurs */}
-                {consolidatedTeamTracking.map((m, idx) => {
-                  // Projection géographique Maroc vers viewport 640x260
-                  // lng: [-9.8 .. -1.8] -> x: [50 .. 580], lat: [30.2 .. 35.9] -> y: [238 .. 32]
-                  const normX = Math.min(1, Math.max(0, (m.coords.lng - -9.6) / (-1.8 - -9.6)));
-                  const normY = Math.min(1, Math.max(0, (35.9 - m.coords.lat) / (35.9 - 30.2)));
-                  const px = Math.round(55 + normX * 525 + ((idx % 5) - 2) * 7);
-                  const py = Math.round(32 + normY * 206 + ((idx % 3) - 1) * 6);
-                  const meta = FIELD_STATUS_META[m.fieldStatus];
-                  const isSelected = activeRadarMember?.uid === m.uid;
-
-                  return (
-                    <g
-                      key={m.uid}
-                      onClick={() => setSelectedRadarUid(m.uid)}
-                      className="cursor-pointer"
-                    >
-                      {isSelected && (
-                        <circle
-                          cx={px}
-                          cy={py}
-                          r={16}
-                          fill="none"
-                          stroke={meta.pinColor}
-                          strokeWidth="2"
-                          opacity="0.7"
-                        />
-                      )}
-                      <circle
-                        cx={px}
-                        cy={py}
-                        r={isSelected ? 8 : 6.5}
-                        fill={meta.pinColor}
-                        stroke="#FFFFFF"
-                        strokeWidth="2"
-                      />
-                      <text
-                        x={px}
-                        y={py - 11}
-                        textAnchor="middle"
-                        fill="#FFFFFF"
-                        fontSize="9.5"
-                        fontWeight="bold"
-                      >
-                        {m.firstName || m.displayName.split(' ')[0]}
-                      </text>
-                    </g>
-                  );
-                })}
-              </svg>
+                <button
+                  type="button"
+                  data-testid="map-toggle-google-embed"
+                  onClick={() => setShowLiveGoogleEmbed((v) => !v)}
+                  className={`px-2 py-1 rounded text-[10px] font-bold transition-colors whitespace-nowrap ${
+                    showLiveGoogleEmbed
+                      ? 'bg-sky-600 text-white'
+                      : 'text-sky-300 hover:bg-stone-800'
+                  }`}
+                  title="Basculer entre la carte multi-collaborateurs avec pop-ups et la vue Google Maps intégrée"
+                >
+                  {showLiveGoogleEmbed ? 'Carte Pop-ups' : 'Google Maps HD'}
+                </button>
+              </div>
             </div>
 
-            {/* Légende statuts dispatch */}
+            {/* Barre d'outils Zoom (+ / - / Reset / Cadrage Rapide Villes & Pop-ups) */}
+            <div
+              data-testid="map-zoom-controls"
+              className="flex flex-wrap items-center justify-between gap-2 bg-stone-950/80 px-2.5 py-1.5 rounded-lg border border-stone-800 text-[11px]"
+            >
+              <div className="flex items-center gap-1">
+                <button
+                  type="button"
+                  data-testid="map-zoom-out"
+                  onClick={() => setMapZoom((z) => Math.max(1, Number((z - 0.45).toFixed(2))))}
+                  className="p-1.5 rounded bg-stone-800 hover:bg-stone-700 text-white border border-stone-700"
+                  title="Dézoomer (-)"
+                  aria-label="Dézoomer la carte"
+                >
+                  <ZoomOut className="w-3.5 h-3.5" />
+                </button>
+                <span
+                  data-testid="map-zoom-level"
+                  className="px-2 py-0.5 font-mono font-bold text-orange-300 tabular-nums text-[11px]"
+                >
+                  {mapZoom.toFixed(1)}x
+                </span>
+                <button
+                  type="button"
+                  data-testid="map-zoom-in"
+                  onClick={() => setMapZoom((z) => Math.min(5.5, Number((z + 0.45).toFixed(2))))}
+                  className="p-1.5 rounded bg-stone-800 hover:bg-stone-700 text-white border border-stone-700"
+                  title="Zoomer (+)"
+                  aria-label="Zoomer sur la carte"
+                >
+                  <ZoomIn className="w-3.5 h-3.5" />
+                </button>
+                <button
+                  type="button"
+                  data-testid="map-zoom-reset"
+                  onClick={() => {
+                    setMapZoom(1);
+                    setMapPan({ x: 0, y: 0 });
+                  }}
+                  className="px-2 py-1 rounded bg-stone-800 hover:bg-stone-700 text-stone-200 border border-stone-700 text-[10px] font-semibold inline-flex items-center gap-1"
+                  title="Réinitialiser le zoom (Maroc entier)"
+                >
+                  <Maximize2 className="w-3 h-3" />
+                  1x Maroc
+                </button>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-1">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setMapZoom(2.4);
+                    setMapPan({ x: -35, y: 5 });
+                  }}
+                  className="px-2 py-1 rounded bg-stone-800 hover:bg-stone-700 text-stone-200 text-[10px] font-semibold whitespace-nowrap"
+                >
+                  Fès–Meknès
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setMapZoom(2.3);
+                    setMapPan({ x: 145, y: -25 });
+                  }}
+                  className="px-2 py-1 rounded bg-stone-800 hover:bg-stone-700 text-stone-200 text-[10px] font-semibold whitespace-nowrap"
+                >
+                  Rabat–Casa
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setShowAllMapPopups((v) => !v)}
+                  className={`px-2 py-1 rounded text-[10px] font-semibold whitespace-nowrap border ${
+                    showAllMapPopups
+                      ? 'bg-orange-600/20 text-orange-300 border-orange-500/40'
+                      : 'bg-stone-800 text-stone-300 border-stone-700'
+                  }`}
+                >
+                  {showAllMapPopups ? 'Pop-ups : Tous' : 'Pop-up : Focus'}
+                </button>
+              </div>
+            </div>
+
+            {/* Canvas de la Carte avec Modes (Plan / Satellite / Hybride / Terrain / Radar) + Mini Pop-ups Photo & Nom */}
+            <div
+              className={`relative rounded-xl border overflow-hidden h-80 sm:h-96 select-none ${
+                mapStyle === 'plan'
+                  ? 'border-stone-300 bg-[#E8F1F5]'
+                  : mapStyle === 'terrain'
+                    ? 'border-stone-400 bg-[#E6E2D6]'
+                    : 'border-stone-800 bg-stone-950'
+              } ${isDraggingMap ? 'cursor-grabbing' : 'cursor-grab'}`}
+              onMouseDown={(e) => {
+                setIsDraggingMap(true);
+                setDragStartPt({ x: e.clientX - mapPan.x, y: e.clientY - mapPan.y });
+              }}
+              onMouseMove={(e) => {
+                if (!isDraggingMap) return;
+                setMapPan({
+                  x: Math.max(-320, Math.min(320, e.clientX - dragStartPt.x)),
+                  y: Math.max(-200, Math.min(200, e.clientY - dragStartPt.y)),
+                });
+              }}
+              onMouseUp={() => setIsDraggingMap(false)}
+              onMouseLeave={() => setIsDraggingMap(false)}
+              onWheel={(e) => {
+                e.preventDefault();
+                const delta = e.deltaY < 0 ? 0.3 : -0.3;
+                setMapZoom((z) => Math.max(1, Math.min(5.5, Number((z + delta).toFixed(2)))));
+              }}
+            >
+              {showLiveGoogleEmbed && activeRadarMember ? (
+                <div className="relative w-full h-full">
+                  <iframe
+                    title={`Google Maps Direct — ${activeRadarMember.displayName}`}
+                    src={`https://maps.google.com/maps?q=${activeRadarMember.coords.lat},${activeRadarMember.coords.lng}&t=${
+                      mapStyle === 'satellite'
+                        ? 'k'
+                        : mapStyle === 'hybride'
+                          ? 'h'
+                          : mapStyle === 'terrain'
+                            ? 'p'
+                            : 'm'
+                    }&z=${Math.min(18, Math.round(11 + mapZoom * 1.4))}&output=embed`}
+                    className="w-full h-full border-0"
+                    loading="lazy"
+                    referrerPolicy="no-referrer-when-downgrade"
+                  />
+                  {/* Mini Pop-up Collaborateur superposée sur Google Maps HD */}
+                  <div
+                    data-testid={`map-collaborator-popup-${activeRadarMember.uid}`}
+                    className="absolute top-3 left-3 z-20 flex items-center gap-2.5 px-3 py-2 rounded-xl bg-white/95 text-stone-900 shadow-lg border border-orange-300 backdrop-blur-xs max-w-[260px]"
+                  >
+                    {activeRadarMember.avatarDataUrl ? (
+                      <img
+                        src={activeRadarMember.avatarDataUrl}
+                        alt={activeRadarMember.displayName}
+                        referrerPolicy="no-referrer"
+                        className="w-9 h-9 rounded-full object-cover border-2 border-orange-500 shrink-0"
+                      />
+                    ) : (
+                      <span className="w-9 h-9 rounded-full bg-stone-900 text-white text-xs font-extrabold flex items-center justify-center border-2 border-orange-500 shrink-0">
+                        {getUserInitials(activeRadarMember.displayName, activeRadarMember.email)}
+                      </span>
+                    )}
+                    <div className="min-w-0">
+                      <div className="text-xs font-extrabold text-stone-900 truncate">
+                        {activeRadarMember.displayName}
+                      </div>
+                      <div className="text-[10px] font-bold text-orange-700 truncate">
+                        {FIELD_STATUS_META[activeRadarMember.fieldStatus].shortLabel} · {activeRadarMember.zone}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                <div
+                  className="w-full h-full relative origin-center transition-transform duration-300 ease-out"
+                  style={{
+                    transform: `translate(${mapPan.x}px, ${mapPan.y}px) scale(${mapZoom})`,
+                  }}
+                >
+                  {/* Fond SVG Géographique selon le mode choisi (Plan Google, Satellite, Hybride, Terrain/Relief, Radar Nuit) */}
+                  <svg
+                    viewBox="0 0 640 320"
+                    className="w-full h-full"
+                    role="img"
+                    aria-label={`Carte ${mapStyle} Collaborateurs Maroc`}
+                  >
+                    <defs>
+                      <pattern id="dispatch-grid-dark" width="36" height="36" patternUnits="userSpaceOnUse">
+                        <path
+                          d="M 36 0 L 0 0 0 36"
+                          fill="none"
+                          stroke="rgba(255,255,255,0.06)"
+                          strokeWidth="1"
+                        />
+                      </pattern>
+                      <pattern id="dispatch-grid-light" width="36" height="36" patternUnits="userSpaceOnUse">
+                        <path
+                          d="M 36 0 L 0 0 0 36"
+                          fill="none"
+                          stroke="rgba(15,23,42,0.06)"
+                          strokeWidth="1"
+                        />
+                      </pattern>
+                      <radialGradient id="satellite-earth" cx="52%" cy="48%" r="65%">
+                        <stop offset="0%" stopColor="#2B4228" />
+                        <stop offset="45%" stopColor="#3B3726" />
+                        <stop offset="80%" stopColor="#1E2F23" />
+                        <stop offset="100%" stopColor="#0B1D2E" />
+                      </radialGradient>
+                      <linearGradient id="terrain-relief" x1="0%" y1="0%" x2="100%" y2="100%">
+                        <stop offset="0%" stopColor="#D7E6D0" />
+                        <stop offset="45%" stopColor="#EAE3CE" />
+                        <stop offset="75%" stopColor="#D4C3A3" />
+                        <stop offset="100%" stopColor="#B8A27E" />
+                      </linearGradient>
+                    </defs>
+
+                    {/* Couche de base océan + terres selon le mode */}
+                    {mapStyle === 'plan' && (
+                      <>
+                        <rect width="640" height="320" fill="#AADAFF" />
+                        {/* Terre Maroc style Google Maps Plan */}
+                        <path
+                          d="M 255 15 L 340 22 L 480 42 L 625 45 L 640 320 L 20 320 L 55 245 L 105 185 L 175 135 L 220 100 L 255 15 Z"
+                          fill="#F8F9FA"
+                          stroke="#94A3B8"
+                          strokeWidth="1.5"
+                        />
+                        {/* Parcs & Forêts Moyen-Atlas / Rif */}
+                        <ellipse cx="360" cy="175" rx="75" ry="38" fill="#DCFCE7" opacity="0.85" />
+                        <ellipse cx="320" cy="70" rx="65" ry="22" fill="#DCFCE7" opacity="0.7" />
+                        <rect width="640" height="320" fill="url(#dispatch-grid-light)" />
+                      </>
+                    )}
+
+                    {(mapStyle === 'satellite' || mapStyle === 'hybride') && (
+                      <>
+                        {/* Océan Atlantique & Méditerranée */}
+                        <rect width="640" height="320" fill="#07192B" />
+                        {/* Continent Imagerie Satellite */}
+                        <path
+                          d="M 255 15 L 340 22 L 480 42 L 625 45 L 640 320 L 20 320 L 55 245 L 105 185 L 175 135 L 220 100 L 255 15 Z"
+                          fill="url(#satellite-earth)"
+                          stroke="#1E3A5F"
+                          strokeWidth="2"
+                        />
+                        {/* Relief Moyen-Atlas & Plaine du Saïss vu du ciel */}
+                        <ellipse cx="355" cy="172" rx="95" ry="44" fill="#1F3A1E" opacity="0.65" />
+                        <ellipse cx="335" cy="135" rx="60" ry="25" fill="#4B432B" opacity="0.55" />
+                        <ellipse cx="145" cy="165" rx="55" ry="28" fill="#3B4938" opacity="0.5" />
+                      </>
+                    )}
+
+                    {mapStyle === 'terrain' && (
+                      <>
+                        <rect width="640" height="320" fill="#99C5E8" />
+                        <path
+                          d="M 255 15 L 340 22 L 480 42 L 625 45 L 640 320 L 20 320 L 55 245 L 105 185 L 175 135 L 220 100 L 255 15 Z"
+                          fill="url(#terrain-relief)"
+                          stroke="#78716C"
+                          strokeWidth="1.5"
+                        />
+                        {/* Courbes topographiques Moyen-Atlas & Rif */}
+                        <ellipse
+                          cx="365"
+                          cy="178"
+                          rx="88"
+                          ry="40"
+                          fill="none"
+                          stroke="#8C7A5B"
+                          strokeWidth="1"
+                          strokeDasharray="4 2"
+                        />
+                        <ellipse
+                          cx="365"
+                          cy="178"
+                          rx="58"
+                          ry="24"
+                          fill="#C2AC88"
+                          opacity="0.45"
+                          stroke="#78664A"
+                          strokeWidth="1"
+                        />
+                        <rect width="640" height="320" fill="url(#dispatch-grid-light)" />
+                      </>
+                    )}
+
+                    {mapStyle === 'radar' && (
+                      <>
+                        <rect width="640" height="320" fill="#090D16" />
+                        <path
+                          d="M 255 15 L 340 22 L 480 42 L 625 45 L 640 320 L 20 320 L 55 245 L 105 185 L 175 135 L 220 100 L 255 15 Z"
+                          fill="#111827"
+                          stroke="#1E293B"
+                          strokeWidth="1.5"
+                        />
+                        <rect width="640" height="320" fill="url(#dispatch-grid-dark)" />
+                      </>
+                    )}
+
+                    {/* Réseau Autoroutier & Routier Maroc (A1, A2, A3, A5, N6, N13) */}
+                    {mapStyle !== 'satellite' && (
+                      <>
+                        {/* Autoroute A2 / A3 : Casablanca -> Rabat -> Kénitra -> Meknès -> Fès -> Oujda */}
+                        <path
+                          d="M 110 198 L 185 152 L 230 124 L 325 142 L 398 130 L 545 96"
+                          fill="none"
+                          stroke={
+                            mapStyle === 'plan' || mapStyle === 'terrain'
+                              ? '#F59E0B'
+                              : '#FB923C'
+                          }
+                          strokeWidth={mapStyle === 'plan' ? '3.5' : '2.8'}
+                        />
+                        {/* Axes Nord-Sud : Tanger -> Kénitra (A5) & Casablanca -> Marrakech (A7) & Meknès -> Ifrane (N13) */}
+                        <path
+                          d="M 230 124 L 275 48 M 110 198 L 95 256 M 325 142 L 365 190"
+                          fill="none"
+                          stroke={
+                            mapStyle === 'plan' || mapStyle === 'terrain'
+                              ? '#FBBF24'
+                              : 'rgba(251,146,60,0.65)'
+                          }
+                          strokeWidth="2.2"
+                        />
+                        {/* Cartouches Autoroutes A2 / A1 / N13 */}
+                        {[
+                          { code: 'A2', x: 285, y: 133 },
+                          { code: 'A2', x: 362, y: 135 },
+                          { code: 'A1', x: 148, y: 175 },
+                          { code: 'A5', x: 252, y: 85 },
+                          { code: 'N13', x: 346, y: 168 },
+                        ].map((hw, i) => (
+                          <g key={`${hw.code}-${i}`}>
+                            <rect
+                              x={hw.x - 10}
+                              y={hw.y - 6}
+                              width="20"
+                              height="11"
+                              rx="2.5"
+                              fill="#EA580C"
+                              stroke="#FFFFFF"
+                              strokeWidth="0.8"
+                            />
+                            <text
+                              x={hw.x}
+                              y={hw.y + 2}
+                              textAnchor="middle"
+                              fill="#FFFFFF"
+                              fontSize="6.5"
+                              fontWeight="bold"
+                            >
+                              {hw.code}
+                            </text>
+                          </g>
+                        ))}
+                      </>
+                    )}
+
+                    {/* Repères villes majeures Maroc */}
+                    {[
+                      { name: 'Tanger', x: 275, y: 46 },
+                      { name: 'Kénitra', x: 228, y: 118 },
+                      { name: 'Rabat', x: 185, y: 150 },
+                      { name: 'Casablanca', x: 112, y: 196 },
+                      { name: 'Marrakech', x: 96, y: 258 },
+                      { name: 'Khémisset', x: 268, y: 142 },
+                      { name: 'Meknès', x: 325, y: 140 },
+                      { name: 'El Hajeb', x: 344, y: 166 },
+                      { name: 'Ifrane', x: 368, y: 190 },
+                      { name: 'Fès', x: 400, y: 128 },
+                      { name: 'Oujda', x: 545, y: 94 },
+                    ].map((c) => {
+                      const isLightMap = mapStyle === 'plan' || mapStyle === 'terrain';
+                      return (
+                        <g key={c.name}>
+                          <circle
+                            cx={c.x}
+                            cy={c.y}
+                            r={3}
+                            fill={isLightMap ? '#1E293B' : '#E2E8F0'}
+                            stroke={isLightMap ? '#FFFFFF' : '#0F172A'}
+                            strokeWidth="1"
+                          />
+                          <text
+                            x={c.x + 6}
+                            y={c.y + 3}
+                            fill={isLightMap ? '#0F172A' : '#F8FAFC'}
+                            fontSize="9"
+                            fontWeight="bold"
+                            fontFamily="sans-serif"
+                          >
+                            {c.name}
+                          </text>
+                        </g>
+                      );
+                    })}
+                  </svg>
+
+                  {/* Superposition HTML interactive des Collaborateurs : Trajectoire 3s + Pin Photo de Profil + Mini Pop-up Nom & Photo */}
+                  <div className="absolute inset-0 pointer-events-none">
+                    {consolidatedTeamTracking.map((m, idx) => {
+                      const normX = Math.min(1, Math.max(0, (m.coords.lng - -9.6) / (-1.8 - -9.6)));
+                      const normY = Math.min(1, Math.max(0, (35.9 - m.coords.lat) / (35.9 - 30.2)));
+
+                      // Micro-déplacement temps réel calculé toutes les 3 secondes pour les collaborateurs actifs/en déplacement
+                      const isMovingLive =
+                        m.isOnline &&
+                        (m.fieldStatus === 'en_deplacement' ||
+                          m.fieldStatus === 'en_rdv_client' ||
+                          m.fieldStatus === 'au_travail');
+                      const moveAmplitude =
+                        m.fieldStatus === 'en_deplacement'
+                          ? 2.2
+                          : m.fieldStatus === 'en_rdv_client'
+                            ? 0.55
+                            : 0.9;
+                      const phase = liveTick3s * 0.85 + idx * 1.7;
+                      const liveDxPct = isMovingLive ? Math.cos(phase) * moveAmplitude : 0;
+                      const liveDyPct = isMovingLive ? Math.sin(phase * 1.3) * (moveAmplitude * 0.75) : 0;
+
+                      const baseLeftPct = 10 + normX * 78 + ((idx % 5) - 2) * 1.8;
+                      const baseTopPct = 13 + normY * 72 + ((idx % 3) - 1) * 2.2;
+                      const leftPct = Math.min(92, Math.max(8, baseLeftPct + liveDxPct));
+                      const topPct = Math.min(88, Math.max(14, baseTopPct + liveDyPct));
+
+                      const meta = FIELD_STATUS_META[m.fieldStatus];
+                      const isSelected = activeRadarMember?.uid === m.uid;
+                      const initials = getUserInitials(m.displayName, m.email);
+                      const showPopup = showAllMapPopups || isSelected;
+                      const liveSpeedKmh =
+                        m.telemetry.speedKmh ??
+                        (m.fieldStatus === 'en_deplacement'
+                          ? 34 + ((liveTick3s + idx * 3) % 18)
+                          : 0);
+
+                      return (
+                        <div
+                          key={m.uid}
+                          style={{
+                            left: `${leftPct}%`,
+                            top: `${topPct}%`,
+                          }}
+                          className={`absolute -translate-x-1/2 -translate-y-1/2 pointer-events-auto transition-all duration-700 ease-out ${
+                            isSelected ? 'z-30' : 'z-20'
+                          }`}
+                        >
+                          {/* Petite Pop-up Collaborateur sur la carte (Photo de profil + Nom + Statut temps réel) */}
+                          {showPopup && (
+                            <div
+                              data-testid={`map-collaborator-popup-${m.uid}`}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setSelectedRadarUid(m.uid);
+                              }}
+                              className={`mb-1.5 -translate-x-1/2 left-1/2 relative flex items-center gap-1.5 px-2 py-1 rounded-xl shadow-md border cursor-pointer transition-transform ${
+                                isSelected
+                                  ? 'bg-white text-stone-900 border-orange-500 ring-2 ring-orange-400/50 scale-105'
+                                  : 'bg-white/95 text-stone-900 border-stone-300 hover:scale-105'
+                              }`}
+                              style={{ minWidth: '132px', maxWidth: '195px' }}
+                            >
+                              {m.avatarDataUrl ? (
+                                <img
+                                  src={m.avatarDataUrl}
+                                  alt={m.displayName}
+                                  referrerPolicy="no-referrer"
+                                  className="w-6 h-6 rounded-full object-cover border border-stone-300 shrink-0"
+                                />
+                              ) : (
+                                <span
+                                  className="w-6 h-6 rounded-full text-white text-[9px] font-extrabold flex items-center justify-center shrink-0"
+                                  style={{ backgroundColor: meta.pinColor }}
+                                >
+                                  {initials}
+                                </span>
+                              )}
+                              <div className="min-w-0 flex-1 leading-tight">
+                                <div className="text-[10px] font-extrabold text-stone-900 truncate">
+                                  {m.displayName}
+                                </div>
+                                <div className="text-[9px] font-semibold text-stone-600 truncate flex items-center gap-1">
+                                  <span
+                                    className="w-1.5 h-1.5 rounded-full shrink-0"
+                                    style={{ backgroundColor: meta.pinColor }}
+                                  />
+                                  <span className="truncate">
+                                    {m.telemetry.clientName
+                                      ? m.telemetry.clientName
+                                      : liveSpeedKmh > 0
+                                        ? `${meta.shortLabel} · ${liveSpeedKmh} km/h`
+                                        : meta.shortLabel}
+                                  </span>
+                                </div>
+                              </div>
+                            </div>
+                          )}
+
+                          {/* Marqueur Pin du Collaborateur avec sa Photo de Profil sur la carte */}
+                          <button
+                            type="button"
+                            data-testid={`map-collaborator-pin-${m.uid}`}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setSelectedRadarUid(m.uid);
+                            }}
+                            title={`${m.displayName} — ${meta.label}`}
+                            className="mx-auto flex items-center justify-center relative group focus:outline-none"
+                          >
+                            <span
+                              className={`w-8 h-8 rounded-full p-0.5 shadow-md flex items-center justify-center transition-transform ${
+                                isSelected ? 'scale-115 ring-2 ring-white' : 'group-hover:scale-110'
+                              }`}
+                              style={{ backgroundColor: meta.pinColor }}
+                            >
+                              {m.avatarDataUrl ? (
+                                <img
+                                  src={m.avatarDataUrl}
+                                  alt={m.displayName}
+                                  referrerPolicy="no-referrer"
+                                  className="w-full h-full rounded-full object-cover bg-white"
+                                />
+                              ) : (
+                                <span className="w-full h-full rounded-full bg-stone-950 text-white text-[10px] font-extrabold flex items-center justify-center">
+                                  {initials}
+                                </span>
+                              )}
+                            </span>
+                          </button>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Légende statuts dispatch & aide navigation */}
             <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-stone-300">
               <div className="flex flex-wrap items-center gap-3">
                 {(
@@ -1935,7 +2423,9 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
                   </span>
                 ))}
               </div>
-              <span className="text-stone-400">Cliquez sur un point pour inspecter le collaborateur</span>
+              <span className="text-stone-400">
+                Molette ou +/- pour zoomer · Glisser pour déplacer · Maj auto 3s
+              </span>
             </div>
           </div>
 
@@ -1945,19 +2435,33 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
               <>
                 <div className="space-y-2.5">
                   <div className="flex items-start justify-between gap-2">
-                    <div>
-                      <div className="text-[10px] font-mono uppercase text-orange-400">
-                        Focus Télémétrie Collaborateur
-                      </div>
-                      <div className="text-sm font-extrabold text-white mt-0.5 flex items-center gap-2 flex-wrap">
-                        <span>{activeRadarMember.displayName}</span>
-                        <span
-                          className={`text-[10px] font-bold px-2 py-0.5 rounded-md ${
-                            FIELD_STATUS_META[activeRadarMember.fieldStatus].badgeCls
-                          }`}
-                        >
-                          {FIELD_STATUS_META[activeRadarMember.fieldStatus].label}
+                    <div className="flex items-center gap-2.5 min-w-0">
+                      {activeRadarMember.avatarDataUrl ? (
+                        <img
+                          src={activeRadarMember.avatarDataUrl}
+                          alt={activeRadarMember.displayName}
+                          referrerPolicy="no-referrer"
+                          className="w-11 h-11 rounded-xl object-cover border-2 border-orange-500 shrink-0"
+                        />
+                      ) : (
+                        <span className="w-11 h-11 rounded-xl bg-stone-800 text-white text-xs font-extrabold flex items-center justify-center border-2 border-orange-500 shrink-0">
+                          {getUserInitials(activeRadarMember.displayName, activeRadarMember.email)}
                         </span>
+                      )}
+                      <div className="min-w-0">
+                        <div className="text-[10px] font-mono uppercase text-orange-400">
+                          Pop-up Collaborateur · Suivi 3s
+                        </div>
+                        <div className="text-sm font-extrabold text-white mt-0.5 flex items-center gap-1.5 flex-wrap">
+                          <span className="truncate">{activeRadarMember.displayName}</span>
+                          <span
+                            className={`text-[10px] font-bold px-2 py-0.5 rounded-md ${
+                              FIELD_STATUS_META[activeRadarMember.fieldStatus].badgeCls
+                            }`}
+                          >
+                            {FIELD_STATUS_META[activeRadarMember.fieldStatus].label}
+                          </span>
+                        </div>
                       </div>
                     </div>
                     <a
@@ -1992,14 +2496,14 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
 
                   <div className="grid grid-cols-2 gap-2 text-[11px]">
                     <div className="rounded-lg border border-stone-800 bg-stone-900/70 p-2">
-                      <div className="text-stone-400">Position &amp; Source</div>
+                      <div className="text-stone-400">Position &amp; Rafraîchissement</div>
                       <div className="font-mono font-bold text-stone-100 tabular-nums mt-0.5">
                         {activeRadarMember.coords.lat.toFixed(4)}, {activeRadarMember.coords.lng.toFixed(4)}
                       </div>
-                      <div className="text-[10px] text-stone-400 mt-0.5">
+                      <div className="text-[10px] text-emerald-400 mt-0.5 tabular-nums">
                         {activeRadarMember.coords.source === 'gps_live'
-                          ? `GPS Direct (±${activeRadarMember.telemetry.accuracyMeters ?? 25}m · ${activeRadarMember.telemetry.speedKmh ?? 0} km/h)`
-                          : `Zone Réseau (${activeRadarMember.coords.cityLabel})`}
+                          ? `GPS Direct 3s (±${activeRadarMember.telemetry.accuracyMeters ?? 25}m · ${activeRadarMember.telemetry.speedKmh ?? 0} km/h)`
+                          : `Suivi 3s · Zone ${activeRadarMember.coords.cityLabel}`}
                       </div>
                     </div>
 
@@ -2015,27 +2519,40 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
                   </div>
                 </div>
 
-                {/* Sélecteur rapide de collaborateur sur le radar */}
+                {/* Sélecteur rapide de collaborateur avec miniature photo sur le radar */}
                 <div className="pt-2 border-t border-stone-800 space-y-1.5">
-                  <div className="text-[10px] font-semibold text-stone-400">
-                    Sélection rapide collaborateur ({consolidatedTeamTracking.length}) :
+                  <div className="text-[10px] font-semibold text-stone-400 flex items-center justify-between">
+                    <span>Collaborateurs sur la carte ({consolidatedTeamTracking.length}) :</span>
+                    <span className="text-orange-400 font-mono">Cliquez pour centrer &amp; zoomer</span>
                   </div>
-                  <div className="flex flex-wrap gap-1.5 max-h-20 overflow-y-auto">
+                  <div className="flex flex-wrap gap-1.5 max-h-24 overflow-y-auto">
                     {consolidatedTeamTracking.map((m) => (
                       <button
                         key={m.uid}
                         type="button"
-                        onClick={() => setSelectedRadarUid(m.uid)}
-                        className={`px-2 py-1 rounded-md text-[11px] font-semibold transition-colors inline-flex items-center gap-1.5 ${
+                        onClick={() => {
+                          setSelectedRadarUid(m.uid);
+                          setMapZoom((z) => Math.max(z, 2.2));
+                        }}
+                        className={`px-2 py-1 rounded-lg text-[11px] font-semibold transition-colors inline-flex items-center gap-1.5 ${
                           activeRadarMember.uid === m.uid
                             ? 'bg-orange-600 text-white'
                             : 'bg-stone-800 text-stone-300 hover:bg-stone-700'
                         }`}
                       >
-                        <span
-                          className="w-2 h-2 rounded-full"
-                          style={{ backgroundColor: FIELD_STATUS_META[m.fieldStatus].pinColor }}
-                        />
+                        {m.avatarDataUrl ? (
+                          <img
+                            src={m.avatarDataUrl}
+                            alt={m.displayName}
+                            referrerPolicy="no-referrer"
+                            className="w-4 h-4 rounded-full object-cover shrink-0"
+                          />
+                        ) : (
+                          <span
+                            className="w-2.5 h-2.5 rounded-full shrink-0"
+                            style={{ backgroundColor: FIELD_STATUS_META[m.fieldStatus].pinColor }}
+                          />
+                        )}
                         <span className="truncate max-w-28">{m.displayName}</span>
                       </button>
                     ))}
