@@ -22,6 +22,7 @@ import { getUserInitials } from '../utils/avatarResize';
 import { DiversifiaMark } from './DiversifiaLogo';
 import { RoleBadge } from './RoleBadge';
 import { buildHashFromRoute } from '../utils/crmRouter';
+import { PWAInstallButton } from './PWAInstallButton';
 
 export type CrmTabId =
   | 'portefeuille'
@@ -392,6 +393,8 @@ export const CrmSidebar: React.FC<CrmSidebarProps> = ({
         {/* Bottom Profile & Session Footer */}
         <div className="border-t border-stone-800/80 p-2 space-y-1.5">
           {!compact ? (
+            <>
+            <PWAInstallButton variant="sidebar" />
             <div className="rounded-xl bg-stone-900/90 border border-stone-800 p-2 space-y-1.5">
               <button
                 type="button"
@@ -442,8 +445,10 @@ export const CrmSidebar: React.FC<CrmSidebarProps> = ({
                 </button>
               </div>
             </div>
+            </>
           ) : (
             <div className="flex flex-col items-center gap-1.5">
+              <PWAInstallButton variant="sidebar-compact" />
               <button
                 type="button"
                 onClick={() => handleNavClick('compte')}

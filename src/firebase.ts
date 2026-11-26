@@ -1654,9 +1654,9 @@ export async function heartbeatAttendanceSession(params: {
       updatedAt: serverTimestamp(),
     });
   } catch {
-    // Self-healing reconciliation: multi-device skew, sleep gap > 120s, or missing doc
+    // Self-healing reconciliation from server (fixes multi-device counter skew, stale cache, or legacy schema)
     try {
-      const snap = await getDoc(presRef);
+      const snap = await getDocFromServer(presRef).catch(() => getDoc(presRef));
       if (snap.exists()) {
         const prev = snap.data();
         const sameDay = prev.activeDateKey === params.dateKey;
@@ -1666,21 +1666,81 @@ export async function heartbeatAttendanceSession(params: {
           ? Math.min(120, Math.max(0, safeToday - prevToday))
           : Math.min(120, Math.max(0, safeToday));
         safeToday = sameDay
-          ? Math.min(86400, prevToday + deltaGuess)
-          : Math.min(86400, deltaGuess);
+          ? Math.min(86400, Math.max(prevToday, prevToday + deltaGuess))
+          : Math.min(86400, Math.max(0, deltaGuess));
         const totalDelta = Math.min(120, Math.max(deltaGuess, safeTotal - prevTotal));
-        safeTotal = Math.min(100000000, prevTotal + Math.max(0, totalDelta));
+        safeTotal = Math.min(100000000, Math.max(prevTotal, prevTotal + Math.max(0, totalDelta)));
 
-        await updateDoc(presRef, {
-          isOnline: true,
-          currentDevice: params.deviceLabel.slice(0, 160),
-          lastSeenAt: params.nowIso.slice(0, 64),
-          activeDateKey: params.dateKey.slice(0, 16),
-          todayWorkedSeconds: safeToday,
-          totalWorkedSeconds: safeTotal,
-          currentSessionId: params.sessionId.slice(0, 128),
-          updatedAt: serverTimestamp(),
-        });
+        const prevDevices = Array.isArray(prev.devicesUsed) ? (prev.devicesUsed as string[]) : [];
+        const nextDevices = buildDeviceHistoryList(prevDevices, params.deviceLabel, 12);
+
+        const hasValidHeader =
+          prev.uid === params.uid &&
+          prev.orgScope === 'orange_pro_team' &&
+          typeof prev.email === 'string' &&
+          prev.email.length >= 3 &&
+          typeof prev.role === 'string' &&
+          isFirestoreTimestampValue(prev.createdAt);
+
+        if (hasValidHeader) {
+          await updateDoc(presRef, {
+            isOnline: true,
+            currentDevice: params.deviceLabel.slice(0, 160),
+            devicesUsed: nextDevices,
+            lastSeenAt: params.nowIso.slice(0, 64),
+            activeDateKey: params.dateKey.slice(0, 16),
+            todayWorkedSeconds: safeToday,
+            totalWorkedSeconds: safeTotal,
+            currentSessionId: params.sessionId.slice(0, 128),
+            updatedAt: serverTimestamp(),
+          });
+        } else {
+          const fallbackName =
+            params.fallbackProfile?.displayName ||
+            (typeof prev.displayName === 'string' ? prev.displayName : 'Collaborateur');
+          const { firstName, lastName } = splitFirstAndLastName(fallbackName);
+          const repaired = sanitizeUserPresencePayload({
+            uid: params.uid,
+            email:
+              typeof prev.email === 'string' && prev.email.length >= 3
+                ? prev.email
+                : params.fallbackProfile?.email || '',
+            displayName: fallbackName,
+            firstName,
+            lastName,
+            phonePro:
+              params.fallbackProfile?.phonePro ||
+              (typeof prev.phonePro === 'string' ? prev.phonePro : ''),
+            avatarDataUrl:
+              params.fallbackProfile?.avatarDataUrl ||
+              (typeof prev.avatarDataUrl === 'string' ? prev.avatarDataUrl : ''),
+            role: typeof prev.role === 'string' ? prev.role : params.fallbackProfile?.role || 'commercial',
+            zone:
+              params.fallbackProfile?.zone ||
+              (typeof prev.zone === 'string' ? prev.zone : 'Meknès'),
+            isOnline: true,
+            currentDevice: params.deviceLabel,
+            devicesUsed: nextDevices,
+            lastLoginAt: typeof prev.lastLoginAt === 'string' && prev.lastLoginAt ? prev.lastLoginAt : params.nowIso,
+            lastLogoutAt: typeof prev.lastLogoutAt === 'string' ? prev.lastLogoutAt : '',
+            lastSeenAt: params.nowIso,
+            lastWorkDisconnectAt:
+              typeof prev.lastWorkDisconnectAt === 'string' ? prev.lastWorkDisconnectAt : '',
+            workHoursDisconnectCount: Math.max(0, Math.round(Number(prev.workHoursDisconnectCount) || 0)),
+            workHoursDisconnectTimes: Array.isArray(prev.workHoursDisconnectTimes)
+              ? (prev.workHoursDisconnectTimes as string[])
+              : [],
+            activeDateKey: params.dateKey,
+            todayWorkedSeconds: safeToday,
+            totalWorkedSeconds: safeTotal,
+            currentSessionId: params.sessionId,
+          });
+          await setDoc(presRef, {
+            ...repaired,
+            createdAt: isFirestoreTimestampValue(prev.createdAt) ? prev.createdAt : serverTimestamp(),
+            updatedAt: serverTimestamp(),
+          });
+        }
       } else if (params.fallbackProfile) {
         const { firstName, lastName } = splitFirstAndLastName(params.fallbackProfile.displayName);
         const cleanPres = sanitizeUserPresencePayload({
@@ -1739,45 +1799,68 @@ export async function closeAttendanceSession(params: {
   sessionWorkedSeconds: number;
   reason: string;
   duringWorkHours: boolean;
+  isManualSignOut?: boolean;
 }): Promise<void> {
   const presRef = doc(db, 'user_presence', params.uid);
   const sessRef = doc(db, 'user_presence', params.uid, 'sessions', params.sessionId);
-  const safeToday = Math.min(86400, Math.max(0, Math.round(params.todayWorkedSeconds)));
-  const safeTotal = Math.min(100000000, Math.max(0, Math.round(params.totalWorkedSeconds)));
+  let safeToday = Math.min(86400, Math.max(0, Math.round(params.todayWorkedSeconds)));
+  let safeTotal = Math.min(100000000, Math.max(0, Math.round(params.totalWorkedSeconds)));
   const safeSession = Math.min(86400, Math.max(0, Math.round(params.sessionWorkedSeconds)));
   const cleanReason = params.reason.trim().slice(0, 80) || 'Déconnexion';
 
   try {
-    const snap = await getDoc(presRef);
+    const snap = await getDocFromServer(presRef).catch(() => getDoc(presRef));
     if (snap.exists()) {
       const prev = snap.data();
-      let disconnectCount = Math.max(0, Math.round(Number(prev.workHoursDisconnectCount) || 0));
-      let disconnectTimes = Array.isArray(prev.workHoursDisconnectTimes)
-        ? (prev.workHoursDisconnectTimes as string[])
-        : [];
-      let lastWorkDisconnectAt =
-        typeof prev.lastWorkDisconnectAt === 'string' ? prev.lastWorkDisconnectAt : '';
+      const activeServerSessionId =
+        typeof prev.currentSessionId === 'string' ? prev.currentSessionId : '';
 
-      if (params.duringWorkHours) {
-        disconnectCount += 1;
-        lastWorkDisconnectAt = params.logoutAtIso.slice(0, 64);
-        const entry = buildWorkDisconnectEntry(params.logoutAtIso, cleanReason);
-        disconnectTimes = [entry, ...disconnectTimes.filter((x) => x !== entry)].slice(0, 30);
+      // If another device/tab took over as the active session and this is only a tab close (not manual sign-out),
+      // do NOT flip the collaborator's global status to Hors Ligne!
+      const anotherSessionIsActive =
+        !params.isManualSignOut &&
+        Boolean(activeServerSessionId) &&
+        activeServerSessionId !== params.sessionId;
+
+      if (!anotherSessionIsActive) {
+        const sameDay = prev.activeDateKey === params.dateKey;
+        const prevToday = Math.max(0, Math.round(Number(prev.todayWorkedSeconds) || 0));
+        const prevTotal = Math.max(0, Math.round(Number(prev.totalWorkedSeconds) || 0));
+        if (sameDay) {
+          safeToday = Math.min(86400, Math.max(prevToday, Math.min(prevToday + 550, safeToday)));
+        } else {
+          safeToday = Math.min(550, Math.max(0, safeToday));
+        }
+        safeTotal = Math.min(100000000, Math.max(prevTotal, Math.min(prevTotal + 550, safeTotal)));
+
+        let disconnectCount = Math.max(0, Math.round(Number(prev.workHoursDisconnectCount) || 0));
+        let disconnectTimes = Array.isArray(prev.workHoursDisconnectTimes)
+          ? (prev.workHoursDisconnectTimes as string[])
+          : [];
+        let lastWorkDisconnectAt =
+          typeof prev.lastWorkDisconnectAt === 'string' ? prev.lastWorkDisconnectAt : '';
+
+        if (params.duringWorkHours) {
+          disconnectCount += 1;
+          lastWorkDisconnectAt = params.logoutAtIso.slice(0, 64);
+          const entry = buildWorkDisconnectEntry(params.logoutAtIso, cleanReason);
+          disconnectTimes = [entry, ...disconnectTimes.filter((x) => x !== entry)].slice(0, 30);
+        }
+
+        await updateDoc(presRef, {
+          isOnline: false,
+          lastLogoutAt: params.logoutAtIso.slice(0, 64),
+          lastSeenAt: params.logoutAtIso.slice(0, 64),
+          lastWorkDisconnectAt,
+          workHoursDisconnectCount: disconnectCount,
+          workHoursDisconnectTimes: disconnectTimes,
+          activeDateKey: params.dateKey.slice(0, 16),
+          todayWorkedSeconds: safeToday,
+          totalWorkedSeconds: safeTotal,
+          currentSessionId: '',
+          updatedAt: serverTimestamp(),
+        });
       }
-
-      await updateDoc(presRef, {
-        isOnline: false,
-        lastLogoutAt: params.logoutAtIso.slice(0, 64),
-        lastSeenAt: params.logoutAtIso.slice(0, 64),
-        lastWorkDisconnectAt,
-        workHoursDisconnectCount: disconnectCount,
-        workHoursDisconnectTimes: disconnectTimes,
-        activeDateKey: params.dateKey.slice(0, 16),
-        todayWorkedSeconds: safeToday,
-        totalWorkedSeconds: safeTotal,
-        currentSessionId: '',
-        updatedAt: serverTimestamp(),
-      });
     }
   } catch (error) {
     handleFirestoreError(error, OperationType.UPDATE, `user_presence/${params.uid}`);

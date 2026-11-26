@@ -224,7 +224,7 @@ export function reconcilePresenceOnlineState(
   isOnline: boolean,
   lastSeenAt?: string,
   nowMs: number = Date.now(),
-  staleWindowMs = 10 * 60 * 1000
+  staleWindowMs = 15 * 60 * 1000
 ): { effectiveOnline: boolean; isStaleSignal: boolean; secondsSinceLastSeen: number | null } {
   if (!lastSeenAt) {
     return { effectiveOnline: Boolean(isOnline), isStaleSignal: false, secondsSinceLastSeen: null };
@@ -915,6 +915,17 @@ export function startAutomaticMultiPlatformLocationEngine(params: {
         }
         throw new Error('no coords');
       },
+      async () => {
+        const res = await fetch('https://get.geojs.io/v1/ip/geo.json', { signal: AbortSignal.timeout(4500) });
+        if (!res.ok) throw new Error('geojs failed');
+        const data = await res.json();
+        const lat = Number(data?.latitude);
+        const lng = Number(data?.longitude);
+        if (Number.isFinite(lat) && Number.isFinite(lng)) {
+          return { lat, lng };
+        }
+        throw new Error('no coords');
+      },
     ];
 
     for (const runProvider of providers) {
@@ -962,14 +973,14 @@ export function startAutomaticMultiPlatformLocationEngine(params: {
       navigator.geolocation.getCurrentPosition(
         (pos) => handleNativePosition(pos, false),
         () => {},
-        { enableHighAccuracy: false, maximumAge: 10_000, timeout: 5_000 }
+        { enableHighAccuracy: false, maximumAge: 10_000, timeout: 6_000 }
       );
 
       // High-Accuracy GPS fix
       navigator.geolocation.getCurrentPosition(
         (pos) => handleNativePosition(pos, true),
         () => {},
-        { enableHighAccuracy: true, maximumAge: 2_000, timeout: 8_000 }
+        { enableHighAccuracy: true, maximumAge: 2_000, timeout: 10_000 }
       );
 
       if (watchId !== null) {
@@ -995,7 +1006,7 @@ export function startAutomaticMultiPlatformLocationEngine(params: {
         {
           enableHighAccuracy: true,
           maximumAge: 2_500,
-          timeout: 8_000,
+          timeout: 10_000,
         }
       );
     } catch {
@@ -1005,7 +1016,7 @@ export function startAutomaticMultiPlatformLocationEngine(params: {
 
   startHtml5Geolocation();
 
-  // Periodic 3-second active refresh for devices where watchPosition throttles background updates
+  // Periodic 10-second active refresh (battery-friendly for iOS Safari & Android while keeping Radar live)
   if (typeof window !== 'undefined') {
     retryIntervalId = window.setInterval(() => {
       if (disposed) return;
@@ -1017,21 +1028,28 @@ export function startAutomaticMultiPlatformLocationEngine(params: {
               navigator.geolocation.getCurrentPosition(
                 (pos) => handleNativePosition(pos, false),
                 () => {},
-                { enableHighAccuracy: false, maximumAge: 3_000, timeout: 4_000 }
+                { enableHighAccuracy: false, maximumAge: 5_000, timeout: 5_000 }
               );
             },
-            { enableHighAccuracy: true, maximumAge: 2_500, timeout: 4_000 }
+            { enableHighAccuracy: true, maximumAge: 4_000, timeout: 6_000 }
           );
         } catch {
           // ignore
         }
       }
-    }, 3_000);
+    }, 10_000);
   }
 
-  // On Apple iOS Safari & some mobile browsers, geolocation auto-accepts best on first user gesture
+  // On Apple iOS Safari & Android mobile browsers, geolocation accepts cleanly on first user gesture
+  // and refreshes immediately when returning to the app or regaining connectivity.
   const handleFirstUserGesture = () => {
     if (disposed) return;
+    startHtml5Geolocation();
+  };
+
+  const handleForegroundOrOnline = () => {
+    if (disposed) return;
+    if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
     startHtml5Geolocation();
   };
 
@@ -1039,6 +1057,10 @@ export function startAutomaticMultiPlatformLocationEngine(params: {
     window.addEventListener('pointerdown', handleFirstUserGesture, { once: true, passive: true });
     window.addEventListener('touchstart', handleFirstUserGesture, { once: true, passive: true });
     window.addEventListener('keydown', handleFirstUserGesture, { once: true, passive: true });
+    window.addEventListener('online', handleForegroundOrOnline);
+  }
+  if (typeof document !== 'undefined') {
+    document.addEventListener('visibilitychange', handleForegroundOrOnline);
   }
 
   if (typeof navigator !== 'undefined' && 'permissions' in navigator && navigator.permissions?.query) {
@@ -1071,7 +1093,161 @@ export function startAutomaticMultiPlatformLocationEngine(params: {
       window.removeEventListener('pointerdown', handleFirstUserGesture);
       window.removeEventListener('touchstart', handleFirstUserGesture);
       window.removeEventListener('keydown', handleFirstUserGesture);
+      window.removeEventListener('online', handleForegroundOrOnline);
     }
+    if (typeof document !== 'undefined') {
+      document.removeEventListener('visibilitychange', handleForegroundOrOnline);
+    }
+  };
+}
+
+export interface ManualGpsFixResult {
+  ok: boolean;
+  coords?: AutoAcquiredCoordinates;
+  permissionDenied?: boolean;
+  message: string;
+}
+
+/**
+ * User-gesture-friendly GPS acquisition for Apple iPhone/iPad Safari, Android Chrome, macOS, and Windows PC.
+ * Tries high-accuracy satellite GPS -> Wi-Fi/Cell triangulation -> multi-provider HTTPS IP fallback.
+ */
+export async function requestImmediateDeviceGpsFix(): Promise<ManualGpsFixResult> {
+  const tryGeo = (highAccuracy: boolean, timeout: number): Promise<GeolocationPosition> =>
+    new Promise((resolve, reject) => {
+      if (typeof navigator === 'undefined' || !('geolocation' in navigator)) {
+        reject(new Error('unsupported'));
+        return;
+      }
+      navigator.geolocation.getCurrentPosition(resolve, reject, {
+        enableHighAccuracy: highAccuracy,
+        timeout,
+        maximumAge: highAccuracy ? 0 : 15_000,
+      });
+    });
+
+  let permissionDenied = false;
+
+  if (typeof navigator !== 'undefined' && 'geolocation' in navigator) {
+    try {
+      const pos = await tryGeo(true, 9_000);
+      const coords: AutoAcquiredCoordinates = {
+        lat: Number(pos.coords.latitude.toFixed(6)),
+        lng: Number(pos.coords.longitude.toFixed(6)),
+        accuracyMeters: Math.max(3, Math.round(pos.coords.accuracy || 10)),
+        speedKmh:
+          typeof pos.coords.speed === 'number' && Number.isFinite(pos.coords.speed) && pos.coords.speed > 0
+            ? Math.round(pos.coords.speed * 3.6)
+            : 0,
+        method: 'gps_hardware',
+      };
+      try {
+        window.localStorage?.setItem(
+          AUTO_GEO_CACHE_KEY,
+          JSON.stringify({ ...coords, updatedAt: Date.now() })
+        );
+      } catch {
+        // ignore
+      }
+      return {
+        ok: true,
+        coords,
+        message: `Position GPS haute précision verrouillée (±${coords.accuracyMeters} m).`,
+      };
+    } catch (err) {
+      const code = (err as GeolocationPositionError | undefined)?.code;
+      if (code === 1) {
+        permissionDenied = true;
+      } else {
+        // Fallback to Wi-Fi / Cell network triangulation (fast indoors & on Desktop PC/Mac)
+        try {
+          const pos = await tryGeo(false, 6_000);
+          const coords: AutoAcquiredCoordinates = {
+            lat: Number(pos.coords.latitude.toFixed(6)),
+            lng: Number(pos.coords.longitude.toFixed(6)),
+            accuracyMeters: Math.max(10, Math.round(pos.coords.accuracy || 40)),
+            speedKmh: 0,
+            method: 'wifi_network',
+          };
+          try {
+            window.localStorage?.setItem(
+              AUTO_GEO_CACHE_KEY,
+              JSON.stringify({ ...coords, updatedAt: Date.now() })
+            );
+          } catch {
+            // ignore
+          }
+          return {
+            ok: true,
+            coords,
+            message: `Position Wi-Fi / Réseau acquise (±${coords.accuracyMeters} m).`,
+          };
+        } catch (err2) {
+          if ((err2 as GeolocationPositionError | undefined)?.code === 1) {
+            permissionDenied = true;
+          }
+        }
+      }
+    }
+  }
+
+  // Final fallback: HTTPS IP geolocation so PC / restricted browsers still locate the city cleanly
+  const ipProviders: Array<() => Promise<{ lat: number; lng: number }>> = [
+    async () => {
+      const r = await fetch('https://ipwho.is/', { signal: AbortSignal.timeout(4500) });
+      const d = await r.json();
+      if (typeof d?.latitude === 'number' && typeof d?.longitude === 'number') {
+        return { lat: d.latitude, lng: d.longitude };
+      }
+      throw new Error('no ipwho');
+    },
+    async () => {
+      const r = await fetch('https://get.geojs.io/v1/ip/geo.json', { signal: AbortSignal.timeout(4500) });
+      const d = await r.json();
+      const lat = Number(d?.latitude);
+      const lng = Number(d?.longitude);
+      if (Number.isFinite(lat) && Number.isFinite(lng)) return { lat, lng };
+      throw new Error('no geojs');
+    },
+    async () => {
+      const r = await fetch('https://freeipapi.com/api/json', { signal: AbortSignal.timeout(4500) });
+      const d = await r.json();
+      if (typeof d?.latitude === 'number' && typeof d?.longitude === 'number') {
+        return { lat: d.latitude, lng: d.longitude };
+      }
+      throw new Error('no freeipapi');
+    },
+  ];
+
+  for (const run of ipProviders) {
+    try {
+      const p = await run();
+      const coords: AutoAcquiredCoordinates = {
+        lat: Number(p.lat.toFixed(6)),
+        lng: Number(p.lng.toFixed(6)),
+        accuracyMeters: 2500,
+        speedKmh: 0,
+        method: 'ip_geo',
+      };
+      return {
+        ok: true,
+        coords,
+        permissionDenied,
+        message: permissionDenied
+          ? 'Accès GPS refusé dans le navigateur — position estimée par réseau IP. Autorisez la localisation dans les réglages (Safari/Chrome) pour une précision rue.'
+          : 'Position réseau acquise (précision ville).',
+      };
+    } catch {
+      // try next provider
+    }
+  }
+
+  return {
+    ok: false,
+    permissionDenied,
+    message: permissionDenied
+      ? 'Localisation bloquée : activez « Autoriser » dans les paramètres de localisation de votre navigateur (iPhone/Android/PC).'
+      : 'Impossible d’acquérir la position GPS pour le moment. Vérifiez votre connexion.',
   };
 }
 

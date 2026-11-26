@@ -253,10 +253,19 @@ test('reconcilePresenceOnlineState and computeTeamBoundsZoom keep online status 
   assert.equal(loggedOut.effectiveOnline, false);
   assert.equal(loggedOut.isStaleSignal, false);
 
-  // Stale session (15 min old > 10 min window) with isOnline=true -> reconciled as offline/stale
+  // Mobile background session (12 min old <= 15 min window) stays online
+  const mobileBg = reconcilePresenceOnlineState(
+    true,
+    '2026-11-26T10:48:00.000Z',
+    now
+  );
+  assert.equal(mobileBg.effectiveOnline, true);
+  assert.equal(mobileBg.isStaleSignal, false);
+
+  // Stale session (20 min old > 15 min window) with isOnline=true -> reconciled as offline/stale
   const stale = reconcilePresenceOnlineState(
     true,
-    '2026-11-26T10:45:00.000Z',
+    '2026-11-26T10:40:00.000Z',
     now
   );
   assert.equal(stale.effectiveOnline, false);

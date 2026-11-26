@@ -81,6 +81,7 @@ import {
   type ProfileChatModalTab,
 } from './components/CollaboratorProfileChatModal';
 import { CollaboratorChatWidget } from './components/CollaboratorChatWidget';
+import { PWAInstallButton, OfflineIndicator } from './components/PWAInstallButton';
 import type { PortfolioFicheItem } from './components/TeamPortfoliosPanel';
 import {
   buildHashFromRoute,
@@ -160,6 +161,7 @@ import {
   shouldFlagAbruptClosure,
   computeHeartbeatDeltaSeconds,
   startAutomaticMultiPlatformLocationEngine,
+  requestImmediateDeviceGpsFix,
   type FieldActivityStatus,
 } from './utils/attendance';
 import {
@@ -2900,6 +2902,7 @@ export default function App() {
 
   const [villesRegionFilter, setVillesRegionFilter] = useState<string>('all');
   const [detectedGeoState, setDetectedGeoState] = useState<DetectedLocationGeography | null>(null);
+  const [gpsBusy, setGpsBusy] = useState(false);
   const autoAppliedGeoRegionRef = useRef<string>('');
 
   useEffect(() => {
@@ -3302,6 +3305,87 @@ export default function App() {
     },
     []
   );
+
+  // Activation / Actualisation GPS immédiate (1 clic) compatible Android, Apple iOS/macOS, PC Windows/Linux
+  const handleActivateOrRefreshGps = useCallback(async () => {
+    if (gpsBusy) return;
+    setGpsBusy(true);
+    try {
+      const res = await requestImmediateDeviceGpsFix();
+      if (res.ok && res.coords) {
+        const nextLat = res.coords.lat;
+        const nextLng = res.coords.lng;
+        liveFieldContextRef.current.lat = nextLat;
+        liveFieldContextRef.current.lng = nextLng;
+        liveFieldContextRef.current.accuracyMeters = res.coords.accuracyMeters;
+        liveFieldContextRef.current.speedKmh = res.coords.speedKmh;
+
+        const geo = detectMoroccoGeographyFromCoordinates(nextLat, nextLng);
+        setDetectedGeoState(geo);
+        setUserProfile((prev) =>
+          prev.zone === geo.collaboratorPublicZoneLabel
+            ? prev
+            : { ...prev, zone: geo.collaboratorPublicZoneLabel }
+        );
+
+        const cur = activeAttendanceRef.current;
+        if (cur && navigator.onLine !== false) {
+          cur.closed = false;
+          cur.zone = geo.collaboratorPublicZoneLabel;
+          const ctx = liveFieldContextRef.current;
+          const now = Date.now();
+          const hasRecentClient =
+            Boolean(ctx.clientName) && now - ctx.lastClientActivityMs <= 12 * 60 * 1000;
+          const status: FieldActivityStatus = hasRecentClient ? 'en_rdv_client' : 'au_travail';
+          const encodedDevice = encodeLiveFieldTelemetry({
+            baseDeviceLabel: cur.baseDeviceLabel || cur.deviceLabel,
+            status,
+            lat: nextLat,
+            lng: nextLng,
+            accuracyMeters: res.coords.accuracyMeters,
+            speedKmh: res.coords.speedKmh,
+            clientName: hasRecentClient ? ctx.clientName : '',
+            actionLabel: hasRecentClient ? ctx.actionLabel : 'Position GPS actualisée',
+          });
+          cur.deviceLabel = encodedDevice;
+          const snapNow = latestLocalStateRef.current;
+          await heartbeatAttendanceSession({
+            uid: cur.uid,
+            sessionId: cur.sessionId,
+            nowIso: new Date(now).toISOString(),
+            dateKey: cur.dateKey,
+            todayWorkedSeconds: cur.todayBaseSeconds,
+            totalWorkedSeconds: cur.totalBaseSeconds,
+            sessionWorkedSeconds: cur.sessionSeconds,
+            deviceLabel: encodedDevice,
+            fallbackProfile: {
+              email: cur.email,
+              displayName: snapNow.userProfile.displayName.trim() || cur.displayName,
+              phonePro: snapNow.userProfile.phonePro || '',
+              avatarDataUrl: snapNow.userProfile.avatarDataUrl || '',
+              role: cur.role,
+              zone: geo.collaboratorPublicZoneLabel,
+            },
+          })
+            .then((hb) => {
+              if (activeAttendanceRef.current && activeAttendanceRef.current.uid === cur.uid) {
+                activeAttendanceRef.current.todayBaseSeconds = hb.todayWorkedSeconds;
+                activeAttendanceRef.current.totalBaseSeconds = hb.totalWorkedSeconds;
+              }
+            })
+            .catch(() => {});
+        }
+        notify(
+          `${res.message} (${geo.collaboratorPublicZoneLabel})`,
+          res.permissionDenied ? 'warn' : 'ok'
+        );
+      } else {
+        notify(res.message, res.permissionDenied ? 'warn' : 'err');
+      }
+    } finally {
+      setGpsBusy(false);
+    }
+  }, [gpsBusy]);
   const latestLocalStateRef = useRef({
     fiches,
     villesState,
@@ -3659,8 +3743,9 @@ export default function App() {
 
   // Pointage automatique : connexion, appareil utilisé, heures travaillées et déconnexions pendant les heures de travail
   useEffect(() => {
-    if (!authReady || !cloudUser || !cloudSynced || !canAccessWorkspace) return;
+    if (!authReady || !cloudUser || !canAccessWorkspace) return;
     let cancelled = false;
+    let sessionReadyOnServer = false;
     const uid = cloudUser.uid;
     const email = cloudUser.email || '';
     const deviceInfo = detectClientDeviceInfo();
@@ -3795,15 +3880,27 @@ export default function App() {
     })
       .then((res) => {
         if (cancelled) return;
+        sessionReadyOnServer = true;
         const cur = activeAttendanceRef.current;
         if (cur && cur.uid === uid) {
           cur.todayBaseSeconds = Math.max(cur.todayBaseSeconds, res.todayWorkedSeconds);
           cur.totalBaseSeconds = Math.max(cur.totalBaseSeconds, res.totalWorkedSeconds);
           cur.closed = false;
+          // Si le GPS a été acquis pendant l'initialisation serveur, pousser immédiatement la coordonnée
+          if (liveFieldContextRef.current.lat !== null && liveFieldContextRef.current.lng !== null) {
+            accumulateElapsed(true, true);
+          }
         }
       })
       .catch(() => {
-        // Silent fallback: les heartbeats auto-réparateurs prendront le relais automatiquement
+        if (cancelled) return;
+        // Reprise automatique fiable après 3s via heartbeat auto-réparateur (getDocFromServer)
+        window.setTimeout(() => {
+          if (!cancelled) {
+            sessionReadyOnServer = true;
+            accumulateElapsed(true, true);
+          }
+        }, 3000);
       });
 
     const accumulateElapsed = (commitNetwork = false, forceRecovery = false) => {
@@ -3919,6 +4016,7 @@ export default function App() {
     const fastTelemetryTimer = window.setInterval(() => {
       const cur = activeAttendanceRef.current;
       if (!cur || cur.closed || cur.uid !== uid) return;
+      if (!sessionReadyOnServer && Date.now() - nowMs < 4000) return;
       const nextLabel = computeLiveTelemetryLabel();
       if (nextLabel !== lastPushedTelemetryLabel) {
         lastPushedTelemetryLabel = nextLabel;
@@ -3926,10 +4024,19 @@ export default function App() {
       }
     }, 3_000);
 
-    // Heartbeat de présence toutes les 15 secondes pour garantir un statut « En ligne » parfaitement fiable
+    // Heartbeat de présence toutes les 15 secondes au premier plan + keepalive 30s en arrière-plan (mobile/desktop)
+    let hiddenTickParity = 0;
     const heartbeatTimer = window.setInterval(() => {
+      if (!sessionReadyOnServer && Date.now() - nowMs < 4000) return;
       if (document.visibilityState !== 'hidden') {
+        hiddenTickParity = 0;
         accumulateElapsed(true, true);
+      } else {
+        // En arrière-plan : maintenir le statut « En ligne » et la télémétrie GPS sans gonfler les heures travaillées
+        hiddenTickParity += 1;
+        if (hiddenTickParity % 2 === 0) {
+          accumulateElapsed(true, true);
+        }
       }
     }, 15_000);
 
@@ -4116,6 +4223,7 @@ export default function App() {
         sessionWorkedSeconds: cur.sessionSeconds,
         reason: 'Fermeture onglet / navigateur',
         duringWorkHours: wh.duringWorkHours,
+        isManualSignOut: false,
       })
         .then(() => {
           try {
@@ -4148,7 +4256,7 @@ export default function App() {
       window.removeEventListener('pagehide', handlePageHide);
       window.removeEventListener('beforeunload', handlePageHide);
     };
-  }, [authReady, cloudUser, cloudSynced, canAccessWorkspace, currentUserRole]);
+  }, [authReady, cloudUser, canAccessWorkspace, currentUserRole]);
 
   // Chargement sécurisé du coffre /api_keys via le backend Express (Admin SDK — client Firestore fermé par rules)
   const refreshCloudApiKeys = useCallback(async () => {
@@ -5348,6 +5456,7 @@ export default function App() {
           sessionWorkedSeconds: cur.sessionSeconds,
           reason: 'Déconnexion manuelle',
           duringWorkHours: wh.duringWorkHours,
+          isManualSignOut: true,
         }).catch(() => {});
         activeAttendanceRef.current = null;
       }
@@ -8439,6 +8548,8 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
         onSelectNotification={(n) => void handleSelectNotification(n)}
       />
 
+      <OfflineIndicator />
+
       {/* Shell CRM B2B avec barre verticale persistante + colonne principale */}
       <div className="min-h-screen bg-[#F7F5F0] text-stone-900 flex">
         <CrmSidebar
@@ -8514,6 +8625,40 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
               </div>
 
               <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
+                <button
+                  type="button"
+                  disabled={gpsBusy}
+                  onClick={() => void handleActivateOrRefreshGps()}
+                  data-testid="header-gps-refresh-btn"
+                  title={
+                    detectedGeoState
+                      ? `GPS actif : ${detectedGeoState.collaboratorPublicZoneLabel} — Cliquer pour actualiser`
+                      : 'Activer ou actualiser ma position GPS (Android, Apple, PC)'
+                  }
+                  className={`px-2 sm:px-2.5 py-1.5 rounded-lg border text-xs font-semibold flex items-center gap-1.5 whitespace-nowrap shrink-0 transition-colors disabled:opacity-60 ${
+                    detectedGeoState
+                      ? 'border-emerald-300 bg-emerald-50 hover:bg-emerald-100 text-emerald-800'
+                      : 'border-stone-300 bg-stone-50 hover:bg-stone-100 text-stone-700'
+                  }`}
+                >
+                  <Navigation
+                    className={`w-3.5 h-3.5 shrink-0 ${
+                      gpsBusy
+                        ? 'animate-spin text-orange-600'
+                        : detectedGeoState
+                          ? 'text-emerald-600'
+                          : 'text-stone-500'
+                    }`}
+                  />
+                  <span className="hidden xl:inline">
+                    {gpsBusy
+                      ? 'GPS...'
+                      : detectedGeoState
+                        ? `GPS · ${detectedGeoState.nearestCity}`
+                        : 'Activer GPS'}
+                  </span>
+                </button>
+                <PWAInstallButton variant="header" onInstalledNotify={(msg) => notify(msg)} />
                 <button
                   type="button"
                   disabled={isAuditing}
@@ -11544,6 +11689,7 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
             }
             unreadChatByUid={unreadChatByUid}
             coachingReadyUids={coachingReadyUids}
+            onRequestMyGpsRefresh={handleActivateOrRefreshGps}
             onNotify={notify}
           />
         )}

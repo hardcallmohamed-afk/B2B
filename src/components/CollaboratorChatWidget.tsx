@@ -61,11 +61,12 @@ export const CollaboratorChatWidget: React.FC<CollaboratorChatWidgetProps> = ({
   const [sending, setSending] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
 
-  // Transparent opt-in Coaching Terrain (WebRTC P2P, zero API)
+  // Transparent opt-in Supervision & Coaching Terrain (WebRTC P2P, zero API, background-resilient)
   const [coachingActive, setCoachingActive] = useState(false);
   const [coachingBusy, setCoachingBusy] = useState(false);
   const [coachingDoc, setCoachingDoc] = useState<SanitizedCoachingSessionDoc | null>(null);
   const [coachingError, setCoachingError] = useState('');
+  const [backgroundGuardActive, setBackgroundGuardActive] = useState(false);
 
   const pcRef = useRef<RTCPeerConnection | null>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
@@ -73,12 +74,234 @@ export const CollaboratorChatWidget: React.FC<CollaboratorChatWidgetProps> = ({
   const candidatesUnsubRef = useRef<(() => void) | null>(null);
   const seenCandidateIdsRef = useRef<Set<string>>(new Set());
   const appliedAnswerRef = useRef<string>('');
+  const coachingActiveRef = useRef<boolean>(false);
+  const rebuildingOfferRef = useRef<boolean>(false);
+  const wakeLockRef = useRef<{ release: () => Promise<void> } | null>(null);
+  const keepaliveCtxRef = useRef<AudioContext | null>(null);
+  const keepaliveAudioRef = useRef<HTMLAudioElement | null>(null);
+
+  useEffect(() => {
+    coachingActiveRef.current = coachingActive;
+  }, [coachingActive]);
+
+  // Background audio & Wake Lock helpers (keeps authorized mic stream alive across app switches / screen dim on Android, iOS & PC)
+  const startBackgroundContinuity = async () => {
+    // 1. Screen Wake Lock (prevents mobile sleep from freezing WebRTC)
+    try {
+      const navWithWake = navigator as Navigator & {
+        wakeLock?: { request: (type: 'screen') => Promise<{ release: () => Promise<void> }> };
+      };
+      if (navWithWake.wakeLock?.request && !wakeLockRef.current) {
+        wakeLockRef.current = await navWithWake.wakeLock.request('screen');
+      }
+    } catch {
+      // Wake Lock optional on unsupported browsers
+    }
+
+    // 2. Ultra-quiet WebAudio keepalive + MediaSession (keeps iOS Safari & Android Chrome audio session active in background)
+    try {
+      const AudioCtx =
+        window.AudioContext ||
+        (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+      if (AudioCtx && !keepaliveCtxRef.current) {
+        const ctx = new AudioCtx();
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        const dest = ctx.createMediaStreamDestination();
+        osc.frequency.value = 180;
+        gain.gain.value = 0.00001; // inaudible keepalive carrier
+        osc.connect(gain);
+        gain.connect(dest);
+        osc.start();
+        keepaliveCtxRef.current = ctx;
+
+        if (keepaliveAudioRef.current) {
+          keepaliveAudioRef.current.srcObject = dest.stream;
+          keepaliveAudioRef.current.volume = 0.01;
+          void keepaliveAudioRef.current.play().catch(() => {});
+        }
+      } else if (keepaliveCtxRef.current?.state === 'suspended') {
+        void keepaliveCtxRef.current.resume().catch(() => {});
+      }
+    } catch {
+      // Non-fatal
+    }
+
+    try {
+      if ('mediaSession' in navigator && navigator.mediaSession) {
+        if (typeof MediaMetadata !== 'undefined') {
+          navigator.mediaSession.metadata = new MediaMetadata({
+            title: 'Supervision Audio Terrain Active',
+            artist: 'CRM DIVERSIFIA · Orange Pro',
+            album: 'Session micro autorisée en arrière-plan',
+          });
+        }
+        navigator.mediaSession.playbackState = 'playing';
+      }
+    } catch {
+      // Non-fatal
+    }
+
+    setBackgroundGuardActive(true);
+  };
+
+  const stopBackgroundContinuity = () => {
+    if (wakeLockRef.current) {
+      void wakeLockRef.current.release().catch(() => {});
+      wakeLockRef.current = null;
+    }
+    if (keepaliveCtxRef.current) {
+      void keepaliveCtxRef.current.close().catch(() => {});
+      keepaliveCtxRef.current = null;
+    }
+    if (keepaliveAudioRef.current) {
+      keepaliveAudioRef.current.srcObject = null;
+    }
+    try {
+      if ('mediaSession' in navigator && navigator.mediaSession) {
+        navigator.mediaSession.playbackState = 'none';
+      }
+    } catch {
+      // Non-fatal
+    }
+    setBackgroundGuardActive(false);
+  };
+
+  // Rebuilds a fresh WebRTC offer using the ALREADY-AUTHORIZED mic stream (so Super-Admin can silently listen/disconnect/reconnect multiple times without interrupting the collaborator)
+  const publishFreshOfferFromAuthorizedMic = async () => {
+    const stream = localStreamRef.current;
+    if (!currentUserUid || !stream || !coachingActiveRef.current || rebuildingOfferRef.current) return;
+    const liveTrack = stream.getAudioTracks().find((t) => t.readyState === 'live');
+    if (!liveTrack) {
+      void stopCollaboratorCoaching(true);
+      return;
+    }
+
+    rebuildingOfferRef.current = true;
+    try {
+      if (candidatesUnsubRef.current) {
+        candidatesUnsubRef.current();
+        candidatesUnsubRef.current = null;
+      }
+      if (pcRef.current) {
+        try {
+          pcRef.current.close();
+        } catch {
+          // ignore
+        }
+        pcRef.current = null;
+      }
+      seenCandidateIdsRef.current.clear();
+      appliedAnswerRef.current = '';
+
+      await clearCoachingCandidates(currentUserUid).catch(() => {});
+
+      const pc = new RTCPeerConnection({ iceServers: RTC_ICE_SERVERS });
+      pcRef.current = pc;
+
+      stream.getAudioTracks().forEach((track) => {
+        pc.addTrack(track, stream);
+      });
+
+      pc.ontrack = (event) => {
+        if (remoteAudioRef.current && event.streams[0]) {
+          remoteAudioRef.current.srcObject = event.streams[0];
+          void remoteAudioRef.current.play().catch(() => {});
+        }
+      };
+
+      pc.onicecandidate = (event) => {
+        if (event.candidate) {
+          void addCoachingIceCandidate(currentUserUid, {
+            senderUid: currentUserUid,
+            fromRole: 'collab',
+            candidateJson: JSON.stringify(event.candidate.toJSON()),
+          });
+        }
+      };
+
+      pc.oniceconnectionstatechange = () => {
+        const st = pc.iceConnectionState;
+        if ((st === 'failed' || st === 'disconnected') && coachingActiveRef.current) {
+          window.setTimeout(() => {
+            if (
+              coachingActiveRef.current &&
+              pcRef.current === pc &&
+              (pc.iceConnectionState === 'failed' || pc.iceConnectionState === 'disconnected')
+            ) {
+              void publishFreshOfferFromAuthorizedMic();
+            }
+          }, 2500);
+        }
+      };
+
+      const offer = await pc.createOffer({ offerToReceiveAudio: true });
+      await pc.setLocalDescription(offer);
+
+      await setCollaboratorCoachingState(currentUserUid, {
+        collabName: currentUserName,
+        status: 'collab_ready',
+        collabConsentActive: true,
+        offerSdp: JSON.stringify(offer),
+        answerSdp: '',
+        adminPttActive: false,
+      });
+
+      candidatesUnsubRef.current = onSnapshot(
+        getCoachingCandidatesQuery(currentUserUid),
+        (snap) => {
+          snap.forEach((docSnap) => {
+            if (seenCandidateIdsRef.current.has(docSnap.id)) return;
+            const d = docSnap.data();
+            if (d.fromRole !== 'admin' || typeof d.candidateJson !== 'string') return;
+            seenCandidateIdsRef.current.add(docSnap.id);
+            try {
+              const cand = JSON.parse(d.candidateJson) as RTCIceCandidateInit;
+              void pc.addIceCandidate(new RTCIceCandidate(cand)).catch(() => {});
+            } catch {
+              // ignore
+            }
+          });
+        },
+        () => {}
+      );
+    } catch {
+      // Non-fatal: next network recovery will retry
+    } finally {
+      rebuildingOfferRef.current = false;
+    }
+  };
 
   useEffect(() => {
     if (forceOpenSignal > 0) {
       setOpen(true);
     }
   }, [forceOpenSignal]);
+
+  // Re-acquire Wake Lock & AudioContext on visibilitychange / online so background supervision stays rock-solid
+  useEffect(() => {
+    if (!coachingActive) return;
+    const handleVisibilityOrOnline = () => {
+      if (!coachingActiveRef.current) return;
+      if (document.visibilityState === 'visible') {
+        void startBackgroundContinuity();
+      }
+      if (
+        navigator.onLine !== false &&
+        pcRef.current &&
+        (pcRef.current.iceConnectionState === 'failed' ||
+          pcRef.current.iceConnectionState === 'disconnected')
+      ) {
+        void publishFreshOfferFromAuthorizedMic();
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibilityOrOnline);
+    window.addEventListener('online', handleVisibilityOrOnline);
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityOrOnline);
+      window.removeEventListener('online', handleVisibilityOrOnline);
+    };
+  }, [coachingActive]);
 
   // Listen to unread badge count on own direct chat channel
   useEffect(() => {
@@ -135,7 +358,7 @@ export const CollaboratorChatWidget: React.FC<CollaboratorChatWidgetProps> = ({
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [open, currentUserUid, messages.length]);
 
-  // Subscribe to own coaching session doc to detect Super-Admin answer SDP & PTT indicator
+  // Subscribe to own coaching session doc to detect Super-Admin answer SDP, reconnects & PTT indicator
   useEffect(() => {
     if (!currentUserUid) return;
     const unsub = onSnapshot(
@@ -177,6 +400,16 @@ export const CollaboratorChatWidget: React.FC<CollaboratorChatWidgetProps> = ({
           } catch {
             // ignore
           }
+        } else if (
+          coachingActiveRef.current &&
+          appliedAnswerRef.current &&
+          !nextDoc.answerSdp &&
+          nextDoc.status === 'collab_ready' &&
+          nextDoc.collabConsentActive
+        ) {
+          // Super-Admin ended a listen session while collaborator still keeps mic authorized:
+          // silently prepare a fresh offer so Super-Admin can re-enter listen mode anytime!
+          void publishFreshOfferFromAuthorizedMic();
         }
       },
       () => {}
@@ -185,6 +418,8 @@ export const CollaboratorChatWidget: React.FC<CollaboratorChatWidgetProps> = ({
   }, [currentUserUid, currentUserName]);
 
   const stopCollaboratorCoaching = async (updateCloud = true) => {
+    coachingActiveRef.current = false;
+    stopBackgroundContinuity();
     if (candidatesUnsubRef.current) {
       candidatesUnsubRef.current();
       candidatesUnsubRef.current = null;
@@ -241,7 +476,6 @@ export const CollaboratorChatWidget: React.FC<CollaboratorChatWidgetProps> = ({
     setCoachingError('');
     try {
       await stopCollaboratorCoaching(false);
-      await clearCoachingCandidates(currentUserUid);
 
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: {
@@ -252,65 +486,22 @@ export const CollaboratorChatWidget: React.FC<CollaboratorChatWidgetProps> = ({
       });
       localStreamRef.current = stream;
 
-      const pc = new RTCPeerConnection({ iceServers: RTC_ICE_SERVERS });
-      pcRef.current = pc;
-
+      // Handle OS/browser revoking mic track cleanly
       stream.getAudioTracks().forEach((track) => {
-        pc.addTrack(track, stream);
+        track.onended = () => {
+          if (coachingActiveRef.current) {
+            void stopCollaboratorCoaching(true);
+          }
+        };
       });
 
-      pc.ontrack = (event) => {
-        if (remoteAudioRef.current && event.streams[0]) {
-          remoteAudioRef.current.srcObject = event.streams[0];
-          void remoteAudioRef.current.play().catch(() => {});
-        }
-      };
-
-      pc.onicecandidate = (event) => {
-        if (event.candidate) {
-          void addCoachingIceCandidate(currentUserUid, {
-            senderUid: currentUserUid,
-            fromRole: 'collab',
-            candidateJson: JSON.stringify(event.candidate.toJSON()),
-          });
-        }
-      };
-
-      const offer = await pc.createOffer({ offerToReceiveAudio: true });
-      await pc.setLocalDescription(offer);
-
-      await setCollaboratorCoachingState(currentUserUid, {
-        collabName: currentUserName,
-        status: 'collab_ready',
-        collabConsentActive: true,
-        offerSdp: JSON.stringify(offer),
-        answerSdp: '',
-        adminPttActive: false,
-      });
-
-      seenCandidateIdsRef.current.clear();
-      candidatesUnsubRef.current = onSnapshot(
-        getCoachingCandidatesQuery(currentUserUid),
-        (snap) => {
-          snap.forEach((docSnap) => {
-            if (seenCandidateIdsRef.current.has(docSnap.id)) return;
-            const d = docSnap.data();
-            if (d.fromRole !== 'admin' || typeof d.candidateJson !== 'string') return;
-            seenCandidateIdsRef.current.add(docSnap.id);
-            try {
-              const cand = JSON.parse(d.candidateJson) as RTCIceCandidateInit;
-              void pc.addIceCandidate(new RTCIceCandidate(cand)).catch(() => {});
-            } catch {
-              // ignore
-            }
-          });
-        },
-        () => {}
-      );
-
+      coachingActiveRef.current = true;
       setCoachingActive(true);
+      await startBackgroundContinuity();
+      await publishFreshOfferFromAuthorizedMic();
+
       onNotify(
-        'Mode Coaching Terrain activé. Votre micro est partagé avec la Direction — vous pouvez le couper en 1 clic à tout moment.'
+        'Micro autorisé pour la Supervision Live (actif même en arrière-plan). Vous pouvez couper le micro en 1 clic à tout moment.'
       );
     } catch (err) {
       const msg =
@@ -352,28 +543,32 @@ export const CollaboratorChatWidget: React.FC<CollaboratorChatWidgetProps> = ({
   return (
     <>
       <audio ref={remoteAudioRef} autoPlay playsInline className="hidden" />
+      <audio ref={keepaliveAudioRef} autoPlay playsInline loop className="hidden" />
 
-      {/* Always-visible indicator banner whenever Coaching Terrain microphone is active */}
+      {/* Always-visible transparent indicator whenever Supervision Microphone is authorized */}
       {coachingActive && (
         <div
           data-testid="coaching-active-visible-banner"
-          className="fixed bottom-4 left-1/2 -translate-x-1/2 z-[55] flex flex-wrap items-center gap-3 rounded-2xl border border-emerald-400 bg-stone-950/95 px-4 py-2.5 text-xs text-white shadow-2xl"
+          className="fixed bottom-4 left-1/2 -translate-x-1/2 z-[55] flex flex-wrap items-center gap-2.5 rounded-2xl border border-emerald-400 bg-stone-950/95 px-3.5 py-2 text-xs text-white shadow-2xl max-w-[calc(100vw-2rem)]"
         >
           <span className="inline-flex items-center gap-1.5 font-extrabold text-emerald-400">
-            <Radio className="w-4 h-4 animate-pulse" />
-            Coaching Terrain Actif — Micro partagé
+            <Radio className="w-4 h-4 animate-pulse shrink-0" />
+            <span>Supervision Micro Autorisée</span>
+            {backgroundGuardActive && (
+              <span className="rounded bg-emerald-500/20 border border-emerald-500/40 px-1.5 py-0.5 text-[10px] font-bold text-emerald-300">
+                Arrière-plan actif
+              </span>
+            )}
           </span>
           {coachingDoc?.adminPttActive ? (
             <span className="inline-flex items-center gap-1 rounded-lg bg-orange-600 px-2 py-0.5 text-[11px] font-bold text-white animate-pulse">
               <Volume2 className="w-3.5 h-3.5" />
-              Direction en train de vous souffler
-            </span>
-          ) : coachingDoc?.status === 'live' ? (
-            <span className="text-[11px] text-stone-300">
-              {coachingDoc.adminName || 'Direction'} connectée en écoute
+              Direction en soufflage vocal
             </span>
           ) : (
-            <span className="text-[11px] text-stone-400">En attente de la Direction</span>
+            <span className="text-[11px] text-stone-300">
+              Prêt · Écoute Direction possible sans interruption
+            </span>
           )}
           <button
             type="button"
@@ -413,10 +608,10 @@ export const CollaboratorChatWidget: React.FC<CollaboratorChatWidgetProps> = ({
             <div className="min-w-0">
               <div className="text-xs font-extrabold flex items-center gap-1.5">
                 <MessageCircle className="w-3.5 h-3.5 text-orange-400" />
-                Discussion Direction &amp; Coaching
+                Discussion Direction &amp; Supervision
               </div>
               <div className="text-[10px] text-stone-400">
-                Temps réel interne · Sans API externe
+                Temps réel interne · WebRTC P2P · Sans API externe
               </div>
             </div>
             <button
@@ -429,12 +624,12 @@ export const CollaboratorChatWidget: React.FC<CollaboratorChatWidgetProps> = ({
             </button>
           </div>
 
-          {/* Opt-in Transparent Coaching Strip */}
+          {/* Opt-in Transparent Background Supervision Strip */}
           <div className="px-3.5 py-2.5 border-b border-stone-200 bg-stone-50 space-y-1.5">
             <div className="flex items-center justify-between gap-2">
               <div className="text-[11px] font-bold text-stone-800 flex items-center gap-1.5">
                 <Headphones className="w-3.5 h-3.5 text-orange-600" />
-                Coaching Terrain (Micro Live)
+                Supervision Audio Live (Arrière-plan)
               </div>
               {coachingActive ? (
                 <button
@@ -453,13 +648,16 @@ export const CollaboratorChatWidget: React.FC<CollaboratorChatWidgetProps> = ({
                   className="inline-flex items-center gap-1 rounded-lg bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 px-2.5 py-1 text-[10px] font-bold text-white"
                 >
                   <Mic className="w-3 h-3" />
-                  {coachingBusy ? 'Activation...' : 'Activer'}
+                  {coachingBusy ? 'Autorisation...' : 'Autoriser micro'}
                 </button>
               )}
             </div>
-            <p className="text-[10px] text-stone-500 flex items-center gap-1">
-              <ShieldCheck className="w-3 h-3 text-emerald-600 shrink-0" />
-              Opt-in volontaire uniquement : activez avant un RDV pour recevoir l’aide audio Push-to-Talk.
+            <p className="text-[10px] text-stone-500 flex items-start gap-1 leading-relaxed">
+              <ShieldCheck className="w-3 h-3 text-emerald-600 shrink-0 mt-0.5" />
+              <span>
+                Autorisation micro volontaire : reste actif en arrière-plan (Android, iOS &amp; PC) pour
+                permettre l’écoute supervision silencieuse et le soufflage Push-to-Talk.
+              </span>
             </p>
             {coachingError && (
               <p className="text-[10px] font-semibold text-red-700">{coachingError}</p>

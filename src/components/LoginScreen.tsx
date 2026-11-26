@@ -30,6 +30,7 @@ import {
   type FormattedAuthError,
 } from '../utils/authAccess';
 import { DiversifiaLogo } from './DiversifiaLogo';
+import { PWAInstallButton } from './PWAInstallButton';
 
 interface LoginScreenProps {
   onSuccessNotify?: (msg: string) => void;
@@ -468,6 +469,9 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onSuccessNotify }) => 
               <p className="text-[11px] text-stone-500">
                 Accès privé sans inscription publique. Les comptes sont créés exclusivement par l&apos;administrateur Diversifia.
               </p>
+              <div className="pt-2">
+                <PWAInstallButton variant="login" onInstalledNotify={onSuccessNotify} />
+              </div>
             </div>
           </div>
         </div>

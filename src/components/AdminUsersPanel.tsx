@@ -144,6 +144,7 @@ interface AdminUsersPanelProps {
   ) => void;
   unreadChatByUid?: Record<string, number>;
   coachingReadyUids?: Set<string>;
+  onRequestMyGpsRefresh?: () => Promise<void> | void;
   onNotify: (msg: string, type?: 'ok' | 'warn' | 'err') => void;
 }
 
@@ -162,6 +163,7 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
   onOpenMemberProfile,
   unreadChatByUid = {},
   coachingReadyUids,
+  onRequestMyGpsRefresh,
   onNotify,
 }) => {
   const [internalSection, setInternalSection] = useState<AdminPanelSection>('all');
@@ -247,7 +249,10 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
   const [popupSizeMode, setPopupSizeMode] = useState<'auto_mini' | 'mini' | 'normal'>('auto_mini');
   const [showLiveGoogleEmbed, setShowLiveGoogleEmbed] = useState<boolean>(false);
   const [autoFollowSelected, setAutoFollowSelected] = useState<boolean>(false);
+  const [gpsRefreshing, setGpsRefreshing] = useState<boolean>(false);
   const mapCanvasRef = useRef<HTMLDivElement | null>(null);
+  const pinchStartDistRef = useRef<number | null>(null);
+  const pinchStartZoomRef = useRef<number>(8);
   const [mapViewport, setMapViewport] = useState<{ width: number; height: number }>({
     width: 768,
     height: 420,
@@ -392,7 +397,8 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
         Boolean(pres?.isOnline),
         pres?.lastSeenAt
       );
-      const isOnline = reconciled.effectiveOnline;
+      // The currently authenticated Super-Admin actively viewing this console is guaranteed online
+      const isOnline = params.uid === adminUid ? true : reconciled.effectiveOnline;
       const effectiveZone = pres?.zone || stat?.zone || params.fallbackZone || 'Meknès';
       const telemetry = parseLiveFieldTelemetry(pres?.currentDevice || '', isOnline, pres?.lastSeenAt);
       const coords = resolveCollaboratorCoordinates({
@@ -1822,12 +1828,20 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
                               {initials}
                             </span>
                           )}
-                          <span
-                            title={pres?.isOnline ? 'En ligne' : 'Hors ligne'}
-                            className={`absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full ring-2 ring-white ${
-                              pres?.isOnline ? 'bg-emerald-500' : 'bg-stone-300'
-                            }`}
-                          />
+                          {(() => {
+                            const dirOnline = reconcilePresenceOnlineState(
+                              Boolean(pres?.isOnline),
+                              pres?.lastSeenAt
+                            ).effectiveOnline;
+                            return (
+                              <span
+                                title={dirOnline ? 'En ligne' : 'Hors ligne'}
+                                className={`absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full ring-2 ring-white ${
+                                  dirOnline ? 'bg-emerald-500' : 'bg-stone-300'
+                                }`}
+                              />
+                            );
+                          })()}
                         </div>
                         <div className="min-w-0 space-y-0.5">
                           <div className="flex items-center gap-2 flex-wrap">
@@ -2429,6 +2443,26 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
                   <Crosshair className="w-3 h-3" />
                   {autoFollowSelected ? 'Auto-Suivi ON' : 'Auto-Suivi'}
                 </button>
+                {onRequestMyGpsRefresh && (
+                  <button
+                    type="button"
+                    disabled={gpsRefreshing}
+                    data-testid="radar-refresh-my-gps-btn"
+                    onClick={async () => {
+                      setGpsRefreshing(true);
+                      try {
+                        await onRequestMyGpsRefresh();
+                      } finally {
+                        setGpsRefreshing(false);
+                      }
+                    }}
+                    className="px-2 py-1 rounded bg-orange-600/25 hover:bg-orange-600/40 disabled:opacity-50 text-orange-200 border border-orange-500/40 text-[10px] font-bold inline-flex items-center gap-1 whitespace-nowrap"
+                    title="Verrouiller et actualiser ma position GPS exacte (Android, Apple iOS/macOS, PC)"
+                  >
+                    <Navigation className={`w-3 h-3 ${gpsRefreshing ? 'animate-spin' : ''}`} />
+                    {gpsRefreshing ? 'GPS...' : 'Actualiser mon GPS'}
+                  </button>
+                )}
                 <button
                   type="button"
                   data-testid="map-zoom-reset"
@@ -2533,8 +2567,17 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
               onMouseUp={() => setIsDraggingMap(false)}
               onMouseLeave={() => setIsDraggingMap(false)}
               onTouchStart={(e) => {
+                if (e.touches.length === 2) {
+                  const dx = e.touches[0].clientX - e.touches[1].clientX;
+                  const dy = e.touches[0].clientY - e.touches[1].clientY;
+                  pinchStartDistRef.current = Math.hypot(dx, dy);
+                  pinchStartZoomRef.current = mapZoom;
+                  setIsDraggingMap(false);
+                  return;
+                }
                 if (e.touches.length !== 1) return;
                 const t = e.touches[0];
+                pinchStartDistRef.current = null;
                 setAutoFollowSelected(false);
                 setIsDraggingMap(true);
                 setDragStartPt({
@@ -2545,6 +2588,16 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
                 });
               }}
               onTouchMove={(e) => {
+                if (e.touches.length === 2 && pinchStartDistRef.current && pinchStartDistRef.current > 10) {
+                  const dx = e.touches[0].clientX - e.touches[1].clientX;
+                  const dy = e.touches[0].clientY - e.touches[1].clientY;
+                  const dist = Math.hypot(dx, dy);
+                  const ratio = dist / pinchStartDistRef.current;
+                  const zoomDelta = Math.round(Math.log2(Math.max(0.25, Math.min(4, ratio))));
+                  const nextZ = Math.max(6, Math.min(18, pinchStartZoomRef.current + zoomDelta));
+                  if (nextZ !== mapZoom) setMapZoom(nextZ);
+                  return;
+                }
                 if (!isDraggingMap || e.touches.length !== 1) return;
                 const t = e.touches[0];
                 const dx = t.clientX - dragStartPt.x;
@@ -2558,7 +2611,14 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
                 );
                 setMapCenter(nextCenter);
               }}
-              onTouchEnd={() => setIsDraggingMap(false)}
+              onTouchEnd={() => {
+                setIsDraggingMap(false);
+                pinchStartDistRef.current = null;
+              }}
+              onTouchCancel={() => {
+                setIsDraggingMap(false);
+                pinchStartDistRef.current = null;
+              }}
               onWheel={(e) => {
                 e.preventDefault();
                 const delta = e.deltaY < 0 ? 1 : -1;
@@ -2633,6 +2693,12 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
                         alt=""
                         draggable={false}
                         referrerPolicy="no-referrer"
+                        onError={(e) => {
+                          const img = e.currentTarget;
+                          if (img.dataset.fallbackApplied) return;
+                          img.dataset.fallbackApplied = '1';
+                          img.src = `https://tile.openstreetmap.org/${tile.z}/${tile.tx}/${tile.ty}.png`;
+                        }}
                         style={{
                           left: `calc(50% + ${Math.round(tile.leftPx - mapViewport.width / 2)}px)`,
                           top: `calc(50% + ${Math.round(tile.topPx - mapViewport.height / 2)}px)`,
