@@ -29,31 +29,78 @@ import { formatDateTimeShort } from '../utils/attendance';
 import { canUseWhisperCoaching, isSupervisorRole } from '../utils/authAccess';
 import { resolveRtcIceConfiguration } from '../utils/rtcIceConfig';
 
+export const COACHING_ENROLLED_STORAGE_PREFIX = 'op_coaching_enrolled_';
+export const COACHING_PAUSED_STORAGE_PREFIX = 'op_coaching_paused_';
+// Clé héritée conservée en lecture/nettoyage pour compatibilité ascendante transparente
 export const COACHING_OPT_IN_STORAGE_PREFIX = 'op_coaching_optin_';
+
+export function getCoachingEnrolledStorageKey(uid: string): string {
+  const cleanUid = String(uid || '').trim();
+  return cleanUid ? `${COACHING_ENROLLED_STORAGE_PREFIX}${cleanUid}` : '';
+}
+
+export function getCoachingPausedStorageKey(uid: string): string {
+  const cleanUid = String(uid || '').trim();
+  return cleanUid ? `${COACHING_PAUSED_STORAGE_PREFIX}${cleanUid}` : '';
+}
 
 export function getCoachingOptInStorageKey(uid: string): string {
   const cleanUid = String(uid || '').trim();
   return cleanUid ? `${COACHING_OPT_IN_STORAGE_PREFIX}${cleanUid}` : '';
 }
 
-export function readCoachingOptInPreference(uid: string): boolean {
-  const key = getCoachingOptInStorageKey(uid);
+export function readCoachingEnrolledPreference(uid: string): boolean {
+  const key = getCoachingEnrolledStorageKey(uid);
   if (!key || typeof window === 'undefined') return false;
   try {
-    return window.localStorage.getItem(key) === '1';
+    if (window.localStorage.getItem(key) === '1') return true;
+    const legacyKey = getCoachingOptInStorageKey(uid);
+    if (legacyKey && window.localStorage.getItem(legacyKey) === '1') {
+      window.localStorage.setItem(key, '1');
+      window.localStorage.removeItem(legacyKey);
+      return true;
+    }
+    return false;
   } catch {
     return false;
   }
 }
 
-export function writeCoachingOptInPreference(uid: string, optedIn: boolean): void {
-  const key = getCoachingOptInStorageKey(uid);
+export function writeCoachingEnrolledPreference(uid: string, enrolled: boolean): void {
+  const key = getCoachingEnrolledStorageKey(uid);
   if (!key || typeof window === 'undefined') return;
   try {
-    if (optedIn) {
+    const legacyKey = getCoachingOptInStorageKey(uid);
+    if (enrolled) {
       window.localStorage.setItem(key, '1');
+      if (legacyKey) window.localStorage.removeItem(legacyKey);
     } else {
       window.localStorage.removeItem(key);
+      if (legacyKey) window.localStorage.removeItem(legacyKey);
+    }
+  } catch {
+    // Ignore storage quota or private mode restrictions
+  }
+}
+
+export function readCoachingPausedInSession(uid: string): boolean {
+  const key = getCoachingPausedStorageKey(uid);
+  if (!key || typeof window === 'undefined') return false;
+  try {
+    return window.sessionStorage.getItem(key) === '1';
+  } catch {
+    return false;
+  }
+}
+
+export function writeCoachingPausedInSession(uid: string, paused: boolean): void {
+  const key = getCoachingPausedStorageKey(uid);
+  if (!key || typeof window === 'undefined') return;
+  try {
+    if (paused) {
+      window.sessionStorage.setItem(key, '1');
+    } else {
+      window.sessionStorage.removeItem(key);
     }
   } catch {
     // Ignore storage quota or private mode restrictions
@@ -74,12 +121,13 @@ export const CollaboratorCoachingStatusBadge: React.FC<{
         className="inline-flex items-center gap-1.5 rounded-2xl border border-emerald-200 bg-white/95 px-2.5 py-2 text-[11px] font-bold text-emerald-900 shadow-lg backdrop-blur-xs"
       >
         <span className="h-2 w-2 rounded-full bg-emerald-500 animate-pulse shrink-0" />
-        <span className="whitespace-nowrap">Audio actif</span>
+        <span className="whitespace-nowrap">Micro actif</span>
         <button
           type="button"
           data-testid="coaching-quick-stop-btn"
+          data-coaching-no-auto-resume="true"
           onClick={onStop}
-          title="Couper et révoquer le micro coaching"
+          title="Couper le micro pour cette session (conserve l’accord mémorisé)"
           aria-label="Couper le micro"
           className="ml-0.5 inline-flex items-center gap-1 rounded-lg bg-red-50 hover:bg-red-100 border border-red-200 px-2 py-0.5 text-[10px] font-extrabold text-red-700 transition-colors"
         >
@@ -108,10 +156,11 @@ export const CollaboratorCoachingStatusBadge: React.FC<{
         </button>
         <button
           type="button"
-          data-testid="coaching-revoke-optin-btn"
+          data-testid="coaching-pause-resume-btn"
+          data-coaching-no-auto-resume="true"
           onClick={onStop}
-          title="Désactiver la reprise automatique du micro"
-          aria-label="Désactiver la reprise automatique du micro"
+          title="Laisser le micro coupé pour cette session"
+          aria-label="Laisser le micro coupé pour cette session"
           className="p-1 rounded-lg text-stone-400 hover:text-red-600 hover:bg-red-50 transition-colors"
         >
           <X className="w-3 h-3" />
@@ -168,25 +217,29 @@ export const SupervisorAudioControlsContainer: React.FC<{
   hasCoachingInvite?: boolean;
   hasStaleSession?: boolean;
   allowManualOptIn?: boolean;
+  enrolled?: boolean;
   isListeningOrActive: boolean;
   coachingBusy: boolean;
   coachingError: string;
   onStart: () => void;
   onStopStale?: () => void;
+  onRevokeEnrollment?: () => void;
 }> = ({
   currentUserRole,
   hasCoachingInvite = false,
   hasStaleSession = false,
   allowManualOptIn = false,
+  enrolled = false,
   isListeningOrActive,
   coachingBusy,
   coachingError,
   onStart,
   onStopStale,
+  onRevokeEnrollment,
 }) => {
   const isSupervisor =
     isSupervisorRole(currentUserRole) && canUseWhisperCoaching(currentUserRole);
-  if (!isSupervisor && !hasCoachingInvite && !hasStaleSession && !allowManualOptIn) {
+  if (!isSupervisor && !hasCoachingInvite && !hasStaleSession && !allowManualOptIn && !enrolled) {
     return null;
   }
   if (isListeningOrActive) {
@@ -199,22 +252,29 @@ export const SupervisorAudioControlsContainer: React.FC<{
         className="px-3.5 py-2 border-b border-stone-200 bg-stone-50 flex flex-wrap items-center justify-between gap-2"
       >
         <div className="text-[11px] font-semibold text-stone-700 flex items-center gap-1.5">
-          <Mic className="w-3.5 h-3.5 text-orange-600" />
+          {enrolled && !hasStaleSession ? (
+            <MicOff className="w-3.5 h-3.5 text-stone-500" />
+          ) : (
+            <Mic className="w-3.5 h-3.5 text-orange-600" />
+          )}
           <span>
             {hasStaleSession
               ? 'Session audio interrompue'
-              : isSupervisor
-                ? 'Audio Direction'
-                : hasCoachingInvite
-                  ? 'Invitation Audio Direction'
-                  : 'Coaching Terrain (Opt-in)'}
+              : enrolled
+                ? 'Micro coupé (accord mémorisé)'
+                : isSupervisor
+                  ? 'Audio Direction'
+                  : hasCoachingInvite
+                    ? 'Invitation Audio Direction'
+                    : 'Coaching Terrain (Opt-in)'}
           </span>
         </div>
-        <div className="flex items-center gap-1.5">
+        <div className="flex flex-wrap items-center gap-1.5">
           {hasStaleSession && onStopStale && (
             <button
               type="button"
               disabled={coachingBusy}
+              data-coaching-no-auto-resume="true"
               onClick={onStopStale}
               data-testid="close-stale-coaching-session-btn"
               className="inline-flex items-center gap-1 rounded-lg border border-stone-300 bg-white hover:bg-stone-100 disabled:opacity-50 px-2 py-1 text-[10px] font-bold text-stone-700"
@@ -226,15 +286,30 @@ export const SupervisorAudioControlsContainer: React.FC<{
             type="button"
             disabled={coachingBusy}
             onClick={onStart}
+            data-testid={enrolled ? 'coaching-turn-on-mic-btn' : 'coaching-authorize-mic-btn'}
             className="inline-flex items-center gap-1 rounded-lg bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 px-2.5 py-1 text-[10px] font-bold text-white"
           >
             <Mic className="w-3 h-3" />
             {coachingBusy
               ? 'Activation...'
-              : hasStaleSession
-                ? 'Réactiver le micro'
-                : 'Autoriser micro'}
+              : enrolled
+                ? 'Rallumer le micro'
+                : hasStaleSession
+                  ? 'Réactiver le micro'
+                  : 'Autoriser micro'}
           </button>
+          {enrolled && onRevokeEnrollment && (
+            <button
+              type="button"
+              disabled={coachingBusy}
+              data-testid="coaching-revoke-enrollment-btn"
+              data-coaching-no-auto-resume="true"
+              onClick={onRevokeEnrollment}
+              className="text-[10px] font-semibold text-stone-500 hover:text-red-600 underline underline-offset-2 px-1 py-0.5 disabled:opacity-50 transition-colors"
+            >
+              Révoquer l’accord
+            </button>
+          )}
         </div>
       </div>
       {coachingError && (
@@ -287,8 +362,11 @@ export const CollaboratorChatWidget: React.FC<CollaboratorChatWidgetProps> = ({
   const [coachingDoc, setCoachingDoc] = useState<SanitizedCoachingSessionDoc | null>(null);
   const [coachingError, setCoachingError] = useState('');
   const [audioPlaybackBlocked, setAudioPlaybackBlocked] = useState(false);
-  const [hasPersistedOptIn, setHasPersistedOptIn] = useState<boolean>(() =>
-    readCoachingOptInPreference(currentUserUid)
+  const [enrolled, setEnrolled] = useState<boolean>(() =>
+    readCoachingEnrolledPreference(currentUserUid)
+  );
+  const [micPausedInSession, setMicPausedInSession] = useState<boolean>(() =>
+    readCoachingPausedInSession(currentUserUid)
   );
   const [awaitingGestureResume, setAwaitingGestureResume] = useState(false);
 
@@ -307,6 +385,7 @@ export const CollaboratorChatWidget: React.FC<CollaboratorChatWidgetProps> = ({
   const keepaliveAudioRef = useRef<HTMLAudioElement | null>(null);
   const currentUserUidRef = useRef<string>(currentUserUid);
   const currentUserNameRef = useRef<string>(currentUserName);
+  const micPausedInSessionRef = useRef<boolean>(micPausedInSession);
   const revokedByUserRef = useRef<boolean>(false);
   const autoResumeAttemptedRef = useRef<boolean>(false);
   const clearGestureListenersRef = useRef<(() => void) | null>(null);
@@ -317,6 +396,10 @@ export const CollaboratorChatWidget: React.FC<CollaboratorChatWidgetProps> = ({
   }, [coachingActive]);
 
   useEffect(() => {
+    micPausedInSessionRef.current = micPausedInSession;
+  }, [micPausedInSession]);
+
+  useEffect(() => {
     currentUserUidRef.current = currentUserUid;
     currentUserNameRef.current = currentUserName;
   }, [currentUserUid, currentUserName]);
@@ -325,7 +408,10 @@ export const CollaboratorChatWidget: React.FC<CollaboratorChatWidgetProps> = ({
     revokedByUserRef.current = false;
     autoResumeAttemptedRef.current = false;
     setAwaitingGestureResume(false);
-    setHasPersistedOptIn(readCoachingOptInPreference(currentUserUid));
+    setEnrolled(readCoachingEnrolledPreference(currentUserUid));
+    const paused = readCoachingPausedInSession(currentUserUid);
+    micPausedInSessionRef.current = paused;
+    setMicPausedInSession(paused);
   }, [currentUserUid]);
 
   const clearGestureListeners = () => {
@@ -791,7 +877,8 @@ export const CollaboratorChatWidget: React.FC<CollaboratorChatWidgetProps> = ({
   const stopCollaboratorCoaching = async (
     updateCloud = true,
     options?: {
-      revokeOptIn?: boolean;
+      pauseForCurrentSession?: boolean;
+      revokeEnrollment?: boolean;
       forceCloudReset?: boolean;
       preserveError?: boolean;
     }
@@ -799,21 +886,35 @@ export const CollaboratorChatWidget: React.FC<CollaboratorChatWidgetProps> = ({
     const targetUid = currentUserUidRef.current || currentUserUid;
     const targetName = currentUserNameRef.current || currentUserName;
     const wasCoachingActive = coachingActiveRef.current;
-    const revokeOptIn = Boolean(options?.revokeOptIn);
+    const pauseForCurrentSession = Boolean(options?.pauseForCurrentSession);
+    const revokeEnrollment = Boolean(options?.revokeEnrollment);
     const forceCloudReset = Boolean(options?.forceCloudReset);
 
     coachingActiveRef.current = false;
     stopBackgroundContinuity();
     clearPlaybackUnlockListeners();
 
-    if (revokeOptIn) {
+    if (pauseForCurrentSession) {
+      clearGestureListeners();
+      setAwaitingGestureResume(false);
+      micPausedInSessionRef.current = true;
+      setMicPausedInSession(true);
+      if (targetUid) {
+        writeCoachingPausedInSession(targetUid, true);
+      }
+    }
+
+    if (revokeEnrollment) {
       revokedByUserRef.current = true;
       clearGestureListeners();
       setAwaitingGestureResume(false);
+      micPausedInSessionRef.current = false;
+      setMicPausedInSession(false);
       if (targetUid) {
-        writeCoachingOptInPreference(targetUid, false);
+        writeCoachingEnrolledPreference(targetUid, false);
+        writeCoachingPausedInSession(targetUid, false);
       }
-      setHasPersistedOptIn(false);
+      setEnrolled(false);
     }
 
     if (candidatesUnsubRef.current) {
@@ -866,20 +967,35 @@ export const CollaboratorChatWidget: React.FC<CollaboratorChatWidgetProps> = ({
   };
 
   const armGestureResume = () => {
-    if (typeof window === 'undefined' || revokedByUserRef.current) return;
+    if (
+      typeof window === 'undefined' ||
+      revokedByUserRef.current ||
+      micPausedInSessionRef.current
+    ) {
+      return;
+    }
     setAwaitingGestureResume(true);
     if (clearGestureListenersRef.current) return;
-    const onFirstGesture = () => {
+    const onFirstGesture = (ev: Event) => {
+      const target = ev.target as HTMLElement | null;
+      if (target?.closest?.('[data-coaching-no-auto-resume="true"]')) {
+        return;
+      }
       clearGestureListeners();
-      if (revokedByUserRef.current || coachingActiveRef.current || coachingBusyRef.current) {
+      if (
+        revokedByUserRef.current ||
+        micPausedInSessionRef.current ||
+        coachingActiveRef.current ||
+        coachingBusyRef.current
+      ) {
         return;
       }
       unlockRemoteAudioPlayback();
       void startCollaboratorCoaching({ autoResume: false });
     };
-    window.addEventListener('pointerdown', onFirstGesture, { once: true, capture: true });
-    window.addEventListener('touchstart', onFirstGesture, { once: true, capture: true });
-    window.addEventListener('keydown', onFirstGesture, { once: true, capture: true });
+    window.addEventListener('pointerdown', onFirstGesture, { capture: true });
+    window.addEventListener('touchstart', onFirstGesture, { capture: true });
+    window.addEventListener('keydown', onFirstGesture, { capture: true });
     clearGestureListenersRef.current = () => {
       window.removeEventListener('pointerdown', onFirstGesture, { capture: true });
       window.removeEventListener('touchstart', onFirstGesture, { capture: true });
@@ -905,6 +1021,11 @@ export const CollaboratorChatWidget: React.FC<CollaboratorChatWidgetProps> = ({
     setAwaitingGestureResume(false);
     setCoachingError('');
 
+    // Déverrouiller immédiatement remoteAudioRef dans le geste utilisateur synchrone (avant tout await)
+    if (!autoResume) {
+      unlockRemoteAudioPlayback();
+    }
+
     try {
       await stopCollaboratorCoaching(false);
 
@@ -917,11 +1038,14 @@ export const CollaboratorChatWidget: React.FC<CollaboratorChatWidgetProps> = ({
       });
       localStreamRef.current = stream;
 
-      // Mémoriser durablement le consentement explicite du collaborateur dans localStorage
-      writeCoachingOptInPreference(uid, true);
-      setHasPersistedOptIn(true);
+      // Mémoriser durablement l'accord initial (localStorage) et lever toute pause de session (sessionStorage)
+      writeCoachingEnrolledPreference(uid, true);
+      writeCoachingPausedInSession(uid, false);
+      setEnrolled(true);
+      micPausedInSessionRef.current = false;
+      setMicPausedInSession(false);
 
-      // Handle OS/browser revoking mic track cleanly (ne révoque pas le consentement mémorisé)
+      // Handle OS/browser revoking mic track cleanly (ne supprime jamais op_coaching_enrolled_${uid})
       stream.getAudioTracks().forEach((track) => {
         track.onended = () => {
           if (coachingActiveRef.current) {
@@ -984,14 +1108,15 @@ export const CollaboratorChatWidget: React.FC<CollaboratorChatWidgetProps> = ({
     }
   };
 
-  // Reconnexion automatique transparente au chargement si le collaborateur a déjà donné son consentement
+  // Reconnexion automatique transparente au chargement si l'accord est mémorisé et non mis en pause dans cet onglet
   useEffect(() => {
     if (!currentUserUid) return;
     if (coachingActiveRef.current || coachingBusyRef.current || revokedByUserRef.current) return;
+    if (micPausedInSession || readCoachingPausedInSession(currentUserUid)) return;
     if (autoResumeAttemptedRef.current) return;
 
-    const optedIn = hasPersistedOptIn || Boolean(coachingDoc?.collabConsentActive);
-    if (!optedIn) return;
+    const shouldAutoResume = enrolled || Boolean(coachingDoc?.collabConsentActive);
+    if (!shouldAutoResume) return;
 
     autoResumeAttemptedRef.current = true;
     let cancelled = false;
@@ -1009,7 +1134,14 @@ export const CollaboratorChatWidget: React.FC<CollaboratorChatWidgetProps> = ({
         permState = 'unsupported';
       }
 
-      if (cancelled || revokedByUserRef.current || coachingActiveRef.current) return;
+      if (
+        cancelled ||
+        revokedByUserRef.current ||
+        micPausedInSessionRef.current ||
+        coachingActiveRef.current
+      ) {
+        return;
+      }
 
       if (permState === 'denied') {
         setAwaitingGestureResume(false);
@@ -1034,7 +1166,7 @@ export const CollaboratorChatWidget: React.FC<CollaboratorChatWidgetProps> = ({
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentUserUid, hasPersistedOptIn, coachingDoc?.collabConsentActive]);
+  }, [currentUserUid, enrolled, micPausedInSession, coachingDoc?.collabConsentActive]);
 
   useEffect(() => {
     if (!coachingActive || !currentUserUid) return;
@@ -1048,7 +1180,7 @@ export const CollaboratorChatWidget: React.FC<CollaboratorChatWidgetProps> = ({
     };
   }, [coachingActive, currentUserUid]);
 
-  // Nettoyage propre sur fermeture d'onglet / rechargement (F5) / démontage sans JAMAIS révoquer op_coaching_optin_${uid}
+  // Nettoyage propre sur fermeture d'onglet / rechargement (F5) / démontage sans toucher à op_coaching_enrolled_${uid} ni op_coaching_paused_${uid}
   useEffect(() => {
     const handlePageHide = (ev: PageTransitionEvent) => {
       if (ev.persisted) return;
@@ -1121,7 +1253,7 @@ export const CollaboratorChatWidget: React.FC<CollaboratorChatWidgetProps> = ({
           onResume={() => void startCollaboratorCoaching({ autoResume: false })}
           onStop={() =>
             void stopCollaboratorCoaching(true, {
-              revokeOptIn: true,
+              pauseForCurrentSession: true,
               forceCloudReset: true,
             })
           }
@@ -1160,7 +1292,7 @@ export const CollaboratorChatWidget: React.FC<CollaboratorChatWidgetProps> = ({
               </div>
             </div>
             <div className="flex items-center gap-1">
-              {!isSupervisor && !coachingActive && !hasCoachingInvite && !hasStaleSession && (
+              {!isSupervisor && !coachingActive && !hasCoachingInvite && !hasStaleSession && !enrolled && (
                 <button
                   type="button"
                   data-testid="collab-coaching-optin-toggle"
@@ -1181,7 +1313,7 @@ export const CollaboratorChatWidget: React.FC<CollaboratorChatWidgetProps> = ({
                 coachingActive={coachingActive}
                 onStop={() =>
                   void stopCollaboratorCoaching(true, {
-                    revokeOptIn: true,
+                    pauseForCurrentSession: true,
                     forceCloudReset: true,
                   })
                 }
@@ -1202,13 +1334,20 @@ export const CollaboratorChatWidget: React.FC<CollaboratorChatWidgetProps> = ({
             hasCoachingInvite={hasCoachingInvite}
             hasStaleSession={hasStaleSession}
             allowManualOptIn={manualCoachingOptInOpen}
+            enrolled={enrolled}
             isListeningOrActive={isListeningOrActive}
             coachingBusy={coachingBusy}
             coachingError={coachingError}
             onStart={() => void startCollaboratorCoaching({ autoResume: false })}
             onStopStale={() =>
               void stopCollaboratorCoaching(true, {
-                revokeOptIn: true,
+                pauseForCurrentSession: true,
+                forceCloudReset: true,
+              })
+            }
+            onRevokeEnrollment={() =>
+              void stopCollaboratorCoaching(true, {
+                revokeEnrollment: true,
                 forceCloudReset: true,
               })
             }

@@ -8,9 +8,12 @@ import {
   SupervisorAudioControlsContainer,
   SupervisorCoachingHeaderStopButton,
   SupervisorCoachingPttPill,
-  getCoachingOptInStorageKey,
-  readCoachingOptInPreference,
-  writeCoachingOptInPreference,
+  getCoachingEnrolledStorageKey,
+  getCoachingPausedStorageKey,
+  readCoachingEnrolledPreference,
+  readCoachingPausedInSession,
+  writeCoachingEnrolledPreference,
+  writeCoachingPausedInSession,
 } from './components/CollaboratorChatWidget';
 import { NotificationBell } from './components/NotificationBell';
 import { AchievementToast } from './components/AchievementToast';
@@ -335,42 +338,71 @@ test('CollaboratorChatWidget hides audio controls by default for non-supervisors
   }
 });
 
-test('Coaching Audio persistent opt-in storage and status badge maintain explicit consent and permanent visibility', () => {
-  assert.equal(getCoachingOptInStorageKey('u_collab_42'), 'op_coaching_optin_u_collab_42');
-  assert.equal(getCoachingOptInStorageKey('  u_collab_42  '), 'op_coaching_optin_u_collab_42');
-  assert.equal(getCoachingOptInStorageKey(''), '');
+test('Coaching Audio separates permanent enrollment (localStorage) from per-session mic pause (sessionStorage) and keeps transparency UI visible', () => {
+  assert.equal(getCoachingEnrolledStorageKey('u_collab_42'), 'op_coaching_enrolled_u_collab_42');
+  assert.equal(getCoachingEnrolledStorageKey('  u_collab_42  '), 'op_coaching_enrolled_u_collab_42');
+  assert.equal(getCoachingEnrolledStorageKey(''), '');
+  assert.equal(getCoachingPausedStorageKey('u_collab_42'), 'op_coaching_paused_u_collab_42');
+  assert.equal(getCoachingPausedStorageKey(''), '');
 
-  // Safe fallback when window/localStorage is unavailable (SSR / Node)
-  assert.equal(readCoachingOptInPreference('u_collab_42'), false);
-  writeCoachingOptInPreference('u_collab_42', true);
+  // Safe fallback when window/storage is unavailable (SSR / Node)
+  assert.equal(readCoachingEnrolledPreference('u_collab_42'), false);
+  assert.equal(readCoachingPausedInSession('u_collab_42'), false);
+  writeCoachingEnrolledPreference('u_collab_42', true);
+  writeCoachingPausedInSession('u_collab_42', true);
 
-  // Mock browser localStorage to verify per-UID opt-in & explicit revoke isolation
-  const store = new Map<string, string>();
+  // Mock browser localStorage + sessionStorage to verify enrollment vs per-session mute isolation
+  const localStore = new Map<string, string>();
+  const sessionStore = new Map<string, string>();
   const prevWindow = (globalThis as Record<string, unknown>).window;
   (globalThis as Record<string, unknown>).window = {
     localStorage: {
-      getItem: (k: string) => (store.has(k) ? store.get(k)! : null),
+      getItem: (k: string) => (localStore.has(k) ? localStore.get(k)! : null),
       setItem: (k: string, v: string) => {
-        store.set(k, String(v));
+        localStore.set(k, String(v));
       },
       removeItem: (k: string) => {
-        store.delete(k);
+        localStore.delete(k);
+      },
+    },
+    sessionStorage: {
+      getItem: (k: string) => (sessionStore.has(k) ? sessionStore.get(k)! : null),
+      setItem: (k: string, v: string) => {
+        sessionStore.set(k, String(v));
+      },
+      removeItem: (k: string) => {
+        sessionStore.delete(k);
       },
     },
   };
   try {
-    assert.equal(readCoachingOptInPreference('u_1'), false);
-    writeCoachingOptInPreference('u_1', true);
-    writeCoachingOptInPreference('u_2', true);
-    assert.equal(store.get('op_coaching_optin_u_1'), '1');
-    assert.equal(readCoachingOptInPreference('u_1'), true);
-    assert.equal(readCoachingOptInPreference('u_2'), true);
+    // 1. Initial authorization enrolls persistently and clears any session pause
+    writeCoachingEnrolledPreference('u_1', true);
+    writeCoachingEnrolledPreference('u_2', true);
+    writeCoachingPausedInSession('u_1', false);
+    assert.equal(localStore.get('op_coaching_enrolled_u_1'), '1');
+    assert.equal(readCoachingEnrolledPreference('u_1'), true);
+    assert.equal(readCoachingPausedInSession('u_1'), false);
 
-    // Explicit revoke deletes only the targeted UID's consent key
-    writeCoachingOptInPreference('u_1', false);
-    assert.equal(store.has('op_coaching_optin_u_1'), false);
-    assert.equal(readCoachingOptInPreference('u_1'), false);
-    assert.equal(readCoachingOptInPreference('u_2'), true);
+    // 2. Clicking "Couper le micro" pauses only in sessionStorage without removing enrollment
+    writeCoachingPausedInSession('u_1', true);
+    assert.equal(sessionStore.get('op_coaching_paused_u_1'), '1');
+    assert.equal(readCoachingPausedInSession('u_1'), true);
+    assert.equal(readCoachingEnrolledPreference('u_1'), true);
+
+    // 3. Explicit "Révoquer l'accord" removes enrollment only for targeted UID
+    writeCoachingEnrolledPreference('u_1', false);
+    writeCoachingPausedInSession('u_1', false);
+    assert.equal(localStore.has('op_coaching_enrolled_u_1'), false);
+    assert.equal(sessionStore.has('op_coaching_paused_u_1'), false);
+    assert.equal(readCoachingEnrolledPreference('u_1'), false);
+    assert.equal(readCoachingEnrolledPreference('u_2'), true);
+
+    // 4. Legacy op_coaching_optin_ key migrates transparently to op_coaching_enrolled_
+    localStore.set('op_coaching_optin_u_legacy', '1');
+    assert.equal(readCoachingEnrolledPreference('u_legacy'), true);
+    assert.equal(localStore.get('op_coaching_enrolled_u_legacy'), '1');
+    assert.equal(localStore.has('op_coaching_optin_u_legacy'), false);
   } finally {
     if (prevWindow === undefined) {
       delete (globalThis as Record<string, unknown>).window;
@@ -393,7 +425,7 @@ test('Coaching Audio persistent opt-in storage and status badge maintain explici
     ''
   );
 
-  // Active session always shows visible indicator + 1-click stop button
+  // Active session always shows visible indicator ("Micro actif") + 1-click stop button ("Couper")
   const activeBadgeHtml = renderToStaticMarkup(
     React.createElement(CollaboratorCoachingStatusBadge, {
       coachingActive: true,
@@ -404,11 +436,11 @@ test('Coaching Audio persistent opt-in storage and status badge maintain explici
     })
   );
   assert.ok(activeBadgeHtml.includes('coaching-active-status-pill'));
-  assert.ok(activeBadgeHtml.includes('Audio actif'));
+  assert.ok(activeBadgeHtml.includes('Micro actif'));
   assert.ok(activeBadgeHtml.includes('coaching-quick-stop-btn'));
   assert.ok(activeBadgeHtml.includes('Couper'));
 
-  // Saved opt-in waiting for browser user gesture (e.g., iOS Safari) shows discreet resume + revoke pill
+  // Saved enrollment waiting for browser user gesture (e.g., iOS Safari) shows discreet resume + session pause pill
   const resumeBadgeHtml = renderToStaticMarkup(
     React.createElement(CollaboratorCoachingStatusBadge, {
       coachingActive: false,
@@ -421,7 +453,26 @@ test('Coaching Audio persistent opt-in storage and status badge maintain explici
   assert.ok(resumeBadgeHtml.includes('coaching-resume-status-pill'));
   assert.ok(resumeBadgeHtml.includes('coaching-resume-audio-btn'));
   assert.ok(resumeBadgeHtml.includes('Reprendre audio'));
-  assert.ok(resumeBadgeHtml.includes('coaching-revoke-optin-btn'));
+  assert.ok(resumeBadgeHtml.includes('coaching-pause-resume-btn'));
+
+  // Enrolled collaborator with mic muted sees clear 1-click "Rallumer le micro" + discreet "Révoquer l’accord" without needing an invite
+  const enrolledPausedHtml = renderToStaticMarkup(
+    React.createElement(SupervisorAudioControlsContainer, {
+      currentUserRole: 'commercial',
+      hasCoachingInvite: false,
+      enrolled: true,
+      isListeningOrActive: false,
+      coachingBusy: false,
+      coachingError: '',
+      onStart: () => {},
+      onRevokeEnrollment: () => {},
+    })
+  );
+  assert.ok(enrolledPausedHtml.includes('Micro coupé (accord mémorisé)'));
+  assert.ok(enrolledPausedHtml.includes('coaching-turn-on-mic-btn'));
+  assert.ok(enrolledPausedHtml.includes('Rallumer le micro'));
+  assert.ok(enrolledPausedHtml.includes('coaching-revoke-enrollment-btn'));
+  assert.ok(enrolledPausedHtml.includes('Révoquer l’accord'));
 });
 
 test('NotificationBell and AchievementToast deliver coaching_invite to collaborators for explicit opt-in consent and keep direct_message clean', () => {
