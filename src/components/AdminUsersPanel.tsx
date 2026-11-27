@@ -3866,26 +3866,23 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
                     </div>
                   </div>
                   <div className="flex items-center gap-1 shrink-0">
-                    {['groq', 'mistral', 'gemini', 'openrouter', 'openai', 'deepseek', 'anthropic', 'tavily'].includes(item.provider) && (
-                      <button
-                        type="button"
-                        disabled={proxyTestBusy !== null}
-                        onClick={() => void handleTestSecureProxy(item.provider)}
-                        title={
-                          isStaticHostingEnvironment()
-                            ? 'Tester directement la clé du Coffre Cloud'
-                            : "Tester l'appel serveur sécurisé (/api/ai/groq-secure)"
-                        }
-                        className="px-2 py-1 rounded-lg border border-orange-200 bg-orange-50 hover:bg-orange-100 text-orange-800 text-[11px] font-semibold inline-flex items-center gap-1 disabled:opacity-50"
-                      >
-                        {proxyTestBusy === item.provider ? (
-                          <Loader2 className="w-3 h-3 animate-spin" />
-                        ) : (
-                          <Sparkles className="w-3 h-3" />
-                        )}
-                        Tester
-                      </button>
-                    )}
+                    {!isStaticHostingEnvironment() &&
+                      ['groq', 'mistral', 'gemini', 'openrouter', 'openai', 'deepseek', 'anthropic', 'tavily'].includes(item.provider) && (
+                        <button
+                          type="button"
+                          disabled={proxyTestBusy !== null}
+                          onClick={() => void handleTestSecureProxy(item.provider)}
+                          title="Tester l'appel serveur sécurisé (/api/ai/groq-secure)"
+                          className="px-2 py-1 rounded-lg border border-orange-200 bg-orange-50 hover:bg-orange-100 text-orange-800 text-[11px] font-semibold inline-flex items-center gap-1 disabled:opacity-50"
+                        >
+                          {proxyTestBusy === item.provider ? (
+                            <Loader2 className="w-3 h-3 animate-spin" />
+                          ) : (
+                            <Sparkles className="w-3 h-3" />
+                          )}
+                          Tester
+                        </button>
+                      )}
                     <button
                       type="button"
                       onClick={() =>
@@ -3917,42 +3914,51 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
 
         {/* Test du Coffre Clés API Cloud */}
         <div className="pt-2 border-t border-stone-100 flex flex-wrap items-center justify-between gap-2 text-[11px]">
-          <span className="text-stone-500">
-            {isStaticHostingEnvironment() ? (
-              <>
-                Test direct HTTPS depuis le Coffre Cloud :{' '}
-                <code className="font-mono font-semibold text-stone-800">{apiProvider}</code>
-              </>
-            ) : (
-              <>
+          {isStaticHostingEnvironment() ? (
+            <>
+              <span className="text-stone-500">
+                En hébergement statique (GitHub Pages), <code className="font-mono font-semibold text-stone-800">/api_keys</code> est fermé à la lecture client directe. Testez vos clés via le Hub API local :
+              </span>
+              {onOpenLocalApiHub && (
+                <button
+                  type="button"
+                  onClick={onOpenLocalApiHub}
+                  className="px-2.5 py-1.5 rounded-lg border border-amber-300 bg-amber-50 hover:bg-amber-100 text-amber-900 font-semibold inline-flex items-center gap-1.5"
+                >
+                  <Sparkles className="w-3.5 h-3.5 text-amber-700" />
+                  Ouvrir le Hub API local (GitHub Pages)
+                </button>
+              )}
+            </>
+          ) : (
+            <>
+              <span className="text-stone-500">
                 Endpoint serveur sécurisé (Admin SDK + vérification token Firebase) :{' '}
                 <code className="font-mono font-semibold text-stone-800">POST /api/ai/groq-secure</code>
-              </>
-            )}
-          </span>
-          <button
-            type="button"
-            disabled={proxyTestBusy !== null}
-            onClick={() =>
-              void handleTestSecureProxy(
-                ['groq', 'mistral', 'gemini', 'openrouter', 'openai', 'deepseek', 'anthropic', 'tavily'].includes(
-                  apiProvider
-                )
-                  ? apiProvider
-                  : 'groq'
-              )
-            }
-            className="px-2.5 py-1.5 rounded-lg border border-stone-300 bg-white hover:bg-stone-50 text-stone-800 font-semibold inline-flex items-center gap-1.5 disabled:opacity-50"
-          >
-            {proxyTestBusy ? (
-              <Loader2 className="w-3.5 h-3.5 animate-spin text-orange-600" />
-            ) : (
-              <Sparkles className="w-3.5 h-3.5 text-orange-600" />
-            )}
-            {isStaticHostingEnvironment()
-              ? 'Tester la clé du Coffre Cloud'
-              : 'Tester l’appel serveur sécurisé'}
-          </button>
+              </span>
+              <button
+                type="button"
+                disabled={proxyTestBusy !== null}
+                onClick={() =>
+                  void handleTestSecureProxy(
+                    ['groq', 'mistral', 'gemini', 'openrouter', 'openai', 'deepseek', 'anthropic', 'tavily'].includes(
+                      apiProvider
+                    )
+                      ? apiProvider
+                      : 'groq'
+                  )
+                }
+                className="px-2.5 py-1.5 rounded-lg border border-stone-300 bg-white hover:bg-stone-50 text-stone-800 font-semibold inline-flex items-center gap-1.5 disabled:opacity-50"
+              >
+                {proxyTestBusy ? (
+                  <Loader2 className="w-3.5 h-3.5 animate-spin text-orange-600" />
+                ) : (
+                  <Sparkles className="w-3.5 h-3.5 text-orange-600" />
+                )}
+                Tester l’appel serveur sécurisé
+              </button>
+            </>
+          )}
         </div>
 
         {proxyTestResult && (

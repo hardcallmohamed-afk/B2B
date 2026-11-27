@@ -10,6 +10,7 @@ import {
 import { onSnapshot } from 'firebase/firestore';
 import {
   addCoachingIceCandidate,
+  auth,
   clearCoachingCandidates,
   getCoachingCandidatesQuery,
   getCoachingSessionDocRef,
@@ -18,6 +19,7 @@ import {
   markDirectChatRead,
   sendDirectChatMessage,
   setCollaboratorCoachingState,
+  touchCollaboratorCoachingKeepalive,
 } from '../firebase';
 import type {
   SanitizedCoachingSessionDoc,
@@ -603,6 +605,7 @@ export const CollaboratorChatWidget: React.FC<CollaboratorChatWidgetProps> = ({
   }, [currentUserUid, currentUserName]);
 
   const stopCollaboratorCoaching = async (updateCloud = true) => {
+    const wasCoachingActive = coachingActiveRef.current;
     coachingActiveRef.current = false;
     stopBackgroundContinuity();
     if (candidatesUnsubRef.current) {
@@ -630,7 +633,12 @@ export const CollaboratorChatWidget: React.FC<CollaboratorChatWidgetProps> = ({
     setCoachingActive(false);
     setCoachingError('');
 
-    if (updateCloud && currentUserUid) {
+    if (
+      updateCloud &&
+      wasCoachingActive &&
+      currentUserUid &&
+      auth.currentUser?.uid === currentUserUid
+    ) {
       try {
         await setCollaboratorCoachingState(currentUserUid, {
           collabName: currentUserName,
@@ -647,17 +655,39 @@ export const CollaboratorChatWidget: React.FC<CollaboratorChatWidgetProps> = ({
   };
 
   useEffect(() => {
+    if (!coachingActive || !currentUserUid) return;
+    const keepaliveId = window.setInterval(() => {
+      if (coachingActiveRef.current && auth.currentUser?.uid === currentUserUid) {
+        void touchCollaboratorCoachingKeepalive(currentUserUid);
+      }
+    }, 5 * 60 * 1000);
+    return () => {
+      window.clearInterval(keepaliveId);
+    };
+  }, [coachingActive, currentUserUid]);
+
+  useEffect(() => {
     const handlePageHide = (ev: PageTransitionEvent) => {
       if (ev.persisted) return;
-      if (coachingActiveRef.current) {
+      if (
+        coachingActiveRef.current &&
+        currentUserUid &&
+        auth.currentUser?.uid === currentUserUid
+      ) {
         void stopCollaboratorCoaching(true);
       }
     };
     window.addEventListener('pagehide', handlePageHide);
     return () => {
       window.removeEventListener('pagehide', handlePageHide);
-      void stopCollaboratorCoaching(true);
+      const shouldUpdateCloud = Boolean(
+        coachingActiveRef.current &&
+          currentUserUid &&
+          auth.currentUser?.uid === currentUserUid
+      );
+      void stopCollaboratorCoaching(shouldUpdateCloud);
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const startCollaboratorCoaching = async () => {

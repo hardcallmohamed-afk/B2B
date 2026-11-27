@@ -5210,7 +5210,12 @@ export default function App() {
         const nowMs = Date.now();
         snap.forEach((docSnap) => {
           const d = docSnap.data();
-          const updatedAtMs = Date.parse(String(d.updatedAtIso || ''));
+          const serverUpdatedAtMs =
+            typeof d.updatedAt?.toDate === 'function' ? d.updatedAt.toDate().getTime() : NaN;
+          const clientUpdatedAtMs = Date.parse(String(d.updatedAtIso || ''));
+          const updatedAtMs = Number.isFinite(serverUpdatedAtMs)
+            ? serverUpdatedAtMs
+            : clientUpdatedAtMs;
           const isRecent = Number.isFinite(updatedAtMs) && nowMs - updatedAtMs <= 15 * 60 * 1000;
           if (Boolean(d.collabConsentActive) && Boolean(d.offerSdp) && isRecent) {
             ready.add(docSnap.id);
@@ -5795,21 +5800,33 @@ export default function App() {
   }, [teamStats, cloudUser]);
 
   const myCollaboratorMetrics = useMemo<CollaboratorMetrics>(() => {
-    const validContracts = mySignedContracts.filter(
-      (c) => c.payoutStatus === 'Validé' || c.payoutStatus === 'Versé'
+    const nonRefusedContracts = mySignedContracts.filter(
+      (c) => c.payoutStatus !== 'Refusé'
     );
-    const contractsCount = validContracts.length;
-    const qualifiedCount = fiches.filter(
+    const hasLoadedContracts = signedContractsHydratedRef.current || mySignedContracts.length > 0;
+    const contractsCount = hasLoadedContracts
+      ? nonRefusedContracts.length
+      : myTeamStatRecord?.totalContracts ?? 0;
+    const localQualifiedCount = fiches.filter(
       (f) =>
         f.statut === 'RDV pris' ||
         f.statut === 'Devis envoyé' ||
         f.statut === 'Signé Orange Pro'
     ).length;
-    const grandCompteContracts = validContracts.filter(
+    const hasLoadedFiches = cloudSynced || fiches.length > 0;
+    const totalProspects = hasLoadedFiches
+      ? fiches.length
+      : myTeamStatRecord?.totalProspects ?? 0;
+    const qualifiedCount = hasLoadedFiches
+      ? localQualifiedCount
+      : myTeamStatRecord?.totalQualified ?? 0;
+    const grandCompteContracts = nonRefusedContracts.filter(
       (c) => c.tier === 'Grand Compte'
     ).length;
-    const pmeContracts = validContracts.filter((c) => c.tier === 'PME').length;
-    const totalPayoutMad = validContracts.reduce((sum, c) => sum + (Number(c.payoutMad) || 0), 0);
+    const pmeContracts = nonRefusedContracts.filter((c) => c.tier === 'PME').length;
+    const totalPayoutMad = hasLoadedContracts
+      ? nonRefusedContracts.reduce((sum, c) => sum + (Number(c.payoutMad) || 0), 0)
+      : myTeamStatRecord?.totalPayoutMad ?? 0;
     const multiContactFiches = fiches.filter(
       (f) =>
         (f.telephonesSupplementaires?.length || 0) > 0 ||
@@ -5821,7 +5838,7 @@ export default function App() {
     ).size;
 
     return {
-      totalProspects: fiches.length,
+      totalProspects,
       qualifiedCount,
       contractsCount,
       grandCompteContracts,
@@ -5831,12 +5848,31 @@ export default function App() {
       highMaturityFiches,
       distinctCities,
     };
-  }, [fiches, mySignedContracts]);
+  }, [fiches, mySignedContracts, myTeamStatRecord, cloudSynced]);
 
   const myAchievementSummary = useMemo(
     () => evaluateAchievements(myCollaboratorMetrics, myTeamStatRecord?.manualBadges || []),
     [myCollaboratorMetrics, myTeamStatRecord]
   );
+
+  const effectiveTeamStats = useMemo<TeamStatRecord[]>(() => {
+    if (!cloudUser) return teamStats;
+    const hasMe = teamStats.some((s) => s.uid === cloudUser.uid);
+    if (!hasMe) return teamStats;
+    return teamStats.map((s) =>
+      s.uid === cloudUser.uid
+        ? {
+            ...s,
+            totalProspects: myCollaboratorMetrics.totalProspects,
+            totalQualified: myCollaboratorMetrics.qualifiedCount,
+            totalContracts: myCollaboratorMetrics.contractsCount,
+            totalPayoutMad: myCollaboratorMetrics.totalPayoutMad,
+            xp: myAchievementSummary.totalXp,
+            unlockedCount: myAchievementSummary.unlockedCount,
+          }
+        : s
+    );
+  }, [teamStats, cloudUser, myCollaboratorMetrics, myAchievementSummary]);
 
   const currentUserDisplayName = useMemo(() => {
     if (userProfile.displayName.trim()) return userProfile.displayName.trim();
@@ -12735,7 +12771,7 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
             currentUserUid={cloudUser.uid}
             isSuperAdmin={isSuperAdmin}
             currentUserRole={appUserProfile?.role || (isSuperAdmin ? 'super_admin' : 'commercial')}
-            teamStats={teamStats}
+            teamStats={effectiveTeamStats}
             signedContracts={signedContracts}
             currentUserFiches={fiches}
             portfolioRefreshKey={portfolioRefreshKey}
@@ -12795,7 +12831,7 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
             currentUserRole={currentUserRole}
             isSuperAdmin={isSuperAdmin}
             myMetrics={myCollaboratorMetrics}
-            teamStats={teamStats}
+            teamStats={effectiveTeamStats}
             signedContracts={signedContracts}
             initialSelectedUid={badgesFocusUid}
             onAdminToggleManualBadge={isSuperAdmin ? handleAdminToggleManualBadge : undefined}

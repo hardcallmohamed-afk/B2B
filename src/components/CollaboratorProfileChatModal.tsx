@@ -224,6 +224,8 @@ export const CollaboratorProfileChatModal: React.FC<CollaboratorProfileChatModal
           return;
         }
         const d = snap.data();
+        const serverUpdatedAtIso =
+          typeof d.updatedAt?.toDate === 'function' ? d.updatedAt.toDate().toISOString() : '';
         setCoachingDoc({
           collabUid: snap.id,
           orgScope: 'orange_pro_team',
@@ -235,7 +237,8 @@ export const CollaboratorProfileChatModal: React.FC<CollaboratorProfileChatModal
           adminPttActive: Boolean(d.adminPttActive),
           offerSdp: typeof d.offerSdp === 'string' ? d.offerSdp : '',
           answerSdp: typeof d.answerSdp === 'string' ? d.answerSdp : '',
-          updatedAtIso: typeof d.updatedAtIso === 'string' ? d.updatedAtIso : '',
+          updatedAtIso:
+            serverUpdatedAtIso || (typeof d.updatedAtIso === 'string' ? d.updatedAtIso : ''),
         });
       },
       () => {

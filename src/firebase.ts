@@ -3583,6 +3583,19 @@ export async function setCollaboratorCoachingState(
   }
 }
 
+export async function touchCollaboratorCoachingKeepalive(collabUid: string): Promise<void> {
+  if (!collabUid || auth.currentUser?.uid !== collabUid) return;
+  const ref = doc(db, 'coaching_sessions', collabUid);
+  try {
+    await updateDoc(ref, {
+      updatedAtIso: new Date().toISOString(),
+      updatedAt: serverTimestamp(),
+    });
+  } catch {
+    // Non-fatal keepalive retry on next interval
+  }
+}
+
 export async function setAdminCoachingState(
   collabUid: string,
   updates: {

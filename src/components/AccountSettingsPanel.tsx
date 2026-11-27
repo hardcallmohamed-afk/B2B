@@ -211,11 +211,20 @@ export const AccountSettingsPanel: React.FC<AccountSettingsPanelProps> = ({
 
   const [uploadingPhoto, setUploadingPhoto] = useState(false);
   const [savingProfile, setSavingProfile] = useState(false);
+  const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
+  const prevUidRef = useRef(uid);
   const [pushStatus, setPushStatus] = useState<PushNotificationStatus>(() => getPushNotificationStatus());
 
   // Resynchronisation automatique des champs lorsque le profil Cloud Firestore s'hydrate de manière asynchrone
+  // sans jamais écraser une saisie utilisateur en cours (ex: quand profile.zone se met à jour automatiquement par GPS)
   useEffect(() => {
+    const uidChanged = prevUidRef.current !== uid;
+    if (uidChanged) {
+      prevUidRef.current = uid;
+      setHasUnsavedChanges(false);
+    }
     if (savingProfile || uploadingPhoto) return;
+    if (hasUnsavedChanges && !uidChanged) return;
     setDisplayName(profile.displayName);
     setAvatarDataUrl(profile.avatarDataUrl);
     setPhonePro(profile.phonePro);
@@ -251,6 +260,7 @@ export const AccountSettingsPanel: React.FC<AccountSettingsPanelProps> = ({
     emailSignature,
     savingProfile,
     uploadingPhoto,
+    hasUnsavedChanges,
   ]);
 
   // Sécurité / Mot de passe
@@ -381,6 +391,7 @@ export const AccountSettingsPanel: React.FC<AccountSettingsPanelProps> = ({
         },
         signature
       );
+      setHasUnsavedChanges(false);
       setSavingProfile(false);
       onNotify('Tous les paramètres du compte et préférences avancées ont été enregistrés.');
     }
@@ -705,7 +716,10 @@ export const AccountSettingsPanel: React.FC<AccountSettingsPanelProps> = ({
                 id="acc-name"
                 type="text"
                 value={displayName}
-                onChange={(e) => setDisplayName(e.target.value)}
+                onChange={(e) => {
+                  setHasUnsavedChanges(true);
+                  setDisplayName(e.target.value);
+                }}
                 maxLength={120}
                 placeholder="Votre nom complet"
                 className="w-full px-3 py-2 rounded-lg border border-stone-300 text-xs focus:outline-none focus:border-orange-600"
@@ -722,7 +736,10 @@ export const AccountSettingsPanel: React.FC<AccountSettingsPanelProps> = ({
                   id="acc-phone"
                   type="tel"
                   value={phonePro}
-                  onChange={(e) => setPhonePro(e.target.value)}
+                  onChange={(e) => {
+                    setHasUnsavedChanges(true);
+                    setPhonePro(e.target.value);
+                  }}
                   maxLength={30}
                   placeholder="06 XX XX XX XX"
                   className="w-full pl-8 pr-3 py-2 rounded-lg border border-stone-300 text-xs focus:outline-none focus:border-orange-600"
@@ -740,6 +757,7 @@ export const AccountSettingsPanel: React.FC<AccountSettingsPanelProps> = ({
                   data-testid="account-region-select"
                   value={selectedAccountRegion}
                   onChange={(e) => {
+                    setHasUnsavedChanges(true);
                     const nextReg = e.target.value;
                     setSelectedAccountRegion(nextReg);
                     if (nextReg !== 'all') {
@@ -764,6 +782,7 @@ export const AccountSettingsPanel: React.FC<AccountSettingsPanelProps> = ({
                   data-testid="account-city-select"
                   value={resolveCityAndRegionFromZoneString(zone).city}
                   onChange={(e) => {
+                    setHasUnsavedChanges(true);
                     const pickedCity = e.target.value;
                     const resolved = resolveCityAndRegionFromZoneString(pickedCity);
                     setSelectedAccountRegion(resolved.regionId);
@@ -786,7 +805,10 @@ export const AccountSettingsPanel: React.FC<AccountSettingsPanelProps> = ({
                   type="text"
                   list="account-zone-list"
                   value={zone}
-                  onChange={(e) => setZone(e.target.value)}
+                  onChange={(e) => {
+                    setHasUnsavedChanges(true);
+                    setZone(e.target.value);
+                  }}
                   maxLength={100}
                   placeholder="Ville · Région"
                   className="w-full px-3 py-2 rounded-lg border border-stone-300 text-xs focus:outline-none focus:border-orange-600"
@@ -812,7 +834,10 @@ export const AccountSettingsPanel: React.FC<AccountSettingsPanelProps> = ({
                 min={1}
                 max={200}
                 value={monthlyGoalContracts}
-                onChange={(e) => setMonthlyGoalContracts(Math.min(200, Math.max(1, Number(e.target.value) || 1)))}
+                onChange={(e) => {
+                  setHasUnsavedChanges(true);
+                  setMonthlyGoalContracts(Math.min(200, Math.max(1, Number(e.target.value) || 1)));
+                }}
                 className="w-full px-3 py-2 rounded-lg border border-stone-300 text-xs font-bold tabular-nums focus:outline-none focus:border-orange-600"
               />
             </div>
@@ -826,7 +851,10 @@ export const AccountSettingsPanel: React.FC<AccountSettingsPanelProps> = ({
               id="acc-bio"
               type="text"
               value={bio}
-              onChange={(e) => setBio(e.target.value)}
+              onChange={(e) => {
+                setHasUnsavedChanges(true);
+                setBio(e.target.value);
+              }}
               maxLength={240}
               placeholder="Ex. Conseiller Orange Pro Fibre Dédiée & Flottes PME — Meknès & Ifrane"
               className="w-full px-3 py-2 rounded-lg border border-stone-300 text-xs focus:outline-none focus:border-orange-600"
@@ -841,7 +869,10 @@ export const AccountSettingsPanel: React.FC<AccountSettingsPanelProps> = ({
               id="acc-sig"
               rows={3}
               value={signature}
-              onChange={(e) => setSignature(e.target.value)}
+              onChange={(e) => {
+                setHasUnsavedChanges(true);
+                setSignature(e.target.value);
+              }}
               maxLength={400}
               placeholder="Votre signature utilisée dans les emails générés..."
               className="w-full px-3 py-2 rounded-lg border border-stone-300 text-xs focus:outline-none focus:border-orange-600"
@@ -872,7 +903,10 @@ export const AccountSettingsPanel: React.FC<AccountSettingsPanelProps> = ({
                   data-testid="account-legal-raison-sociale"
                   type="text"
                   value={legalRaisonSociale}
-                  onChange={(e) => setLegalRaisonSociale(e.target.value)}
+                  onChange={(e) => {
+                    setHasUnsavedChanges(true);
+                    setLegalRaisonSociale(e.target.value);
+                  }}
                   maxLength={140}
                   placeholder="Ex. DIVERSIFIA SARL — Partenaire Orange Pro"
                   className="w-full px-2.5 py-1.5 rounded-lg border border-stone-300 bg-white text-xs focus:outline-none focus:border-orange-600"
@@ -887,7 +921,10 @@ export const AccountSettingsPanel: React.FC<AccountSettingsPanelProps> = ({
                   data-testid="account-legal-ice"
                   type="text"
                   value={legalIce}
-                  onChange={(e) => setLegalIce(e.target.value)}
+                  onChange={(e) => {
+                    setHasUnsavedChanges(true);
+                    setLegalIce(e.target.value);
+                  }}
                   maxLength={40}
                   placeholder="Ex. 001234567000089 (15 chiffres)"
                   className="w-full px-2.5 py-1.5 rounded-lg border border-stone-300 bg-white text-xs font-mono focus:outline-none focus:border-orange-600"
@@ -902,7 +939,10 @@ export const AccountSettingsPanel: React.FC<AccountSettingsPanelProps> = ({
                   data-testid="account-legal-adresse"
                   type="text"
                   value={legalAdresse}
-                  onChange={(e) => setLegalAdresse(e.target.value)}
+                  onChange={(e) => {
+                    setHasUnsavedChanges(true);
+                    setLegalAdresse(e.target.value);
+                  }}
                   maxLength={200}
                   placeholder="Ex. Avenue des FAR, Ville Nouvelle, Meknès"
                   className="w-full px-2.5 py-1.5 rounded-lg border border-stone-300 bg-white text-xs focus:outline-none focus:border-orange-600"
@@ -917,7 +957,10 @@ export const AccountSettingsPanel: React.FC<AccountSettingsPanelProps> = ({
                   data-testid="account-legal-telephone"
                   type="tel"
                   value={legalTelephone}
-                  onChange={(e) => setLegalTelephone(e.target.value)}
+                  onChange={(e) => {
+                    setHasUnsavedChanges(true);
+                    setLegalTelephone(e.target.value);
+                  }}
                   maxLength={40}
                   placeholder="Ex. 05 35 XX XX XX"
                   className="w-full px-2.5 py-1.5 rounded-lg border border-stone-300 bg-white text-xs focus:outline-none focus:border-orange-600"
@@ -941,7 +984,10 @@ export const AccountSettingsPanel: React.FC<AccountSettingsPanelProps> = ({
               <input
                 type="checkbox"
                 checked={notifyBadges}
-                onChange={(e) => setNotifyBadges(e.target.checked)}
+                onChange={(e) => {
+                  setHasUnsavedChanges(true);
+                  setNotifyBadges(e.target.checked);
+                }}
                 className="h-4 w-4 rounded border-stone-300 text-orange-600 focus:ring-orange-500"
               />
             </label>
@@ -953,7 +999,10 @@ export const AccountSettingsPanel: React.FC<AccountSettingsPanelProps> = ({
                 <input
                   type="checkbox"
                   checked={notifySound}
-                  onChange={(e) => setNotifySound(e.target.checked)}
+                  onChange={(e) => {
+                    setHasUnsavedChanges(true);
+                    setNotifySound(e.target.checked);
+                  }}
                   className="ml-2 h-4 w-4 rounded border-stone-300 text-orange-600 focus:ring-orange-500"
                 />
               </label>
@@ -1012,7 +1061,10 @@ export const AccountSettingsPanel: React.FC<AccountSettingsPanelProps> = ({
               <input
                 type="checkbox"
                 checked={compactUi}
-                onChange={(e) => setCompactUi(e.target.checked)}
+                onChange={(e) => {
+                  setHasUnsavedChanges(true);
+                  setCompactUi(e.target.checked);
+                }}
                 className="h-4 w-4 rounded border-stone-300 text-orange-600 focus:ring-orange-500"
               />
             </label>
