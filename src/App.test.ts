@@ -17,6 +17,8 @@ import {
 } from './components/CollaboratorChatWidget';
 import { NotificationBell } from './components/NotificationBell';
 import { AchievementToast } from './components/AchievementToast';
+import { KanbanBoard, INITIAL_CARDS_PER_COLUMN } from './components/KanbanBoard';
+import { isChunkLoadError } from './utils/lazyWithRetry';
 import { filterNotificationsForRole, type AppNotification } from './utils/notifications';
 import { parseSafeHeadcount, buildPipelineFunnelStats } from './utils/analytics';
 import {
@@ -611,5 +613,81 @@ test('parseSafeHeadcount rejects phone numbers, ICE codes and outliers (> 50000)
   const aContacter = breakdown.find((b) => b.statut === 'À contacter');
   assert.equal(aContacter?.totalEffectif, 25);
 });
+
+test('KanbanBoard caps initial rendered cards per column at 25 while preserving 100% column and global totals', () => {
+  const bulkFiches = [
+    ...Array.from({ length: 60 }, (_, idx) => ({
+      id: `op_bulk_${idx + 1}`,
+      numeroFiche: `OP-${String(idx + 1).padStart(4, '0')}`,
+      societe: `Prospect Bulk ${idx + 1} SARL`,
+      secteur: 'pme' as const,
+      ville: 'Meknès',
+      telephone: `053552${String(1000 + idx).slice(-4)}`,
+      email: `contact${idx + 1}@bulk.ma`,
+      contact: `Contact ${idx + 1}`,
+      role: 'Gérant',
+      source: 'Web',
+      effectif: '20',
+      statut: 'À contacter' as const,
+      dateAjout: '2026-11-26T10:00:00.000Z',
+    })),
+    ...Array.from({ length: 5 }, (_, idx) => ({
+      id: `op_rdv_${idx + 1}`,
+      numeroFiche: `OP-900${idx + 1}`,
+      societe: `Prospect RDV ${idx + 1}`,
+      secteur: 'clinique' as const,
+      ville: 'Fès',
+      telephone: `053560${String(2000 + idx).slice(-4)}`,
+      email: `rdv${idx + 1}@clinique.ma`,
+      contact: `Dr ${idx + 1}`,
+      role: 'Directeur',
+      source: 'Terrain',
+      effectif: '40',
+      statut: 'RDV pris' as const,
+      dateAjout: '2026-11-26T10:00:00.000Z',
+    })),
+  ];
+
+  const html = renderToStaticMarkup(
+    React.createElement(KanbanBoard, {
+      fiches: bulkFiches,
+      verifyingId: null,
+      onMoveFiche: () => {},
+      onOpenEmail: () => {},
+      onVerifyOne: () => {},
+      onOpenAiBrief: () => {},
+    })
+  );
+
+  // Total rendered cards = 25 (capped in À contacter) + 5 (RDV pris) = 30
+  const renderedCards = html.match(/data-testid="kanban-card-/g) ?? [];
+  assert.equal(renderedCards.length, INITIAL_CARDS_PER_COLUMN + 5);
+
+  // Column header keeps exact 100% total (60) and global header keeps 65
+  assert.ok(html.includes('data-testid="kanban-count-À contacter"'));
+  assert.ok(html.includes('>60</span>'));
+  assert.ok(html.includes('65 fiche(s) affichée(s)'));
+
+  // Load-more controls appear for À contacter (35 remaining) and NOT for RDV pris (5 <= 25)
+  assert.ok(html.includes('data-testid="kanban-load-more-À contacter"'));
+  assert.ok(html.includes('Afficher 25 fiches de plus (35 restantes)'));
+  assert.ok(html.includes('data-testid="kanban-show-all-À contacter"'));
+  assert.ok(html.includes('Tout afficher (60)'));
+  assert.equal(html.includes('data-testid="kanban-load-more-RDV pris"'), false);
+});
+
+test('isChunkLoadError detects stale dynamic import / ChunkLoadError failures without false positives', () => {
+  assert.equal(
+    isChunkLoadError(new TypeError('Failed to fetch dynamically imported module: /B2B/assets/KanbanBoard-abc.js')),
+    true
+  );
+  const chunkErr = new Error('Loading chunk 42 failed');
+  chunkErr.name = 'ChunkLoadError';
+  assert.equal(isChunkLoadError(chunkErr), true);
+  assert.equal(isChunkLoadError(new Error('Importing a module script failed.')), true);
+  assert.equal(isChunkLoadError(new Error('Permission denied on Firestore')), false);
+  assert.equal(isChunkLoadError(null), false);
+});
+
 
 

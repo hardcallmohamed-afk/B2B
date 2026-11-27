@@ -428,7 +428,7 @@ async function startServer() {
       "font-src 'self' data: https://fonts.gstatic.com",
       "img-src 'self' data: blob: https://*.tile.openstreetmap.org https://server.arcgisonline.com https://*.googleusercontent.com https://lh3.googleusercontent.com",
       `connect-src ${connectSrc}`,
-      "frame-src 'self' https://*.firebaseapp.com https://accounts.google.com",
+      "frame-src 'self' https://*.firebaseapp.com https://accounts.google.com https://maps.google.com https://www.google.com",
       "media-src 'self' blob:",
       "object-src 'none'",
       "base-uri 'self'",

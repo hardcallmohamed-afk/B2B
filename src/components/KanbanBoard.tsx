@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   GripVertical,
   Phone,
@@ -40,6 +40,28 @@ import { computeDealRotting, computeLeadScore } from '../utils/salesIntelligence
 import type { OrgSettingsConfig } from '../utils/securityHardening';
 import type { AdvancedAccountPreferences } from '../utils/accountPreferences';
 import { PipelineForecastBar } from './PipelineForecastBar';
+
+export const INITIAL_CARDS_PER_COLUMN = 25;
+export const CARDS_INCREMENT_STEP = 25;
+
+function createInitialVisibleLimits(): Record<StatutCRM, number> {
+  return KANBAN_STAGES.reduce(
+    (acc, stage) => {
+      acc[stage.statut] = INITIAL_CARDS_PER_COLUMN;
+      return acc;
+    },
+    {} as Record<StatutCRM, number>
+  );
+}
+
+interface KanbanFicheDerivedMeta {
+  leadScore: ReturnType<typeof computeLeadScore>;
+  rotting: ReturnType<typeof computeDealRotting>;
+  maturity: number;
+  reco: ReturnType<typeof getOrangeProRecommendation>;
+  aberrantEffectif: boolean;
+  waPhone: string;
+}
 
 interface KanbanBoardProps {
   fiches: FicheEntreprise[];
@@ -135,6 +157,13 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
   const [dragOverStage, setDragOverStage] = useState<StatutCRM | null>(null);
   const [onlyBottlenecks, setOnlyBottlenecks] = useState(false);
   const [onlyRotting, setOnlyRotting] = useState(false);
+  const [visibleLimitByStage, setVisibleLimitByStage] = useState<Record<StatutCRM, number>>(() =>
+    createInitialVisibleLimits()
+  );
+
+  useEffect(() => {
+    setVisibleLimitByStage(createInitialVisibleLimits());
+  }, [onlyBottlenecks, onlyRotting]);
 
   const velocityReport = useMemo(
     () => externalVelocityReport ?? computePortfolioVelocity(fiches),
@@ -143,15 +172,48 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
 
   const effectiveRottingThreshold = orgSettings?.defaultSlaRottingHours || followUpAlertDelay;
 
+  const derivedMetaById = useMemo(() => {
+    const map = new Map<string, KanbanFicheDerivedMeta>();
+    for (const f of fiches) {
+      const cleanDigits = (f.telephone || '').replace(/\D/g, '');
+      const waPhone = cleanDigits
+        ? cleanDigits.startsWith('212')
+          ? cleanDigits
+          : cleanDigits.startsWith('00212')
+            ? cleanDigits.slice(2)
+            : `212${cleanDigits.replace(/^0+/, '')}`
+        : '';
+      map.set(f.id, {
+        leadScore: computeLeadScore(f),
+        rotting: computeDealRotting(f, effectiveRottingThreshold),
+        maturity: computeMaturityScore(f),
+        reco: getOrangeProRecommendation(f),
+        aberrantEffectif: Boolean(f.effectif && isEffectifAberrant(f.effectif)),
+        waPhone,
+      });
+    }
+    return map;
+  }, [fiches, effectiveRottingThreshold]);
+
   const visibleFiches = useMemo(() => {
     return fiches.filter((f) => {
       if (onlyBottlenecks && !velocityReport.byFicheId.get(f.id)?.isBottleneck) return false;
-      if (onlyRotting && !computeDealRotting(f, effectiveRottingThreshold).isRotting) return false;
+      if (onlyRotting && !derivedMetaById.get(f.id)?.rotting.isRotting) return false;
       return true;
     });
-  }, [fiches, onlyBottlenecks, onlyRotting, velocityReport, effectiveRottingThreshold]);
+  }, [fiches, onlyBottlenecks, onlyRotting, velocityReport, derivedMetaById]);
 
-  const columns = useMemo(() => groupFichesByStatut(visibleFiches), [visibleFiches]);
+  const columns = useMemo(() => {
+    const grouped = groupFichesByStatut(visibleFiches);
+    return grouped.map((col) => ({
+      ...col,
+      items: [...col.items].sort((a, b) => {
+        const scoreA = derivedMetaById.get(a.id)?.leadScore.score ?? 0;
+        const scoreB = derivedMetaById.get(b.id)?.leadScore.score ?? 0;
+        return scoreB - scoreA;
+      }),
+    }));
+  }, [visibleFiches, derivedMetaById]);
 
   const displayedBottleneckCount = useMemo(
     () =>
@@ -250,6 +312,10 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
             const prevStage = colIndex > 0 ? KANBAN_STAGES[colIndex - 1].statut : null;
             const nextStage = colIndex < KANBAN_STAGES.length - 1 ? KANBAN_STAGES[colIndex + 1].statut : null;
             const stageVel = velocityReport.byStage[col.meta.statut];
+            const stageLimit = visibleLimitByStage[col.meta.statut] ?? INITIAL_CARDS_PER_COLUMN;
+            const renderedItems = col.items.slice(0, stageLimit);
+            const remainingCount = Math.max(0, col.items.length - renderedItems.length);
+            const nextBatchCount = Math.min(CARDS_INCREMENT_STEP, remainingCount);
 
             return (
               <div
@@ -346,25 +412,20 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
                       {isOver ? 'Déposer ici' : onlyBottlenecks ? 'Aucun blocage ici' : 'Glisser une fiche ici'}
                     </div>
                   ) : (
-                    col.items.map((f) => {
+                    renderedItems.map((f) => {
                       const secMeta = SECTEURS_META[f.secteur] || SECTEURS_META.pme;
                       const segMeta = SEGMENTS_COULEUR[secMeta.couleur] || SEGMENTS_COULEUR.orange;
-                      const reco = getOrangeProRecommendation(f);
-                      const mat = computeMaturityScore(f);
-                      const leadScore = computeLeadScore(f);
-                      const rotting = computeDealRotting(f, effectiveRottingThreshold);
+                      const derived = derivedMetaById.get(f.id);
+                      const reco = derived?.reco ?? getOrangeProRecommendation(f);
+                      const mat = derived?.maturity ?? computeMaturityScore(f);
+                      const leadScore = derived?.leadScore ?? computeLeadScore(f);
+                      const rotting = derived?.rotting ?? computeDealRotting(f, effectiveRottingThreshold);
+                      const aberrantEffectif = derived?.aberrantEffectif ?? Boolean(f.effectif && isEffectifAberrant(f.effectif));
                       const isOptOutLocked = Boolean(f.optOut && enforceCndpOptOutLock);
                       const vel = velocityReport.byFicheId.get(f.id);
                       const velStyles = getVelocityCardStyles(vel?.level || 'normal');
                       const isDragging = draggingId === f.id;
-                      const cleanDigits = (f.telephone || '').replace(/\D/g, '');
-                      const waPhone = cleanDigits
-                        ? cleanDigits.startsWith('212')
-                          ? cleanDigits
-                          : cleanDigits.startsWith('00212')
-                            ? cleanDigits.slice(2)
-                            : `212${cleanDigits.replace(/^0+/, '')}`
-                        : '';
+                      const waPhone = derived?.waPhone ?? '';
                       const extraPhonesCount = f.telephonesSupplementaires?.length || 0;
                       const extraEmailsCount = f.emailsSupplementaires?.length || 0;
                       const velBarPct =
@@ -461,7 +522,7 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
                                 {f.contact || 'Décideur à identifier'}
                               </span>
                               {f.effectif &&
-                                (isEffectifAberrant(f.effectif) ? (
+                                (aberrantEffectif ? (
                                   <span
                                     data-testid={`kanban-aberrant-eff-${f.id}`}
                                     title={`Effectif aberrant (« ${f.effectif} ») — à nettoyer dans Déduplication / Hygiène`}
@@ -722,6 +783,41 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
                         </article>
                       );
                     })
+                  )}
+                  {remainingCount > 0 && (
+                    <div
+                      data-testid={`kanban-pagination-${col.meta.statut}`}
+                      className="pt-1 space-y-1.5"
+                    >
+                      <button
+                        type="button"
+                        data-testid={`kanban-load-more-${col.meta.statut}`}
+                        onClick={() =>
+                          setVisibleLimitByStage((prev) => ({
+                            ...prev,
+                            [col.meta.statut]:
+                              (prev[col.meta.statut] ?? INITIAL_CARDS_PER_COLUMN) +
+                              CARDS_INCREMENT_STEP,
+                          }))
+                        }
+                        className="w-full py-1.5 px-2.5 rounded-lg border border-stone-300 bg-white hover:bg-orange-50 hover:border-orange-300 text-[11px] font-semibold text-stone-700 hover:text-orange-800 transition-colors tabular-nums"
+                      >
+                        Afficher {nextBatchCount} fiche{nextBatchCount > 1 ? 's' : ''} de plus ({remainingCount} restante{remainingCount > 1 ? 's' : ''})
+                      </button>
+                      <button
+                        type="button"
+                        data-testid={`kanban-show-all-${col.meta.statut}`}
+                        onClick={() =>
+                          setVisibleLimitByStage((prev) => ({
+                            ...prev,
+                            [col.meta.statut]: col.items.length,
+                          }))
+                        }
+                        className="w-full py-1 px-2 rounded-md text-[10px] font-semibold text-stone-500 hover:text-stone-800 hover:bg-stone-200/70 transition-colors"
+                      >
+                        Tout afficher ({col.items.length})
+                      </button>
+                    </div>
                   )}
                 </div>
               </div>

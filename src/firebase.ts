@@ -39,6 +39,7 @@ import {
   deleteDoc,
   deleteField,
   writeBatch,
+  waitForPendingWrites,
   serverTimestamp,
   type DocumentData,
   type DocumentReference,
@@ -179,7 +180,8 @@ function isOfflineOrUnavailableError(err: unknown): boolean {
     code === 'failed-precondition' ||
     msg.includes('offline') ||
     msg.includes('unavailable') ||
-    msg.includes('network')
+    msg.includes('network') ||
+    msg.includes('primary lease')
   );
 }
 
@@ -192,10 +194,10 @@ async function getDocWithOfflineFallback<T = DocumentData>(
   try {
     return await getDocFromServer(ref);
   } catch (err) {
-    if (isOfflineOrUnavailableError(err) || isNavigatorOffline()) {
+    if (isNavigatorOffline() || isOfflineOrUnavailableError(err)) {
       return getDoc(ref);
     }
-    return getDoc(ref);
+    throw err;
   }
 }
 
@@ -208,10 +210,10 @@ async function getDocsWithOfflineFallback<T = DocumentData>(
   try {
     return await getDocsFromServer(q);
   } catch (err) {
-    if (isOfflineOrUnavailableError(err) || isNavigatorOffline()) {
+    if (isNavigatorOffline() || isOfflineOrUnavailableError(err)) {
       return getDocs(q);
     }
-    return getDocs(q);
+    throw err;
   }
 }
 
@@ -375,7 +377,41 @@ function isPermissionDeniedError(err: unknown): boolean {
   return msg.includes('permission-denied') || msg.includes('missing or insufficient permissions');
 }
 
+let lastFetchedProfileUid: string | null = null;
+
+function mapAppUserDocSnapshot(snap: DocumentSnapshot<DocumentData>): ManagedAppUser | null {
+  if (!snap.exists()) return null;
+  const d = snap.data();
+  return {
+    uid: snap.id,
+    email: typeof d.email === 'string' ? d.email : '',
+    displayName: typeof d.displayName === 'string' ? d.displayName : '',
+    role: normalizeManagedRole(d.role),
+    zone: typeof d.zone === 'string' ? d.zone : '',
+    active: Boolean(d.active),
+    createdBy: typeof d.createdBy === 'string' ? d.createdBy : '',
+    createdAt: d.createdAt?.toDate ? d.createdAt.toDate().toISOString() : undefined,
+  };
+}
+
 export async function signOutUser(): Promise<void> {
+  lastFetchedProfileUid = null;
+  // Non-blocking flush of pending Firestore writes (800 ms cap) before terminating auth session
+  try {
+    await Promise.race([
+      waitForPendingWrites(db),
+      new Promise<void>((resolve) => setTimeout(resolve, 800)),
+    ]);
+  } catch {
+    // Ignore lease or network errors during sign-out flush
+  }
+  if (typeof window !== 'undefined') {
+    try {
+      window.sessionStorage.removeItem('orange_pro_api_hub_v1');
+    } catch {
+      // Ignore storage access errors
+    }
+  }
   await signOut(auth);
 }
 
@@ -387,21 +423,29 @@ function getSecondaryProvisioningAuth() {
 
 export async function fetchAppUserProfile(uid: string): Promise<ManagedAppUser | null> {
   const path = `app_users/${uid}`;
+  const docRef = doc(db, 'app_users', uid);
+  const accountJustSwitched = Boolean(lastFetchedProfileUid && lastFetchedProfileUid !== uid);
   try {
-    const snap = await getDoc(doc(db, 'app_users', uid));
-    if (!snap.exists()) return null;
-    const d = snap.data();
-    return {
-      uid: snap.id,
-      email: typeof d.email === 'string' ? d.email : '',
-      displayName: typeof d.displayName === 'string' ? d.displayName : '',
-      role: normalizeManagedRole(d.role),
-      zone: typeof d.zone === 'string' ? d.zone : '',
-      active: Boolean(d.active),
-      createdBy: typeof d.createdBy === 'string' ? d.createdBy : '',
-      createdAt: d.createdAt?.toDate ? d.createdAt.toDate().toISOString() : undefined,
-    };
+    await ensureFreshAuthUser(uid, accountJustSwitched);
+    if (accountJustSwitched) {
+      await auth.currentUser?.getIdToken(true).catch(() => {});
+    }
+    lastFetchedProfileUid = uid;
+    const snap = await getDocWithOfflineFallback(docRef);
+    return mapAppUserDocSnapshot(snap);
   } catch (error) {
+    if (isPermissionDeniedError(error)) {
+      // Single clean retry after 400 ms with forced ID token refresh in case account switch race occurred
+      try {
+        await new Promise((resolve) => setTimeout(resolve, 400));
+        await ensureFreshAuthUser(uid, true);
+        await auth.currentUser?.getIdToken(true);
+        const retrySnap = await getDocFromServer(docRef);
+        return mapAppUserDocSnapshot(retrySnap);
+      } catch (retryError) {
+        handleFirestoreError(retryError, OperationType.GET, path);
+      }
+    }
     handleFirestoreError(error, OperationType.GET, path);
   }
 }

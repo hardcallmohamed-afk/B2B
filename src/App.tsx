@@ -1,4 +1,5 @@
-import React, { useState, useEffect, useMemo, useRef, useCallback, Suspense, lazy } from 'react';
+import React, { useState, useEffect, useMemo, useRef, useCallback, Suspense } from 'react';
+import { lazyWithRetry } from './utils/lazyWithRetry';
 import {
   Search,
   Globe,
@@ -127,43 +128,63 @@ export {
   type CrawlLog,
 } from './utils/crmDomain';
 
-const KanbanBoard = lazy(() =>
-  import('./components/KanbanBoard').then((m) => ({ default: m.KanbanBoard }))
+const KanbanBoard = lazyWithRetry(
+  () => import('./components/KanbanBoard').then((m) => ({ default: m.KanbanBoard })),
+  'KanbanBoard'
 );
-const AiCopilotDrawer = lazy(() =>
-  import('./components/AiCopilotDrawer').then((m) => ({ default: m.AiCopilotDrawer }))
+const AiCopilotDrawer = lazyWithRetry(
+  () => import('./components/AiCopilotDrawer').then((m) => ({ default: m.AiCopilotDrawer })),
+  'AiCopilotDrawer'
 );
-const AdminUsersPanel = lazy(() =>
-  import('./components/AdminUsersPanel').then((m) => ({ default: m.AdminUsersPanel }))
+const AdminUsersPanel = lazyWithRetry(
+  () => import('./components/AdminUsersPanel').then((m) => ({ default: m.AdminUsersPanel })),
+  'AdminUsersPanel'
 );
-const TeamPerformancePanel = lazy(() =>
-  import('./components/TeamPerformancePanel').then((m) => ({ default: m.TeamPerformancePanel }))
+const TeamPerformancePanel = lazyWithRetry(
+  () =>
+    import('./components/TeamPerformancePanel').then((m) => ({
+      default: m.TeamPerformancePanel,
+    })),
+  'TeamPerformancePanel'
 );
-const AchievementsPanel = lazy(() =>
-  import('./components/AchievementsPanel').then((m) => ({ default: m.AchievementsPanel }))
+const AchievementsPanel = lazyWithRetry(
+  () => import('./components/AchievementsPanel').then((m) => ({ default: m.AchievementsPanel })),
+  'AchievementsPanel'
 );
-const SignContractModal = lazy(() =>
-  import('./components/SignContractModal').then((m) => ({ default: m.SignContractModal }))
+const SignContractModal = lazyWithRetry(
+  () => import('./components/SignContractModal').then((m) => ({ default: m.SignContractModal })),
+  'SignContractModal'
 );
-const AccountSettingsPanel = lazy(() =>
-  import('./components/AccountSettingsPanel').then((m) => ({ default: m.AccountSettingsPanel }))
+const AccountSettingsPanel = lazyWithRetry(
+  () =>
+    import('./components/AccountSettingsPanel').then((m) => ({
+      default: m.AccountSettingsPanel,
+    })),
+  'AccountSettingsPanel'
 );
-const FicheDetailModal = lazy(() =>
-  import('./components/FicheDetailModal').then((m) => ({ default: m.FicheDetailModal }))
+const FicheDetailModal = lazyWithRetry(
+  () => import('./components/FicheDetailModal').then((m) => ({ default: m.FicheDetailModal })),
+  'FicheDetailModal'
 );
-const QuoteModal = lazy(() =>
-  import('./components/QuoteModal').then((m) => ({ default: m.QuoteModal }))
+const QuoteModal = lazyWithRetry(
+  () => import('./components/QuoteModal').then((m) => ({ default: m.QuoteModal })),
+  'QuoteModal'
 );
-const CollaboratorProfileChatModal = lazy(() =>
-  import('./components/CollaboratorProfileChatModal').then((m) => ({
-    default: m.CollaboratorProfileChatModal,
-  }))
+const CollaboratorProfileChatModal = lazyWithRetry(
+  () =>
+    import('./components/CollaboratorProfileChatModal').then((m) => ({
+      default: m.CollaboratorProfileChatModal,
+    })),
+  'CollaboratorProfileChatModal'
 );
-const DataHygienePanel = lazy(() =>
-  import('./components/DataHygienePanel').then((m) => ({ default: m.DataHygienePanel }))
+const DataHygienePanel = lazyWithRetry(
+  () => import('./components/DataHygienePanel').then((m) => ({ default: m.DataHygienePanel })),
+  'DataHygienePanel'
 );
-const GlobalSearchPalette = lazy(() =>
-  import('./components/GlobalSearchPalette').then((m) => ({ default: m.GlobalSearchPalette }))
+const GlobalSearchPalette = lazyWithRetry(
+  () =>
+    import('./components/GlobalSearchPalette').then((m) => ({ default: m.GlobalSearchPalette })),
+  'GlobalSearchPalette'
 );
 import type { GlobalSearchActionHit } from './utils/globalSearch';
 
@@ -8041,7 +8062,7 @@ ${assistPasteText.slice(0, 6000)}`;
   // Traçabilité DLP immuable sur tout export CSV / JSON + Alerte Super-Admin au-delà du seuil configuré
   const logExportDlpEvent = (action: string, targetLabel: string, recordCount: number) => {
     if (!cloudUser) return;
-    const threshold = Math.max(10, orgSettings.dlpExportAlertThreshold || 50);
+    const threshold = Math.max(5, orgSettings.dlpExportAlertThreshold || 50);
     const isCritical = recordCount >= threshold;
     void recordSecurityAuditLog({
       actorUid: cloudUser.uid,
