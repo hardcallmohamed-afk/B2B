@@ -25,29 +25,7 @@ import type {
 } from '../utils/firestoreSanitize';
 import { formatDateTimeShort } from '../utils/attendance';
 import { canUseWhisperCoaching, isSupervisorRole } from '../utils/authAccess';
-
-const DEFAULT_RTC_ICE_SERVERS: RTCIceServer[] = [
-  { urls: 'stun:stun.l.google.com:19302' },
-  { urls: 'stun:stun1.l.google.com:19302' },
-];
-
-async function fetchRtcIceServers(): Promise<RTCIceServer[]> {
-  try {
-    const res = await fetch('/api/rtc/ice-servers', {
-      method: 'GET',
-      headers: { Accept: 'application/json' },
-      signal: AbortSignal.timeout(3500),
-    });
-    if (!res.ok) return DEFAULT_RTC_ICE_SERVERS;
-    const data = await res.json();
-    if (Array.isArray(data?.iceServers) && data.iceServers.length > 0) {
-      return data.iceServers as RTCIceServer[];
-    }
-  } catch {
-    // Fallback to STUN
-  }
-  return DEFAULT_RTC_ICE_SERVERS;
-}
+import { resolveRtcIceConfiguration } from '../utils/rtcIceConfig';
 
 export const SupervisorCoachingPttPill: React.FC<{
   currentUserRole?: string;
@@ -212,6 +190,7 @@ export const CollaboratorChatWidget: React.FC<CollaboratorChatWidgetProps> = ({
   const [coachingBusy, setCoachingBusy] = useState(false);
   const [coachingDoc, setCoachingDoc] = useState<SanitizedCoachingSessionDoc | null>(null);
   const [coachingError, setCoachingError] = useState('');
+  const [audioPlaybackBlocked, setAudioPlaybackBlocked] = useState(false);
 
   const pcRef = useRef<RTCPeerConnection | null>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
@@ -365,7 +344,7 @@ export const CollaboratorChatWidget: React.FC<CollaboratorChatWidgetProps> = ({
 
       await clearCoachingCandidates(currentUserUid).catch(() => {});
 
-      const iceServers = await fetchRtcIceServers();
+      const { iceServers } = await resolveRtcIceConfiguration();
       const pc = new RTCPeerConnection({ iceServers });
       pcRef.current = pc;
 
@@ -376,17 +355,29 @@ export const CollaboratorChatWidget: React.FC<CollaboratorChatWidgetProps> = ({
       pc.ontrack = (event) => {
         if (remoteAudioRef.current && event.streams[0]) {
           remoteAudioRef.current.srcObject = event.streams[0];
-          void remoteAudioRef.current.play().catch(() => {});
+          void remoteAudioRef.current
+            .play()
+            .then(() => setAudioPlaybackBlocked(false))
+            .catch(() => setAudioPlaybackBlocked(true));
         }
       };
 
+      // Buffer local ICE candidates until setCollaboratorCoachingState finishes so no candidate is lost or rejected before the parent doc exists
+      let sessionReadyForCandidates = false;
+      const localCandidatesBuffer: string[] = [];
+
       pc.onicecandidate = (event) => {
         if (event.candidate) {
-          void addCoachingIceCandidate(currentUserUid, {
-            senderUid: currentUserUid,
-            fromRole: 'collab',
-            candidateJson: JSON.stringify(event.candidate.toJSON()),
-          });
+          const candidateJson = JSON.stringify(event.candidate.toJSON());
+          if (!sessionReadyForCandidates) {
+            localCandidatesBuffer.push(candidateJson);
+          } else {
+            void addCoachingIceCandidate(currentUserUid, {
+              senderUid: currentUserUid,
+              fromRole: 'collab',
+              candidateJson,
+            });
+          }
         }
       };
 
@@ -417,6 +408,15 @@ export const CollaboratorChatWidget: React.FC<CollaboratorChatWidgetProps> = ({
         adminPttActive: false,
       });
 
+      sessionReadyForCandidates = true;
+      for (const candidateJson of localCandidatesBuffer.splice(0)) {
+        void addCoachingIceCandidate(currentUserUid, {
+          senderUid: currentUserUid,
+          fromRole: 'collab',
+          candidateJson,
+        });
+      }
+
       candidatesUnsubRef.current = onSnapshot(
         getCoachingCandidatesQuery(currentUserUid),
         (snap) => {
@@ -439,8 +439,12 @@ export const CollaboratorChatWidget: React.FC<CollaboratorChatWidgetProps> = ({
         },
         () => {}
       );
-    } catch {
-      // Non-fatal: next network recovery will retry
+    } catch (err) {
+      const msg =
+        err instanceof Error
+          ? err.message
+          : 'Erreur lors de la publication du signal audio WebRTC.';
+      setCoachingError(msg);
     } finally {
       rebuildingOfferRef.current = false;
     }
@@ -822,6 +826,29 @@ export const CollaboratorChatWidget: React.FC<CollaboratorChatWidgetProps> = ({
             onStart={() => void startCollaboratorCoaching()}
             onStopStale={() => void stopCollaboratorCoaching(true)}
           />
+
+          {audioPlaybackBlocked && (
+            <div className="px-3.5 py-2 bg-amber-50 border-b border-amber-200 flex items-center justify-between gap-2">
+              <span className="text-[11px] font-semibold text-amber-900">
+                Son du haut-parleur en attente d’activation navigateur
+              </span>
+              <button
+                type="button"
+                data-testid="collab-unlock-speaker-btn"
+                onClick={() => {
+                  if (remoteAudioRef.current) {
+                    void remoteAudioRef.current
+                      .play()
+                      .then(() => setAudioPlaybackBlocked(false))
+                      .catch(() => {});
+                  }
+                }}
+                className="px-2.5 py-1 rounded-lg bg-orange-600 hover:bg-orange-700 text-white text-[10px] font-bold shrink-0"
+              >
+                🔊 Activer le haut-parleur
+              </button>
+            </div>
+          )}
 
           {/* Messages */}
           <div className="flex-1 overflow-y-auto p-3.5 space-y-2 bg-[#FAF8F4] min-h-[220px] max-h-[320px]">

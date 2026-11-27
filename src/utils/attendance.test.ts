@@ -351,3 +351,69 @@ test('attendance helpers strictly clamp multi-byte French text within Firestore 
   assert.ok(byteLen(split.firstName) <= 60);
   assert.ok(byteLen(split.lastName) <= 60);
 });
+
+test('formatGpsAccuracyBadge, computeDistanceMeters, and rtcIceConfig TURN/ICE helpers classify precision and NAT candidates accurately', async () => {
+  const { formatGpsAccuracyBadge, computeDistanceMeters } = await import('./attendance');
+  const {
+    buildTurnIceServersJson,
+    parseIceServersJson,
+    extractIceCandidateType,
+  } = await import('./rtcIceConfig');
+
+  const highAcc = formatGpsAccuracyBadge('gps_live', 14);
+  assert.equal(highAcc.tier, 'precise');
+  assert.equal(highAcc.label, 'GPS Précis (±14m)');
+
+  const wifiAcc = formatGpsAccuracyBadge('gps_live', 450);
+  assert.equal(wifiAcc.tier, 'wifi_cell');
+  assert.equal(wifiAcc.label, 'Wi-Fi / 4G (±450m)');
+
+  const ipAcc = formatGpsAccuracyBadge('gps_live', 5000);
+  assert.equal(ipAcc.tier, 'approx');
+  assert.equal(ipAcc.label, 'Position approximative IP / Zone (±5 km)');
+  assert.equal(ipAcc.shortLabel, 'Position approximative IP / Zone');
+
+  const zoneAcc = formatGpsAccuracyBadge('zone_reseau', null);
+  assert.equal(zoneAcc.tier, 'approx');
+  assert.equal(zoneAcc.label, 'Position approximative IP / Zone');
+
+  const distMeters = computeDistanceMeters(33.8935, -5.5473, 33.8936, -5.5473);
+  assert.ok(distMeters > 10 && distMeters < 15);
+
+  const json = buildTurnIceServersJson({
+    turnUrls: 'turns:global.relay.metered.ca:443?transport=tcp, turn:global.relay.metered.ca:80',
+    username: 'orange_b2b_user',
+    credential: 'secret_pass_123',
+  });
+  const parsed = parseIceServersJson(json);
+  assert.equal(parsed.length, 2);
+  assert.equal(parsed[1].username, 'orange_b2b_user');
+  assert.equal(parsed[1].credential, 'secret_pass_123');
+
+  assert.equal(
+    extractIceCandidateType(
+      JSON.stringify({
+        candidate:
+          'candidate:4 1 UDP 16777215 102.50.12.4 58420 typ relay raddr 10.0.0.1 rport 51234',
+      })
+    ),
+    'relay'
+  );
+  assert.equal(
+    extractIceCandidateType(
+      JSON.stringify({
+        candidate: 'candidate:2 1 UDP 1686052607 196.200.145.11 54321 typ srflx raddr 192.168.1.10 rport 54321',
+      })
+    ),
+    'srflx'
+  );
+  assert.equal(
+    extractIceCandidateType(
+      JSON.stringify({
+        candidate: 'candidate:1 1 UDP 2122260223 192.168.1.10 54321 typ host',
+      })
+    ),
+    'host'
+  );
+});
+

@@ -58,30 +58,11 @@ import {
 } from '../utils/attendance';
 import { resolveCityAndRegionFromZoneString } from '../utils/moroccoCities';
 import { getUserInitials } from '../utils/avatarResize';
+import {
+  extractIceCandidateType,
+  resolveRtcIceConfiguration,
+} from '../utils/rtcIceConfig';
 import { RoleBadge } from './RoleBadge';
-
-const DEFAULT_RTC_ICE_SERVERS: RTCIceServer[] = [
-  { urls: 'stun:stun.l.google.com:19302' },
-  { urls: 'stun:stun1.l.google.com:19302' },
-];
-
-async function fetchRtcIceServers(): Promise<RTCIceServer[]> {
-  try {
-    const res = await fetch('/api/rtc/ice-servers', {
-      method: 'GET',
-      headers: { Accept: 'application/json' },
-      signal: AbortSignal.timeout(3500),
-    });
-    if (!res.ok) return DEFAULT_RTC_ICE_SERVERS;
-    const data = await res.json();
-    if (Array.isArray(data?.iceServers) && data.iceServers.length > 0) {
-      return data.iceServers as RTCIceServer[];
-    }
-  } catch {
-    // Fallback to STUN
-  }
-  return DEFAULT_RTC_ICE_SERVERS;
-}
 
 export type ProfileChatModalTab = 'profile' | 'chat' | 'coaching';
 
@@ -138,6 +119,11 @@ export const CollaboratorProfileChatModal: React.FC<CollaboratorProfileChatModal
   const [sendingInvite, setSendingInvite] = useState(false);
   const [rtcStatus, setRtcStatus] = useState<'idle' | 'connecting' | 'connected' | 'error'>('idle');
   const [rtcError, setRtcError] = useState<string>('');
+  const [iceRouteMode, setIceRouteMode] = useState<
+    'idle' | 'gathering' | 'turn_relay' | 'p2p_direct' | 'nat_failed'
+  >('idle');
+  const [turnConfiguredState, setTurnConfiguredState] = useState<boolean>(false);
+  const [audioPlaybackBlocked, setAudioPlaybackBlocked] = useState<boolean>(false);
   const [pttActive, setPttActive] = useState(false);
   const [pttLatched, setPttLatched] = useState(false);
   const [remoteVolumeMuted, setRemoteVolumeMuted] = useState(false);
@@ -150,6 +136,8 @@ export const CollaboratorProfileChatModal: React.FC<CollaboratorProfileChatModal
   const seenCandidateIdsRef = useRef<Set<string>>(new Set());
   const pendingIceCandidatesRef = useRef<RTCIceCandidateInit[]>([]);
   const activeOfferSdpRef = useRef<string>('');
+  const hasActiveAdminRtcRef = useRef<boolean>(false);
+  const connectWatchdogRef = useRef<number | null>(null);
   const meterCtxRef = useRef<AudioContext | null>(null);
   const meterTimerRef = useRef<number | null>(null);
 
@@ -297,8 +285,15 @@ export const CollaboratorProfileChatModal: React.FC<CollaboratorProfileChatModal
 
   // Cleanup WebRTC session cleanly
   const stopAdminCoachingSession = async (updateCloud = true, preserveError = false) => {
+    const wasActiveAdminRtc = hasActiveAdminRtcRef.current;
+    hasActiveAdminRtcRef.current = false;
+    if (connectWatchdogRef.current !== null) {
+      window.clearTimeout(connectWatchdogRef.current);
+      connectWatchdogRef.current = null;
+    }
     setPttActive(false);
     setPttLatched(false);
+    setAudioPlaybackBlocked(false);
     stopAudioMeter();
     activeOfferSdpRef.current = '';
     if (candidatesUnsubRef.current) {
@@ -325,9 +320,11 @@ export const CollaboratorProfileChatModal: React.FC<CollaboratorProfileChatModal
     if (!preserveError) {
       setRtcStatus('idle');
       setRtcError('');
+      setIceRouteMode('idle');
     }
 
-    if (updateCloud && target?.uid && coachingDoc?.collabConsentActive) {
+    // Ne réinitialiser l'état Firestore QUE si cette instance Admin avait réellement démarré une écoute WebRTC active
+    if (updateCloud && wasActiveAdminRtc && target?.uid && coachingDoc?.collabConsentActive) {
       try {
         await setAdminCoachingState(target.uid, {
           status: 'collab_ready',
@@ -390,14 +387,43 @@ export const CollaboratorProfileChatModal: React.FC<CollaboratorProfileChatModal
       return;
     }
 
+    // Déverrouiller l'élément audio immédiatement lors du clic utilisateur (conformité Autoplay Safari/Chrome)
+    if (remoteAudioRef.current) {
+      remoteAudioRef.current.muted = remoteVolumeMuted;
+      void remoteAudioRef.current.play().catch(() => {});
+    }
+
     await stopAdminCoachingSession(false);
+    hasActiveAdminRtcRef.current = true;
     setRtcStatus('connecting');
     setRtcError('');
+    setIceRouteMode('gathering');
+    setAudioPlaybackBlocked(false);
 
     try {
-      const iceServers = await fetchRtcIceServers();
-      const pc = new RTCPeerConnection({ iceServers });
+      const resolvedIce = await resolveRtcIceConfiguration();
+      setTurnConfiguredState(resolvedIce.turnConfigured);
+      const pc = new RTCPeerConnection({ iceServers: resolvedIce.iceServers });
       pcRef.current = pc;
+
+      // Watchdog 15s : détecte explicitement le blocage NAT symétrique 4G/5G au lieu de rester bloqué sur « Connexion audio P2P... »
+      connectWatchdogRef.current = window.setTimeout(() => {
+        if (
+          pcRef.current === pc &&
+          pc.connectionState !== 'connected' &&
+          pc.iceConnectionState !== 'connected' &&
+          pc.iceConnectionState !== 'completed'
+        ) {
+          setRtcStatus('error');
+          setIceRouteMode('nat_failed');
+          setRtcError(
+            resolvedIce.turnConfigured
+              ? 'Délai de connexion audio WebRTC dépassé (15s) malgré le relais TURN. Vérifiez la couverture réseau 4G/5G du collaborateur ou demandez-lui de réactiver son micro.'
+              : 'Échec de traversée NAT 4G/5G (15s) : aucun serveur TURN configuré. Sur réseau mobile 4G/5G Maroc (NAT symétrique), configurez un relais TURN dans Admin → Coffre & Supervision WebRTC.'
+          );
+          void stopAdminCoachingSession(true, true);
+        }
+      }, 15_000);
 
       // Attach Super-Admin microphone track (muted by default until Push-to-Talk is pressed)
       try {
@@ -418,7 +444,10 @@ export const CollaboratorProfileChatModal: React.FC<CollaboratorProfileChatModal
         if (remoteAudioRef.current && event.streams[0]) {
           remoteAudioRef.current.srcObject = event.streams[0];
           remoteAudioRef.current.muted = remoteVolumeMuted;
-          void remoteAudioRef.current.play().catch(() => {});
+          void remoteAudioRef.current
+            .play()
+            .then(() => setAudioPlaybackBlocked(false))
+            .catch(() => setAudioPlaybackBlocked(true));
           startAudioMeter(event.streams[0]);
         }
       };
@@ -427,21 +456,74 @@ export const CollaboratorProfileChatModal: React.FC<CollaboratorProfileChatModal
 
       pc.onicecandidate = (event) => {
         if (event.candidate && target.uid) {
+          const candidateJson = JSON.stringify(event.candidate.toJSON());
+          const candType = extractIceCandidateType(candidateJson);
+          if (candType === 'relay') {
+            setIceRouteMode('turn_relay');
+          }
           void addCoachingIceCandidate(target.uid, {
             senderUid: adminUid,
             fromRole: 'admin',
-            candidateJson: JSON.stringify(event.candidate.toJSON()),
+            candidateJson,
           });
+        }
+      };
+
+      const handleIceOrConnectionFailure = () => {
+        if (connectWatchdogRef.current !== null) {
+          window.clearTimeout(connectWatchdogRef.current);
+          connectWatchdogRef.current = null;
+        }
+        setRtcStatus('error');
+        setIceRouteMode('nat_failed');
+        setPttActive(false);
+        setPttLatched(false);
+        setRtcError(
+          resolvedIce.turnConfigured
+            ? 'La connexion audio WebRTC a été interrompue (réseau 4G/5G instable). Cliquez sur « Lancer Écoute » pour reconnecter.'
+            : 'Connexion P2P bloquée par le pare-feu / NAT symétrique 4G/5G. Configurez un serveur TURN dans Admin → Coffre & Supervision WebRTC (/app_config/rtc_ice).'
+        );
+      };
+
+      pc.oniceconnectionstatechange = () => {
+        const iceSt = pc.iceConnectionState;
+        if (iceSt === 'connected' || iceSt === 'completed') {
+          if (connectWatchdogRef.current !== null) {
+            window.clearTimeout(connectWatchdogRef.current);
+            connectWatchdogRef.current = null;
+          }
+          setRtcStatus('connected');
+          setIceRouteMode((prev) =>
+            prev === 'turn_relay'
+              ? 'turn_relay'
+              : resolvedIce.turnConfigured
+                ? 'turn_relay'
+                : 'p2p_direct'
+          );
+        } else if (iceSt === 'failed') {
+          handleIceOrConnectionFailure();
         }
       };
 
       pc.onconnectionstatechange = () => {
         const st = pc.connectionState;
         if (st === 'connected') {
+          if (connectWatchdogRef.current !== null) {
+            window.clearTimeout(connectWatchdogRef.current);
+            connectWatchdogRef.current = null;
+          }
           setRtcStatus('connected');
+          setIceRouteMode((prev) =>
+            prev === 'turn_relay'
+              ? 'turn_relay'
+              : resolvedIce.turnConfigured
+                ? 'turn_relay'
+                : 'p2p_direct'
+          );
           onNotify(`Écoute Coaching Live connectée avec ${target.displayName}.`);
-        } else if (st === 'failed' || st === 'disconnected' || st === 'closed') {
-          setRtcStatus('idle');
+        } else if (st === 'failed') {
+          handleIceOrConnectionFailure();
+        } else if (st === 'closed') {
           setPttActive(false);
           setPttLatched(false);
         }
@@ -458,6 +540,10 @@ export const CollaboratorProfileChatModal: React.FC<CollaboratorProfileChatModal
             const d = docSnap.data();
             if (d.fromRole !== 'collab' || typeof d.candidateJson !== 'string') return;
             seenCandidateIdsRef.current.add(docSnap.id);
+            const candType = extractIceCandidateType(d.candidateJson);
+            if (candType === 'relay') {
+              setIceRouteMode('turn_relay');
+            }
             try {
               const cand = JSON.parse(d.candidateJson) as RTCIceCandidateInit;
               if (pc.remoteDescription && pc.remoteDescription.type) {
@@ -999,7 +1085,7 @@ export const CollaboratorProfileChatModal: React.FC<CollaboratorProfileChatModal
                 const isRecentCoachingSignal = Boolean(
                   coachingDoc?.updatedAtIso &&
                     Number.isFinite(Date.parse(coachingDoc.updatedAtIso)) &&
-                    Date.now() - Date.parse(coachingDoc.updatedAtIso) <= 20 * 60 * 1000
+                    Date.now() - Date.parse(coachingDoc.updatedAtIso) <= 15 * 60 * 1000
                 );
                 const isCoachingReadyAndOnline = Boolean(
                   coachingDoc?.collabConsentActive &&
@@ -1047,6 +1133,29 @@ export const CollaboratorProfileChatModal: React.FC<CollaboratorProfileChatModal
                                   ? 'Session précédente expirée (collaborateur hors ligne)'
                                   : 'En attente d’autorisation micro du collaborateur'}
                           </span>
+
+                          {iceRouteMode !== 'idle' && (
+                            <span
+                              data-testid="coaching-ice-mode-badge"
+                              className={`inline-flex items-center gap-1 rounded-lg px-2 py-0.5 text-[11px] font-bold border ${
+                                iceRouteMode === 'turn_relay'
+                                  ? 'bg-emerald-50 border-emerald-300 text-emerald-800'
+                                  : iceRouteMode === 'p2p_direct'
+                                    ? 'bg-sky-50 border-sky-300 text-sky-800'
+                                    : iceRouteMode === 'nat_failed'
+                                      ? 'bg-red-50 border-red-300 text-red-800'
+                                      : 'bg-stone-100 border-stone-300 text-stone-700'
+                              }`}
+                            >
+                              {iceRouteMode === 'turn_relay'
+                                ? 'Relais TURN ✅'
+                                : iceRouteMode === 'p2p_direct'
+                                  ? 'Direct P2P ✅'
+                                  : iceRouteMode === 'nat_failed'
+                                    ? `Échec NAT 4G/5G (${turnConfiguredState ? 'TURN' : 'Sans TURN'})`
+                                    : 'Collecte ICE...'}
+                            </span>
+                          )}
                         </div>
                       </div>
 
@@ -1080,8 +1189,36 @@ export const CollaboratorProfileChatModal: React.FC<CollaboratorProfileChatModal
                       </div>
                     )}
 
+                    {audioPlaybackBlocked && (
+                      <div className="rounded-xl border border-amber-300 bg-amber-50 px-3.5 py-2.5 flex flex-wrap items-center justify-between gap-2 text-xs text-amber-950">
+                        <span className="font-semibold">
+                          Le navigateur a mis le flux audio en pause automatique. Cliquez pour activer le son :
+                        </span>
+                        <button
+                          type="button"
+                          data-testid="admin-unlock-speaker-btn"
+                          onClick={() => {
+                            if (remoteAudioRef.current) {
+                              remoteAudioRef.current.muted = false;
+                              setRemoteVolumeMuted(false);
+                              void remoteAudioRef.current
+                                .play()
+                                .then(() => setAudioPlaybackBlocked(false))
+                                .catch(() => {});
+                            }
+                          }}
+                          className="px-3 py-1.5 rounded-lg bg-orange-600 hover:bg-orange-700 text-white font-bold text-xs shrink-0"
+                        >
+                          🔊 Activer le haut-parleur
+                        </button>
+                      </div>
+                    )}
+
                     {rtcError && (
-                      <div className="rounded-xl border border-red-200 bg-red-50 px-3.5 py-2.5 text-xs font-medium text-red-800">
+                      <div
+                        data-testid="coaching-rtc-error-banner"
+                        className="rounded-xl border border-red-200 bg-red-50 px-3.5 py-2.5 text-xs font-medium text-red-800"
+                      >
                         {rtcError}
                       </div>
                     )}

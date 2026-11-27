@@ -24,6 +24,7 @@ import {
   getDoc,
   getDocs,
   getDocFromServer,
+  getDocsFromServer,
   setDoc,
   updateDoc,
   deleteDoc,
@@ -2122,6 +2123,116 @@ export async function startAttendanceSession(params: {
   };
 }
 
+export async function pingLivePresenceAndGps(params: {
+  uid: string;
+  sessionId?: string;
+  nowIso: string;
+  deviceLabel: string;
+  zone?: string;
+  fallbackProfile?: {
+    email: string;
+    displayName: string;
+    role: TeamRole;
+    zone: string;
+    phonePro?: string;
+    avatarDataUrl?: string;
+  };
+}): Promise<{ ok: boolean; error?: string }> {
+  if (!auth.currentUser || auth.currentUser.uid !== params.uid) {
+    return { ok: false, error: 'Utilisateur non authentifié' };
+  }
+  const presRef = doc(db, 'user_presence', params.uid);
+  const safeDeviceLabel = clampUtf8Bytes(params.deviceLabel.trim(), 160);
+  const safeNowIso = clampUtf8Bytes(params.nowIso.trim(), 64);
+  const safeSessionId = params.sessionId ? clampUtf8Bytes(params.sessionId.trim(), 128) : '';
+  const safeZone = params.zone ? clampUtf8Bytes(params.zone.trim(), 80) : undefined;
+
+  const payload: DocumentData = {
+    isOnline: true,
+    currentDevice: safeDeviceLabel,
+    lastSeenAt: safeNowIso,
+    ...(safeSessionId ? { currentSessionId: safeSessionId } : {}),
+    ...(safeZone ? { zone: safeZone } : {}),
+    updatedAt: serverTimestamp(),
+  };
+
+  try {
+    await updateDoc(presRef, payload);
+    return { ok: true };
+  } catch (err) {
+    if (isPermissionDeniedError(err)) {
+      try {
+        await ensureFreshAuthUser(params.uid, true);
+        await updateDoc(presRef, payload);
+        return { ok: true };
+      } catch (retryErr) {
+        return {
+          ok: false,
+          error: retryErr instanceof Error ? retryErr.message : String(retryErr),
+        };
+      }
+    }
+    return {
+      ok: false,
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
+
+export async function fetchAllUserPresencesFromServer(): Promise<UserPresenceRecord[]> {
+  const path = 'user_presence';
+  try {
+    const q = getUserPresenceListQuery();
+    const snap = await getDocsFromServer(q).catch(() => getDocs(q));
+    const list: UserPresenceRecord[] = [];
+    snap.forEach((docSnap) => {
+      const d = docSnap.data();
+      let updatedAtIso: string | undefined;
+      if (d.updatedAt && typeof d.updatedAt.toDate === 'function') {
+        try {
+          updatedAtIso = d.updatedAt.toDate().toISOString();
+        } catch {
+          updatedAtIso = undefined;
+        }
+      }
+      const clean = sanitizeUserPresencePayload({
+        uid: docSnap.id,
+        email: typeof d.email === 'string' ? d.email : '',
+        displayName: typeof d.displayName === 'string' ? d.displayName : 'Collaborateur',
+        firstName: typeof d.firstName === 'string' ? d.firstName : '',
+        lastName: typeof d.lastName === 'string' ? d.lastName : '',
+        phonePro: typeof d.phonePro === 'string' ? d.phonePro : '',
+        avatarDataUrl: typeof d.avatarDataUrl === 'string' ? d.avatarDataUrl : '',
+        role: typeof d.role === 'string' ? d.role : 'commercial',
+        zone: typeof d.zone === 'string' ? d.zone : 'Meknès',
+        isOnline: Boolean(d.isOnline),
+        currentDevice: typeof d.currentDevice === 'string' ? d.currentDevice : '',
+        devicesUsed: Array.isArray(d.devicesUsed) ? (d.devicesUsed as string[]) : [],
+        lastLoginAt: typeof d.lastLoginAt === 'string' ? d.lastLoginAt : '',
+        lastLogoutAt: typeof d.lastLogoutAt === 'string' ? d.lastLogoutAt : '',
+        lastSeenAt: typeof d.lastSeenAt === 'string' ? d.lastSeenAt : '',
+        lastWorkDisconnectAt:
+          typeof d.lastWorkDisconnectAt === 'string' ? d.lastWorkDisconnectAt : '',
+        workHoursDisconnectCount: Number(d.workHoursDisconnectCount) || 0,
+        workHoursDisconnectTimes: Array.isArray(d.workHoursDisconnectTimes)
+          ? (d.workHoursDisconnectTimes as string[])
+          : [],
+        activeDateKey: typeof d.activeDateKey === 'string' ? d.activeDateKey : '',
+        todayWorkedSeconds: Number(d.todayWorkedSeconds) || 0,
+        totalWorkedSeconds: Number(d.totalWorkedSeconds) || 0,
+        currentSessionId: typeof d.currentSessionId === 'string' ? d.currentSessionId : '',
+      });
+      list.push({
+        ...clean,
+        ...(updatedAtIso ? { updatedAtIso } : {}),
+      });
+    });
+    return list;
+  } catch (error) {
+    handleFirestoreError(error, OperationType.LIST, path);
+  }
+}
+
 export async function heartbeatAttendanceSession(params: {
   uid: string;
   sessionId: string;
@@ -2131,6 +2242,7 @@ export async function heartbeatAttendanceSession(params: {
   totalWorkedSeconds: number;
   sessionWorkedSeconds: number;
   deviceLabel: string;
+  preserveServerCountersIfZero?: boolean;
   fallbackProfile?: {
     email: string;
     displayName: string;
@@ -2139,7 +2251,7 @@ export async function heartbeatAttendanceSession(params: {
     phonePro?: string;
     avatarDataUrl?: string;
   };
-}): Promise<{ todayWorkedSeconds: number; totalWorkedSeconds: number }> {
+}): Promise<{ todayWorkedSeconds: number; totalWorkedSeconds: number; syncOk?: boolean; syncError?: string }> {
   const presRef = doc(db, 'user_presence', params.uid);
   const sessRef = doc(db, 'user_presence', params.uid, 'sessions', params.sessionId);
   let safeToday = Math.min(86400, Math.max(0, Math.round(params.todayWorkedSeconds)));
@@ -2155,18 +2267,28 @@ export async function heartbeatAttendanceSession(params: {
     : undefined;
 
   if (!auth.currentUser || auth.currentUser.uid !== params.uid) {
-    return { todayWorkedSeconds: safeToday, totalWorkedSeconds: safeTotal };
+    return { todayWorkedSeconds: safeToday, totalWorkedSeconds: safeTotal, syncOk: false };
   }
+
+  let syncOk = true;
+  let syncError = '';
+
+  // Never overwrite server todayWorkedSeconds/totalWorkedSeconds with 0 before initial session hydration completes
+  const omitZeroCounters = Boolean(params.preserveServerCountersIfZero) || (safeToday === 0 && safeTotal === 0);
 
   const fastHeartbeatPayload: DocumentData = {
     isOnline: true,
     currentDevice: safeDeviceLabel,
     lastSeenAt: safeNowIso,
-    activeDateKey: safeDateKey,
-    todayWorkedSeconds: safeToday,
-    totalWorkedSeconds: safeTotal,
     currentSessionId: safeSessionId,
     updatedAt: serverTimestamp(),
+    ...(!omitZeroCounters
+      ? {
+          activeDateKey: safeDateKey,
+          todayWorkedSeconds: safeToday,
+          totalWorkedSeconds: safeTotal,
+        }
+      : {}),
   };
   if (safeZone) {
     fastHeartbeatPayload.zone = safeZone;
@@ -2190,7 +2312,7 @@ export async function heartbeatAttendanceSession(params: {
           } catch {
             // Non-fatal
           }
-          return { todayWorkedSeconds: safeToday, totalWorkedSeconds: safeTotal };
+          return { todayWorkedSeconds: safeToday, totalWorkedSeconds: safeTotal, syncOk: true };
         } catch {
           // Fall through to full server reconciliation
         }
@@ -2202,14 +2324,10 @@ export async function heartbeatAttendanceSession(params: {
         const sameDay = prev.activeDateKey === safeDateKey;
         const prevToday = Math.max(0, Math.round(Number(prev.todayWorkedSeconds) || 0));
         const prevTotal = Math.max(0, Math.round(Number(prev.totalWorkedSeconds) || 0));
-        const deltaGuess = sameDay
-          ? Math.min(120, Math.max(0, safeToday - prevToday))
-          : Math.min(120, Math.max(0, safeToday));
         safeToday = sameDay
-          ? Math.min(86400, Math.max(prevToday, prevToday + deltaGuess))
-          : Math.min(86400, Math.max(0, deltaGuess));
-        const totalDelta = Math.min(120, Math.max(deltaGuess, safeTotal - prevTotal));
-        safeTotal = Math.min(100000000, Math.max(prevTotal, prevTotal + Math.max(0, totalDelta)));
+          ? Math.min(86400, Math.max(prevToday, safeToday))
+          : Math.min(86400, Math.max(0, safeToday));
+        safeTotal = Math.min(100000000, Math.max(prevTotal, safeTotal));
 
         const prevDevices = Array.isArray(prev.devicesUsed) ? (prev.devicesUsed as string[]) : [];
         const nextDevices = buildDeviceHistoryList(prevDevices, safeDeviceLabel, 12);
@@ -2303,8 +2421,8 @@ export async function heartbeatAttendanceSession(params: {
           lastLoginAt: safeNowIso,
           lastSeenAt: safeNowIso,
           activeDateKey: safeDateKey,
-          todayWorkedSeconds: Math.min(120, safeToday),
-          totalWorkedSeconds: Math.min(120, safeTotal),
+          todayWorkedSeconds: safeToday,
+          totalWorkedSeconds: safeTotal,
           currentSessionId: safeSessionId,
         });
         safeToday = cleanPres.todayWorkedSeconds;
@@ -2316,12 +2434,14 @@ export async function heartbeatAttendanceSession(params: {
         });
       }
     } catch (hbErr) {
+      syncOk = false;
       const fbHbErr = hbErr as { code?: string; message?: string };
+      syncError = fbHbErr?.message || (hbErr instanceof Error ? hbErr.message : String(hbErr));
       console.warn('[PresenceDebug] Échec heartbeatAttendanceSession', {
         uid: params.uid,
         sessionId: safeSessionId,
         code: fbHbErr?.code || 'unknown',
-        message: fbHbErr?.message || (hbErr instanceof Error ? hbErr.message : String(hbErr)),
+        message: syncError,
       });
     }
   }
@@ -2336,7 +2456,7 @@ export async function heartbeatAttendanceSession(params: {
     // Non-fatal if session doc hasn't settled yet
   }
 
-  return { todayWorkedSeconds: safeToday, totalWorkedSeconds: safeTotal };
+  return { todayWorkedSeconds: safeToday, totalWorkedSeconds: safeTotal, syncOk, ...(syncError ? { syncError } : {}) };
 }
 
 export async function closeAttendanceSession(params: {
@@ -2380,11 +2500,11 @@ export async function closeAttendanceSession(params: {
         const prevToday = Math.max(0, Math.round(Number(prev.todayWorkedSeconds) || 0));
         const prevTotal = Math.max(0, Math.round(Number(prev.totalWorkedSeconds) || 0));
         if (sameDay) {
-          safeToday = Math.min(86400, Math.max(prevToday, Math.min(prevToday + 550, safeToday)));
+          safeToday = Math.min(86400, Math.max(prevToday, safeToday));
         } else {
-          safeToday = Math.min(550, Math.max(0, safeToday));
+          safeToday = Math.min(86400, Math.max(0, safeToday));
         }
-        safeTotal = Math.min(100000000, Math.max(prevTotal, Math.min(prevTotal + 550, safeTotal)));
+        safeTotal = Math.min(100000000, Math.max(prevTotal, safeTotal));
 
         let disconnectCount = Math.max(0, Math.round(Number(prev.workHoursDisconnectCount) || 0));
         let disconnectTimes = Array.isArray(prev.workHoursDisconnectTimes)
@@ -3509,5 +3629,79 @@ export async function addCoachingIceCandidate(
     return null;
   }
 }
+
+export interface CloudRtcIceConfigRecord {
+  iceServersJson: string;
+  turnEnabled: boolean;
+  providerLabel: string;
+  updatedBy?: string;
+  updatedAtIso?: string;
+}
+
+export async function fetchCloudRtcIceConfig(): Promise<CloudRtcIceConfigRecord | null> {
+  if (!auth.currentUser) return null;
+  const ref = doc(db, 'app_config', 'rtc_ice');
+  try {
+    const snap = await getDocFromServer(ref).catch(() => getDoc(ref));
+    if (!snap.exists()) return null;
+    const d = snap.data();
+    let updatedAtIso: string | undefined;
+    if (d.updatedAt && typeof d.updatedAt.toDate === 'function') {
+      try {
+        updatedAtIso = d.updatedAt.toDate().toISOString();
+      } catch {
+        updatedAtIso = undefined;
+      }
+    }
+    return {
+      iceServersJson: typeof d.iceServersJson === 'string' ? d.iceServersJson.slice(0, 4000) : '',
+      turnEnabled: Boolean(d.turnEnabled),
+      providerLabel: typeof d.providerLabel === 'string' ? d.providerLabel.slice(0, 120) : '',
+      ...(typeof d.updatedBy === 'string' ? { updatedBy: d.updatedBy } : {}),
+      ...(updatedAtIso ? { updatedAtIso } : {}),
+    };
+  } catch {
+    return null;
+  }
+}
+
+export async function adminSaveCloudRtcIceConfig(params: {
+  iceServersJson: string;
+  turnEnabled: boolean;
+  providerLabel: string;
+}): Promise<{ updatedAtIso: string }> {
+  const path = 'app_config/rtc_ice';
+  const ref = doc(db, 'app_config', 'rtc_ice');
+  const safeJson = clampUtf8Bytes(params.iceServersJson.trim(), 4000);
+  const safeLabel = clampUtf8Bytes(params.providerLabel.trim() || 'TURN Relais 4G/5G', 120);
+  const updatedBy = auth.currentUser?.uid || '';
+  const updatedAtIso = new Date().toISOString();
+
+  try {
+    if (updatedBy) {
+      await ensureFreshAuthUser(updatedBy);
+    }
+    const snap = await getDocFromServer(ref).catch(() => getDoc(ref));
+    const payload: DocumentData = {
+      iceServersJson: safeJson,
+      turnEnabled: Boolean(params.turnEnabled),
+      providerLabel: safeLabel,
+      ...(updatedBy ? { updatedBy } : {}),
+      updatedAt: serverTimestamp(),
+    };
+    if (snap.exists()) {
+      await updateDoc(ref, payload);
+    } else {
+      await setDoc(ref, {
+        ...payload,
+        createdAt: serverTimestamp(),
+      });
+    }
+    return { updatedAtIso };
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, path);
+  }
+}
+
 
 

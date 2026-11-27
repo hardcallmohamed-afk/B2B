@@ -49,6 +49,8 @@ import {
   adminUpdateManagedUser,
   adminDeleteManagedUser,
   adminUpdateUserManualBadges,
+  adminSaveCloudRtcIceConfig,
+  fetchCloudRtcIceConfig,
   fetchUserAttendanceSessions,
   getCurrentUserIdToken,
   requestPasswordReset,
@@ -77,6 +79,7 @@ import {
   computeTeamBoundsZoom,
   computeVisibleGoogleMapTiles,
   formatDateTimeShort,
+  formatGpsAccuracyBadge,
   formatWorkedDuration,
   panMercatorCenterByPixels,
   parseLiveFieldTelemetry,
@@ -87,6 +90,11 @@ import {
   type FieldActivityStatus,
   type ParsedLiveFieldTelemetry,
 } from '../utils/attendance';
+import {
+  buildTurnIceServersJson,
+  parseIceServersJson,
+  testTurnRelayConnectivity,
+} from '../utils/rtcIceConfig';
 import { BadgeArtwork } from './BadgeArtwork';
 import { RoleBadge } from './RoleBadge';
 import type {
@@ -146,6 +154,7 @@ interface AdminUsersPanelProps {
   unreadChatByUid?: Record<string, number>;
   coachingReadyUids?: Set<string>;
   onRequestMyGpsRefresh?: () => Promise<void> | void;
+  onForceRefreshPresencesFromServer?: () => Promise<number>;
   onOpenLocalApiHub?: () => void;
   onNotify: (msg: string, type?: 'ok' | 'warn' | 'err') => void;
 }
@@ -166,6 +175,7 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
   unreadChatByUid = {},
   coachingReadyUids,
   onRequestMyGpsRefresh,
+  onForceRefreshPresencesFromServer,
   onOpenLocalApiHub,
   onNotify,
 }) => {
@@ -253,6 +263,7 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
   const [showLiveGoogleEmbed, setShowLiveGoogleEmbed] = useState<boolean>(false);
   const [autoFollowSelected, setAutoFollowSelected] = useState<boolean>(false);
   const [gpsRefreshing, setGpsRefreshing] = useState<boolean>(false);
+  const [firestorePresenceRefreshing, setFirestorePresenceRefreshing] = useState<boolean>(false);
   const mapCanvasRef = useRef<HTMLDivElement | null>(null);
   const pinchStartDistRef = useRef<number | null>(null);
   const pinchStartZoomRef = useRef<number>(8);
@@ -333,6 +344,115 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
     message: string;
   } | null>(null);
 
+  // Configuration Serveur TURN WebRTC (/app_config/rtc_ice) pour traversée NAT 4G/5G Maroc (compatible GitHub Pages)
+  const [turnUrlsInput, setTurnUrlsInput] = useState<string>('');
+  const [turnUsername, setTurnUsername] = useState<string>('');
+  const [turnCredential, setTurnCredential] = useState<string>('');
+  const [showTurnCredential, setShowTurnCredential] = useState<boolean>(false);
+  const [turnProviderLabel, setTurnProviderLabel] = useState<string>('Relais TURN 4G/5G Maroc');
+  const [turnEnabled, setTurnEnabled] = useState<boolean>(true);
+  const [turnUpdatedAtIso, setTurnUpdatedAtIso] = useState<string>('');
+  const [turnSaving, setTurnSaving] = useState<boolean>(false);
+  const [turnTesting, setTurnTesting] = useState<boolean>(false);
+  const [turnTestResult, setTurnTestResult] = useState<{
+    ok: boolean;
+    relayFound: boolean;
+    srflxFound: boolean;
+    candidateTypes: string[];
+    message: string;
+  } | null>(null);
+
+  useEffect(() => {
+    if (!showVaultSection) return;
+    let cancelled = false;
+    fetchCloudRtcIceConfig()
+      .then((cfg) => {
+        if (cancelled || !cfg) return;
+        setTurnEnabled(cfg.turnEnabled);
+        setTurnProviderLabel(cfg.providerLabel || 'Relais TURN 4G/5G Maroc');
+        setTurnUpdatedAtIso(cfg.updatedAtIso || '');
+        const parsed = parseIceServersJson(cfg.iceServersJson);
+        const turnServer = parsed.find((srv) => {
+          const urls = Array.isArray(srv.urls) ? srv.urls : [srv.urls];
+          return urls.some((u) => /^turns?:/i.test(String(u || '').trim()));
+        });
+        if (turnServer) {
+          const urls = Array.isArray(turnServer.urls) ? turnServer.urls : [turnServer.urls];
+          setTurnUrlsInput(urls.filter((u) => /^turns?:/i.test(String(u || '').trim())).join(', '));
+          setTurnUsername(typeof turnServer.username === 'string' ? turnServer.username : '');
+          setTurnCredential(typeof turnServer.credential === 'string' ? turnServer.credential : '');
+        }
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [showVaultSection]);
+
+  const handleSaveTurnConfigToFirestore = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const cleanUrls = turnUrlsInput.trim();
+    if (turnEnabled && !cleanUrls) {
+      onNotify('Veuillez saisir au moins une URL TURN (ex: turn:global.relay.metered.ca:80).', 'warn');
+      return;
+    }
+    setTurnSaving(true);
+    try {
+      const iceServersJson = cleanUrls
+        ? buildTurnIceServersJson({
+            turnUrls: cleanUrls,
+            username: turnUsername.trim(),
+            credential: turnCredential.trim(),
+          })
+        : JSON.stringify([{ urls: 'stun:stun.l.google.com:19302' }, { urls: 'stun:stun.cloudflare.com:3478' }]);
+      const saved = await adminSaveCloudRtcIceConfig({
+        iceServersJson,
+        turnEnabled: Boolean(turnEnabled && cleanUrls),
+        providerLabel: turnProviderLabel.trim() || 'Relais TURN 4G/5G Maroc',
+      });
+      setTurnUpdatedAtIso(saved.updatedAtIso);
+      onNotify('Configuration Serveur TURN WebRTC enregistrée dans Firestore (/app_config/rtc_ice).');
+    } catch (err) {
+      onNotify(
+        err instanceof Error ? err.message : 'Impossible d’enregistrer la configuration TURN dans Firestore.',
+        'err'
+      );
+    } finally {
+      setTurnSaving(false);
+    }
+  };
+
+  const handleTestTurnRelay = async () => {
+    setTurnTesting(true);
+    setTurnTestResult(null);
+    try {
+      const cleanUrls = turnUrlsInput.trim();
+      const iceServersJson = cleanUrls
+        ? buildTurnIceServersJson({
+            turnUrls: cleanUrls,
+            username: turnUsername.trim(),
+            credential: turnCredential.trim(),
+          })
+        : '';
+      const servers = iceServersJson ? parseIceServersJson(iceServersJson) : [];
+      const res = await testTurnRelayConnectivity(servers);
+      setTurnTestResult(res);
+      onNotify(res.message, res.ok ? 'ok' : 'warn');
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Erreur lors du test TURN.';
+      setTurnTestResult({
+        ok: false,
+        relayFound: false,
+        srflxFound: false,
+        candidateTypes: [],
+        message: msg,
+      });
+      onNotify(msg, 'err');
+    } finally {
+      setTurnTesting(false);
+    }
+  };
+
   const currentHostname = typeof window !== 'undefined' ? window.location.hostname : 'hardcallmohamed-afk.github.io';
   const firebaseAuthSettingsUrl = `https://console.firebase.google.com/project/${FIREBASE_PROJECT_ID}/authentication/settings`;
   const firebaseProvidersUrl = `https://console.firebase.google.com/project/${FIREBASE_PROJECT_ID}/authentication/providers`;
@@ -358,10 +478,10 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
     return map;
   }, [teamStats]);
 
-  // Horloge légère 30s pour recalculer les statuts En ligne / Hors ligne en direct
+  // Horloge temps réel 3s synchronisée avec le Radar LIVE 3s pour recalculer les statuts En ligne / Hors ligne sans latence
   const [presenceClockMs, setPresenceClockMs] = useState<number>(() => Date.now());
   useEffect(() => {
-    const timer = window.setInterval(() => setPresenceClockMs(Date.now()), 30_000);
+    const timer = window.setInterval(() => setPresenceClockMs(Date.now()), 3_000);
     return () => window.clearInterval(timer);
   }, []);
 
@@ -2459,7 +2579,9 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
                   type="button"
                   data-testid="map-fit-all-team"
                   onClick={() => {
-                    const pts = consolidatedTeamTracking.map((m) => ({
+                    const sourceRows =
+                      filteredTrackingRows.length > 0 ? filteredTrackingRows : consolidatedTeamTracking;
+                    const pts = sourceRows.map((m) => ({
                       lat: m.coords.lat,
                       lng: m.coords.lng,
                     }));
@@ -2473,7 +2595,7 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
                     setMapZoom(fitted.zoom);
                   }}
                   className="px-2 py-1 rounded bg-sky-600/25 hover:bg-sky-600/40 text-sky-300 border border-sky-500/40 text-[10px] font-bold inline-flex items-center gap-1 whitespace-nowrap"
-                  title="Ajuster automatiquement la carte pour afficher tous les collaborateurs"
+                  title="Ajuster automatiquement la carte pour afficher tous les collaborateurs filtrés"
                 >
                   <Maximize2 className="w-3 h-3" />
                   Tout cadrer
@@ -2522,6 +2644,39 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
                   >
                     <Navigation className={`w-3 h-3 ${gpsRefreshing ? 'animate-spin' : ''}`} />
                     {gpsRefreshing ? 'GPS...' : 'Actualiser mon GPS'}
+                  </button>
+                )}
+                {onForceRefreshPresencesFromServer && (
+                  <button
+                    type="button"
+                    disabled={firestorePresenceRefreshing}
+                    data-testid="radar-force-firestore-refresh-btn"
+                    onClick={async () => {
+                      setFirestorePresenceRefreshing(true);
+                      try {
+                        const count = await onForceRefreshPresencesFromServer();
+                        setPresenceClockMs(Date.now());
+                        setLastMapSyncLabel(
+                          new Date().toLocaleTimeString('fr-FR', {
+                            hour: '2-digit',
+                            minute: '2-digit',
+                            second: '2-digit',
+                          })
+                        );
+                        onNotify(
+                          `Présences & positions GPS actualisées en direct depuis Firestore (${count} document(s)).`
+                        );
+                      } catch {
+                        onNotify('Impossible de forcer la lecture serveur Firestore.', 'err');
+                      } finally {
+                        setFirestorePresenceRefreshing(false);
+                      }
+                    }}
+                    className="px-2 py-1 rounded bg-emerald-600/25 hover:bg-emerald-600/40 disabled:opacity-50 text-emerald-200 border border-emerald-500/40 text-[10px] font-bold inline-flex items-center gap-1 whitespace-nowrap"
+                    title="Forcer une lecture directe sur le serveur Firestore (getDocsFromServer) sans cache local"
+                  >
+                    <RefreshCw className={`w-3 h-3 ${firestorePresenceRefreshing ? 'animate-spin' : ''}`} />
+                    {firestorePresenceRefreshing ? 'Synchro...' : 'Actualiser Firestore maintenant'}
                   </button>
                 )}
                 <button
@@ -2766,9 +2921,9 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
                     ))}
                   </div>
 
-                  {/* Couche 2 : Marqueurs GPS Exact Web Mercator & Petits Pop-ups Collaborateurs (compacts lors du zoom) */}
+                  {/* Couche 2 : Marqueurs GPS Exact Web Mercator & Petits Pop-ups Collaborateurs filtrés (compacts lors du zoom) */}
                   <div className="absolute inset-0 pointer-events-none">
-                    {consolidatedTeamTracking.map((m) => {
+                    {filteredTrackingRows.map((m) => {
                       const exactLat = Number(m.coords.lat.toFixed(6));
                       const exactLng = Number(m.coords.lng.toFixed(6));
 
@@ -3052,13 +3207,19 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
                         {activeRadarMember.coords.lat.toFixed(6)}, {activeRadarMember.coords.lng.toFixed(6)}
                       </div>
                       <div className="text-[10px] text-emerald-400 mt-0.5 tabular-nums">
-                        {activeRadarMember.coords.source === 'gps_live'
-                          ? `GPS Direct (±${activeRadarMember.telemetry.accuracyMeters ?? 15}m${
-                              (activeRadarMember.telemetry.speedKmh ?? 0) > 0
-                                ? ` · ${activeRadarMember.telemetry.speedKmh} km/h`
-                                : ''
-                            })`
-                          : `Position GPS non partagée (Zone : ${activeRadarMember.coords.cityLabel})`}
+                        {(() => {
+                          const accBadge = formatGpsAccuracyBadge(
+                            activeRadarMember.coords.source,
+                            activeRadarMember.telemetry.accuracyMeters
+                          );
+                          return activeRadarMember.coords.source === 'gps_live'
+                            ? `${accBadge.label}${
+                                (activeRadarMember.telemetry.speedKmh ?? 0) > 0
+                                  ? ` · ${activeRadarMember.telemetry.speedKmh} km/h`
+                                  : ''
+                              }`
+                            : `${accBadge.label} (${activeRadarMember.coords.cityLabel})`;
+                        })()}
                       </div>
                     </div>
 
@@ -3114,11 +3275,11 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
                 {/* Sélecteur rapide de collaborateur avec centrage GPS exact et zoom rue */}
                 <div className="pt-2 border-t border-stone-800 space-y-1.5">
                   <div className="text-[10px] font-semibold text-stone-400 flex items-center justify-between">
-                    <span>Collaborateurs sur la carte ({consolidatedTeamTracking.length}) :</span>
+                    <span>Collaborateurs sur la carte ({filteredTrackingRows.length}) :</span>
                     <span className="text-orange-400 font-mono">Cliquez pour centrer GPS précis</span>
                   </div>
                   <div className="flex flex-wrap gap-1.5 max-h-24 overflow-y-auto">
-                    {consolidatedTeamTracking.map((m) => (
+                    {filteredTrackingRows.map((m) => (
                       <button
                         key={m.uid}
                         type="button"
@@ -3250,7 +3411,8 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
                             >
                               {member.coords.lat.toFixed(6)}, {member.coords.lng.toFixed(6)}
                             </a>{' '}
-                            ({member.coords.source === 'gps_live' ? 'GPS Direct' : `Position GPS non partagée · ${member.coords.cityLabel}`})
+                            ({formatGpsAccuracyBadge(member.coords.source, member.telemetry.accuracyMeters).label}
+                            {member.coords.source !== 'gps_live' ? ` · ${member.coords.cityLabel}` : ''})
                           </span>
                         </div>
 
@@ -3808,6 +3970,161 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
             {proxyTestResult.message}
           </div>
         )}
+
+        {/* ================================================================== */}
+        {/* SERVEUR TURN WEBRTC (4G/5G MAROC & GITHUB PAGES — /app_config/rtc_ice) */}
+        {/* ================================================================== */}
+        <div
+          data-testid="admin-turn-webrtc-config-panel"
+          className="mt-4 pt-4 border-t border-stone-200 space-y-3"
+        >
+          <div className="flex flex-wrap items-start justify-between gap-2">
+            <div>
+              <h4 className="text-xs font-bold text-stone-900 flex items-center gap-1.5">
+                <Headphones className="w-4 h-4 text-orange-600" />
+                Serveur TURN WebRTC (Indispensable en 4G/5G Maroc sur GitHub Pages)
+              </h4>
+              <p className="text-[11px] text-stone-500 mt-0.5">
+                Stocké dans <code className="font-mono text-orange-700">/app_config/rtc_ice</code> (lisible par les collaborateurs approuvés, modifiable uniquement par le Super-Admin). Permet au Coaching Audio Live &amp; Push-to-Talk de traverser les NAT symétriques 4G/5G (Orange Maroc, Inwi, IAM) même sans serveur Node sur GitHub Pages.
+              </p>
+            </div>
+            <div className="flex items-center gap-2">
+              {turnUpdatedAtIso && (
+                <span className="px-2 py-0.5 rounded-md bg-emerald-50 border border-emerald-200 text-[10px] font-bold text-emerald-800">
+                  Configuré · {formatDateTimeShort(turnUpdatedAtIso)}
+                </span>
+              )}
+              <label className="inline-flex items-center gap-1.5 text-[11px] font-semibold text-stone-700 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={turnEnabled}
+                  onChange={(e) => setTurnEnabled(e.target.checked)}
+                  className="rounded border-stone-300 text-orange-600 focus:ring-orange-500"
+                />
+                Relais TURN actif
+              </label>
+            </div>
+          </div>
+
+          <form onSubmit={handleSaveTurnConfigToFirestore} className="grid grid-cols-1 sm:grid-cols-12 gap-2.5">
+            <div className="sm:col-span-5 space-y-1">
+              <label className="block text-[11px] font-semibold text-stone-700">
+                URL(s) Serveur TURN / TURNS (séparées par virgule)
+              </label>
+              <input
+                type="text"
+                data-testid="turn-urls-input"
+                value={turnUrlsInput}
+                onChange={(e) => setTurnUrlsInput(e.target.value)}
+                placeholder="turns:global.relay.metered.ca:443?transport=tcp, turn:global.relay.metered.ca:80"
+                className="w-full px-2.5 py-1.5 rounded-lg border border-stone-300 font-mono text-xs focus:outline-none focus:border-orange-600"
+              />
+            </div>
+
+            <div className="sm:col-span-2 space-y-1">
+              <label className="block text-[11px] font-semibold text-stone-700">
+                Identifiant (username)
+              </label>
+              <input
+                type="text"
+                data-testid="turn-username-input"
+                value={turnUsername}
+                onChange={(e) => setTurnUsername(e.target.value)}
+                placeholder="ex: 8f9c2a..."
+                className="w-full px-2.5 py-1.5 rounded-lg border border-stone-300 font-mono text-xs focus:outline-none focus:border-orange-600"
+              />
+            </div>
+
+            <div className="sm:col-span-3 space-y-1">
+              <label className="block text-[11px] font-semibold text-stone-700">
+                Clé / Mot de passe (credential)
+              </label>
+              <div className="relative">
+                <input
+                  type={showTurnCredential ? 'text' : 'password'}
+                  data-testid="turn-credential-input"
+                  value={turnCredential}
+                  onChange={(e) => setTurnCredential(e.target.value)}
+                  placeholder="Secret TURN..."
+                  className="w-full pl-2.5 pr-8 py-1.5 rounded-lg border border-stone-300 font-mono text-xs focus:outline-none focus:border-orange-600"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowTurnCredential((v) => !v)}
+                  className="absolute right-2 top-1/2 -translate-y-1/2 text-stone-400 hover:text-stone-700"
+                  aria-label="Afficher ou masquer le secret TURN"
+                >
+                  {showTurnCredential ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                </button>
+              </div>
+            </div>
+
+            <div className="sm:col-span-2 space-y-1">
+              <label className="block text-[11px] font-semibold text-stone-700">
+                Libellé opérateur
+              </label>
+              <input
+                type="text"
+                value={turnProviderLabel}
+                onChange={(e) => setTurnProviderLabel(e.target.value)}
+                placeholder="Metered / Cloudflare"
+                className="w-full px-2.5 py-1.5 rounded-lg border border-stone-300 text-xs focus:outline-none focus:border-orange-600"
+              />
+            </div>
+
+            <div className="sm:col-span-12 flex flex-wrap items-center justify-between gap-2 pt-1">
+              <span className="text-[11px] text-stone-500">
+                Fournisseurs gratuits recommandés : <strong>Metered.ca OpenRelay</strong> (50 Go/mois), <strong>Cloudflare Calls TURN</strong> ou <strong>Twilio Network Traversal</strong>.
+              </span>
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  data-testid="test-turn-relay-btn"
+                  disabled={turnTesting}
+                  onClick={() => void handleTestTurnRelay()}
+                  className="px-3 py-1.5 rounded-lg border border-stone-300 bg-white hover:bg-stone-50 text-stone-800 text-xs font-semibold inline-flex items-center gap-1.5 disabled:opacity-50"
+                >
+                  {turnTesting ? (
+                    <Loader2 className="w-3.5 h-3.5 animate-spin text-orange-600" />
+                  ) : (
+                    <Wifi className="w-3.5 h-3.5 text-orange-600" />
+                  )}
+                  Tester le relais TURN
+                </button>
+                <button
+                  type="submit"
+                  data-testid="save-turn-firestore-btn"
+                  disabled={turnSaving}
+                  className="px-3.5 py-1.5 rounded-lg bg-orange-600 hover:bg-orange-700 text-white text-xs font-bold inline-flex items-center gap-1.5 disabled:opacity-50"
+                >
+                  <ShieldCheck className="w-3.5 h-3.5" />
+                  {turnSaving ? 'Enregistrement...' : 'Enregistrer dans Firestore (/app_config/rtc_ice)'}
+                </button>
+              </div>
+            </div>
+          </form>
+
+          {turnTestResult && (
+            <div
+              data-testid="turn-test-result-banner"
+              className={`rounded-lg border px-3 py-2 text-xs flex items-center justify-between gap-2 ${
+                turnTestResult.ok
+                  ? 'border-emerald-200 bg-emerald-50 text-emerald-900'
+                  : 'border-amber-200 bg-amber-50 text-amber-900'
+              }`}
+            >
+              <div>
+                <strong className="mr-1.5">
+                  {turnTestResult.ok ? 'Relais TURN validé ✅ :' : 'Diagnostic ICE / TURN ⚠️ :'}
+                </strong>
+                {turnTestResult.message}
+              </div>
+              <span className="font-mono text-[11px] font-bold shrink-0">
+                relay={turnTestResult.relayFound ? 'OUI' : 'NON'} · srflx={turnTestResult.srflxFound ? 'OUI' : 'NON'}
+              </span>
+            </div>
+          )}
+        </div>
       </div>
       )}
     </section>

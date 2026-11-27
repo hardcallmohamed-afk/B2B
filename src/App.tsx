@@ -180,7 +180,9 @@ import {
   stripFieldTelemetrySuffix,
   startAutomaticMultiPlatformLocationEngine,
   requestImmediateDeviceGpsFix,
+  computeDistanceMeters,
   type FieldActivityStatus,
+  type GpsEngineStatus,
 } from './utils/attendance';
 import {
   ALL_MOROCCO_CITY_NAMES,
@@ -215,6 +217,8 @@ import {
   startAttendanceSession,
   heartbeatAttendanceSession,
   closeAttendanceSession,
+  pingLivePresenceAndGps,
+  fetchAllUserPresencesFromServer,
   adminUpdateUserManualBadges,
   createSignedContract,
   adminUpdateSignedContract,
@@ -3242,6 +3246,16 @@ export default function App() {
   const [dedupSaving, setDedupSaving] = useState(false);
   const [userPresences, setUserPresences] = useState<UserPresenceRecord[]>([]);
   const [myPresenceRecord, setMyPresenceRecord] = useState<UserPresenceRecord | null>(null);
+  const [gpsEngineStatus, setGpsEngineStatus] = useState<GpsEngineStatus>('acquiring');
+  const [presenceSyncStatus, setPresenceSyncStatus] = useState<{
+    ok: boolean;
+    lastSyncIso: string;
+    error: string;
+  }>({
+    ok: true,
+    lastSyncIso: '',
+    error: '',
+  });
   const [adminSubSection, setAdminSubSection] = useState<AdminPanelSection>(() => {
     const init = resolveInitialCrmRoute();
     return (init.adminSubSection as AdminPanelSection) || 'all';
@@ -3619,9 +3633,21 @@ export default function App() {
                 activeAttendanceRef.current.todayBaseSeconds = hb.todayWorkedSeconds;
                 activeAttendanceRef.current.totalBaseSeconds = hb.totalWorkedSeconds;
               }
+              setPresenceSyncStatus({
+                ok: hb.syncOk !== false,
+                lastSyncIso: new Date().toISOString(),
+                error: hb.syncError || '',
+              });
             })
-            .catch(() => {});
+            .catch((err) => {
+              setPresenceSyncStatus({
+                ok: false,
+                lastSyncIso: new Date().toISOString(),
+                error: err instanceof Error ? err.message : String(err),
+              });
+            });
         }
+        setGpsEngineStatus(res.coords.method === 'gps_hardware' ? 'gps_live' : 'wifi_live');
         notify(
           `${res.message} (${geo.collaboratorPublicZoneLabel})`,
           res.permissionDenied ? 'warn' : 'ok'
@@ -4365,6 +4391,11 @@ export default function App() {
       .then((res) => {
         if (cancelled) return;
         sessionReadyOnServer = true;
+        setPresenceSyncStatus({
+          ok: true,
+          lastSyncIso: new Date().toISOString(),
+          error: '',
+        });
         const cur = activeAttendanceRef.current;
         if (cur && cur.uid === uid) {
           cur.todayBaseSeconds = Math.max(cur.todayBaseSeconds, res.todayWorkedSeconds);
@@ -4384,9 +4415,15 @@ export default function App() {
       })
       .catch((startErr) => {
         if (cancelled) return;
+        const errMsg = startErr instanceof Error ? startErr.message : String(startErr);
+        setPresenceSyncStatus({
+          ok: false,
+          lastSyncIso: new Date().toISOString(),
+          error: errMsg,
+        });
         console.warn('[PresenceDebug] Échec startAttendanceSession initial, reprise dans 3s', {
           uid,
-          message: startErr instanceof Error ? startErr.message : String(startErr),
+          message: errMsg,
         });
         // Reprise automatique fiable après 3s : retenter startAttendanceSession + heartbeat auto-réparateur
         window.setTimeout(() => {
@@ -4477,13 +4514,35 @@ export default function App() {
               activeAttendanceRef.current.todayBaseSeconds = res.todayWorkedSeconds;
               activeAttendanceRef.current.totalBaseSeconds = res.totalWorkedSeconds;
             }
+            if (!cancelled) {
+              setPresenceSyncStatus({
+                ok: res.syncOk !== false,
+                lastSyncIso: new Date().toISOString(),
+                error: res.syncError || '',
+              });
+            }
           })
-          .catch(() => {});
+          .catch((err) => {
+            if (!cancelled) {
+              setPresenceSyncStatus({
+                ok: false,
+                lastSyncIso: new Date().toISOString(),
+                error: err instanceof Error ? err.message : String(err),
+              });
+            }
+          });
       }
     };
 
+    let lastPushedGpsFix: { lat: number; lng: number; atMs: number; method: string } | null = null;
+
     // Acquisition & Suivi GPS automatique multi-plateforme (Android, Apple iOS/macOS, PC Windows/Linux)
     const stopAutoLocationEngine = startAutomaticMultiPlatformLocationEngine({
+      onStatusChange: (status) => {
+        if (!cancelled) {
+          setGpsEngineStatus(status);
+        }
+      },
       onLocationUpdate: (fix) => {
         if (cancelled) return;
         const prevLat = liveFieldContextRef.current.lat;
@@ -4491,10 +4550,14 @@ export default function App() {
         const nextLat = fix.lat;
         const nextLng = fix.lng;
         const spdKmh = fix.speedKmh;
+        const movedMeters =
+          prevLat !== null && prevLng !== null
+            ? computeDistanceMeters(prevLat, prevLng, nextLat, nextLng)
+            : Infinity;
         if (
           prevLat !== null &&
           prevLng !== null &&
-          (Math.abs(nextLat - prevLat) > 0.00008 || Math.abs(nextLng - prevLng) > 0.00008 || spdKmh >= 3)
+          (movedMeters > 10 || spdKmh >= 3)
         ) {
           liveFieldContextRef.current.lastMoveActivityMs = Date.now();
         }
@@ -4538,6 +4601,59 @@ export default function App() {
             return { ...prev, zone: geo.collaboratorPublicZoneLabel };
           });
         }
+
+        // Push immédiat vers Firestore dès la première acquisition ou déplacement > 10m (ou upgrade IP -> GPS/Wi-Fi)
+        const nowFixMs = Date.now();
+        const isFirstPush = lastPushedGpsFix === null;
+        const isMethodUpgrade =
+          lastPushedGpsFix !== null &&
+          lastPushedGpsFix.method === 'ip_geo' &&
+          fix.method !== 'ip_geo';
+        const distSincePush =
+          lastPushedGpsFix !== null
+            ? computeDistanceMeters(lastPushedGpsFix.lat, lastPushedGpsFix.lng, nextLat, nextLng)
+            : Infinity;
+        if (
+          navigator.onLine !== false &&
+          (isFirstPush || isMethodUpgrade || (distSincePush > 10 && nowFixMs - (lastPushedGpsFix?.atMs || 0) >= 2500))
+        ) {
+          lastPushedGpsFix = {
+            lat: nextLat,
+            lng: nextLng,
+            atMs: nowFixMs,
+            method: fix.method,
+          };
+          const cur = activeAttendanceRef.current;
+          if (cur && cur.uid === uid) {
+            const nextLabel = computeLiveTelemetryLabel();
+            cur.deviceLabel = nextLabel;
+            lastPushedTelemetryLabel = nextLabel;
+            const snapNow = latestLocalStateRef.current;
+            void pingLivePresenceAndGps({
+              uid: cur.uid,
+              sessionId: cur.sessionId,
+              nowIso: new Date(nowFixMs).toISOString(),
+              deviceLabel: nextLabel,
+              zone: geo.collaboratorPublicZoneLabel,
+              fallbackProfile: {
+                email: cur.email,
+                displayName: snapNow.userProfile.displayName.trim() || cur.displayName,
+                phonePro: snapNow.userProfile.phonePro || '',
+                avatarDataUrl: snapNow.userProfile.avatarDataUrl || '',
+                role: cur.role,
+                zone: geo.collaboratorPublicZoneLabel,
+              },
+            }).then((res) => {
+              if (!cancelled) {
+                setPresenceSyncStatus({
+                  ok: res.ok,
+                  lastSyncIso: new Date().toISOString(),
+                  error: res.error || '',
+                });
+              }
+            });
+          }
+        }
       },
     });
 
@@ -4546,11 +4662,10 @@ export default function App() {
     const fastTelemetryTimer = window.setInterval(() => {
       const cur = activeAttendanceRef.current;
       if (!cur || cur.closed || cur.uid !== uid) return;
-      if (!sessionReadyOnServer && Date.now() - nowMs < 15_000) return;
       const nextLabel = computeLiveTelemetryLabel();
       if (nextLabel !== lastPushedTelemetryLabel) {
         lastPushedTelemetryLabel = nextLabel;
-        accumulateElapsed(true);
+        accumulateElapsed(true, true);
       }
     }, 3_000);
 
@@ -5096,7 +5211,7 @@ export default function App() {
         snap.forEach((docSnap) => {
           const d = docSnap.data();
           const updatedAtMs = Date.parse(String(d.updatedAtIso || ''));
-          const isRecent = Number.isFinite(updatedAtMs) && nowMs - updatedAtMs <= 20 * 60 * 1000;
+          const isRecent = Number.isFinite(updatedAtMs) && nowMs - updatedAtMs <= 15 * 60 * 1000;
           if (Boolean(d.collabConsentActive) && Boolean(d.offerSdp) && isRecent) {
             ready.add(docSnap.id);
           }
@@ -9515,32 +9630,44 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
                   onClick={() => void handleActivateOrRefreshGps()}
                   data-testid="header-gps-refresh-btn"
                   title={
-                    detectedGeoState
-                      ? `GPS actif : ${detectedGeoState.collaboratorPublicZoneLabel} — Cliquer pour actualiser`
-                      : 'Activer ou actualiser ma position GPS (Android, Apple, PC)'
+                    gpsEngineStatus === 'denied'
+                      ? 'Accès GPS refusé par le navigateur — Cliquez pour réessayer et autoriser la géolocalisation'
+                      : detectedGeoState
+                        ? `GPS actif : ${detectedGeoState.collaboratorPublicZoneLabel} — Cliquer pour actualiser`
+                        : 'Activer ou actualiser ma position GPS (Android, Apple, PC)'
                   }
                   className={`px-2 sm:px-2.5 py-1.5 rounded-lg border text-xs font-semibold flex items-center gap-1.5 whitespace-nowrap shrink-0 transition-colors disabled:opacity-60 ${
-                    detectedGeoState
-                      ? 'border-emerald-300 bg-emerald-50 hover:bg-emerald-100 text-emerald-800'
-                      : 'border-stone-300 bg-stone-50 hover:bg-stone-100 text-stone-700'
+                    gpsEngineStatus === 'denied'
+                      ? 'border-red-300 bg-red-50 hover:bg-red-100 text-red-800'
+                      : detectedGeoState
+                        ? 'border-emerald-300 bg-emerald-50 hover:bg-emerald-100 text-emerald-800'
+                        : 'border-stone-300 bg-stone-50 hover:bg-stone-100 text-stone-700'
                   }`}
                 >
                   <Navigation
                     className={`w-3.5 h-3.5 shrink-0 ${
                       gpsBusy
                         ? 'animate-spin text-orange-600'
-                        : detectedGeoState
-                          ? 'text-emerald-600'
-                          : 'text-stone-500'
+                        : gpsEngineStatus === 'denied'
+                          ? 'text-red-600'
+                          : detectedGeoState
+                            ? 'text-emerald-600'
+                            : 'text-stone-500'
                     }`}
                   />
-                  <span className="hidden xl:inline">
-                    {gpsBusy
-                      ? 'GPS...'
-                      : detectedGeoState
-                        ? `GPS · ${detectedGeoState.nearestCity}`
-                        : 'Activer GPS'}
-                  </span>
+                  {gpsEngineStatus === 'denied' ? (
+                    <span data-testid="header-gps-denied-badge" className="font-bold">
+                      GPS refusé — Autoriser
+                    </span>
+                  ) : (
+                    <span className="hidden xl:inline">
+                      {gpsBusy
+                        ? 'GPS...'
+                        : detectedGeoState
+                          ? `GPS · ${detectedGeoState.nearestCity}`
+                          : 'Activer GPS'}
+                    </span>
+                  )}
                 </button>
                 <PWAInstallButton variant="header" onInstalledNotify={(msg) => notify(msg)} />
                 <button
@@ -12739,6 +12866,10 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
               ),
               isSuperAdmin,
             }}
+            presenceSyncStatus={presenceSyncStatus}
+            onForcePresenceAndGpsSync={() => {
+              void handleActivateOrRefreshGps();
+            }}
           />
         )}
 
@@ -12771,6 +12902,13 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
             unreadChatByUid={unreadChatByUid}
             coachingReadyUids={coachingReadyUids}
             onRequestMyGpsRefresh={handleActivateOrRefreshGps}
+            onForceRefreshPresencesFromServer={async () => {
+              const list = await fetchAllUserPresencesFromServer();
+              if (list.length > 0) {
+                setUserPresences(list);
+              }
+              return list.length;
+            }}
             onOpenLocalApiHub={() => setShowApiHub(true)}
             onNotify={notify}
           />

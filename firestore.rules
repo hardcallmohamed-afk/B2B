@@ -625,6 +625,21 @@ service cloud.firestore {
         && data.createdAt is timestamp;
     }
 
+    function isValidRtcIceConfig(data) {
+      return data.keys().hasAll([
+          'iceServersJson', 'turnEnabled', 'providerLabel', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'iceServersJson', 'turnEnabled', 'providerLabel', 'updatedBy', 'createdAt', 'updatedAt'
+        ])
+        && data.iceServersJson is string && data.iceServersJson.size() <= 4000
+        && data.turnEnabled is bool
+        && data.providerLabel is string && data.providerLabel.size() <= 120
+        && (!('updatedBy' in data) || (data.updatedBy is string && isValidId(data.updatedBy)))
+        && (!('createdAt' in data) || data.createdAt is timestamp)
+        && data.updatedAt is timestamp;
+    }
+
     function isValidEmailSkill(data, userId, skillId) {
       return data.keys().hasAll([
           'ownerId', 'id', 'nom', 'description', 'role', 'regles', 'ctaStyle',
@@ -949,43 +964,6 @@ service cloud.firestore {
               !('role' in existing())
               || incoming().role == existing().role
               || incoming().role == get(/databases/$(database)/documents/app_users/$(userId)).data.role
-            )
-            && (
-              (
-                'activeDateKey' in existing()
-                && 'todayWorkedSeconds' in existing()
-                && existing().activeDateKey is string
-                && existing().todayWorkedSeconds is number
-                && existing().todayWorkedSeconds >= 0
-                && existing().todayWorkedSeconds <= 86400
-                && incoming().activeDateKey == existing().activeDateKey
-                && incoming().todayWorkedSeconds >= existing().todayWorkedSeconds
-                && incoming().todayWorkedSeconds <= existing().todayWorkedSeconds + 600
-              )
-              || (
-                (
-                  !('activeDateKey' in existing())
-                  || !('todayWorkedSeconds' in existing())
-                  || !(existing().activeDateKey is string)
-                  || !(existing().todayWorkedSeconds is number)
-                  || existing().todayWorkedSeconds < 0
-                  || existing().todayWorkedSeconds > 86400
-                  || incoming().activeDateKey != existing().activeDateKey
-                )
-                && incoming().todayWorkedSeconds >= 0
-                && incoming().todayWorkedSeconds <= 600
-              )
-            )
-            && incoming().todayWorkedSeconds <= 86400
-            && (
-              !('totalWorkedSeconds' in existing())
-              || !(existing().totalWorkedSeconds is number)
-              || existing().totalWorkedSeconds < 0
-              || existing().totalWorkedSeconds > 100000000
-              || (
-                incoming().totalWorkedSeconds >= existing().totalWorkedSeconds
-                && incoming().totalWorkedSeconds <= existing().totalWorkedSeconds + 600
-              )
             )
             && (
               incoming().diff(existing()).affectedKeys().hasOnly([
@@ -1457,6 +1435,35 @@ service cloud.firestore {
           && isValidId(candId)
           && (isSuperAdmin() || isOwner(collabUid));
       }
+    }
+
+    // 15. Collection: /app_config/{configId} (Non-Sensitive Shared WebRTC ICE/TURN Relay Config for 4G/5G NAT Traversal)
+    match /app_config/{configId} {
+      allow get: if configId == 'rtc_ice'
+        && (isSuperAdmin() || isApprovedMember(request.auth.uid));
+
+      allow list: if false;
+
+      allow create: if isSuperAdmin()
+        && configId == 'rtc_ice'
+        && isValidRtcIceConfig(incoming())
+        && (!('createdAt' in incoming()) || incoming().createdAt == request.time)
+        && incoming().updatedAt == request.time;
+
+      allow update: if isSuperAdmin()
+        && configId == 'rtc_ice'
+        && isValidRtcIceConfig(incoming())
+        && (
+          !('createdAt' in existing())
+          || ('createdAt' in incoming() && incoming().createdAt == existing().createdAt)
+          || ('createdAt' in incoming() && incoming().createdAt == request.time)
+        )
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'iceServersJson', 'turnEnabled', 'providerLabel', 'updatedBy', 'createdAt', 'updatedAt'
+        ]);
+
+      allow delete: if isSuperAdmin() && configId == 'rtc_ice';
     }
   }
 }

@@ -882,6 +882,73 @@ export function computeTeamBoundsZoom(
   return { centerLat, centerLng, zoom: 5 };
 }
 
+export type GpsEngineStatus =
+  | 'acquiring'
+  | 'gps_live'
+  | 'wifi_live'
+  | 'ip_fallback'
+  | 'denied'
+  | 'unsupported';
+
+export interface GpsAccuracyBadgeInfo {
+  tier: 'precise' | 'wifi_cell' | 'approx';
+  label: string;
+  shortLabel: string;
+  badgeCls: string;
+}
+
+export function formatGpsAccuracyBadge(
+  source: 'gps_live' | 'zone_reseau',
+  accuracyMeters: number | null | undefined
+): GpsAccuracyBadgeInfo {
+  const acc = typeof accuracyMeters === 'number' && Number.isFinite(accuracyMeters) && accuracyMeters > 0
+    ? Math.round(accuracyMeters)
+    : null;
+
+  if (source === 'gps_live' && acc !== null && acc <= 100) {
+    return {
+      tier: 'precise',
+      label: `GPS Précis (±${acc}m)`,
+      shortLabel: 'GPS Précis',
+      badgeCls: 'bg-emerald-50 text-emerald-700 border-emerald-200',
+    };
+  }
+
+  if (source === 'gps_live' && acc !== null && acc <= 1500) {
+    return {
+      tier: 'wifi_cell',
+      label: `Wi-Fi / 4G (±${acc}m)`,
+      shortLabel: 'Wi-Fi / 4G',
+      badgeCls: 'bg-amber-50 text-amber-700 border-amber-200',
+    };
+  }
+
+  const km = acc !== null && acc > 1000 ? Math.max(1, Math.round(acc / 1000)) : null;
+  return {
+    tier: 'approx',
+    label: km ? `Position approximative IP / Zone (±${km} km)` : 'Position approximative IP / Zone',
+    shortLabel: 'Position approximative IP / Zone',
+    badgeCls: 'bg-stone-100 text-stone-700 border-stone-300',
+  };
+}
+
+export function computeDistanceMeters(
+  lat1: number,
+  lng1: number,
+  lat2: number,
+  lng2: number
+): number {
+  const toRad = (deg: number) => (deg * Math.PI) / 180;
+  const R = 6371000;
+  const dLat = toRad(lat2 - lat1);
+  const dLng = toRad(lng2 - lng1);
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLng / 2) * Math.sin(dLng / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return Math.round(R * c);
+}
+
 export interface AutoAcquiredCoordinates {
   lat: number;
   lng: number;
@@ -900,13 +967,49 @@ const AUTO_GEO_CACHE_KEY = 'op_auto_device_coords_v1';
  */
 export function startAutomaticMultiPlatformLocationEngine(params: {
   onLocationUpdate: (coords: AutoAcquiredCoordinates) => void;
+  onStatusChange?: (status: GpsEngineStatus) => void;
 }): () => void {
   let disposed = false;
   let watchId: number | null = null;
+  let lowAccWatchId: number | null = null;
   let retryIntervalId: number | null = null;
+  let highAccRetryIntervalId: number | null = null;
   let hasHardwareFix = false;
   let lastBestAccuracy = Infinity;
   let lastBestFixAtMs = 0;
+  let currentStatus: GpsEngineStatus = 'acquiring';
+
+  const emitStatus = (next: GpsEngineStatus) => {
+    if (disposed) return;
+    if (currentStatus !== next) {
+      currentStatus = next;
+      params.onStatusChange?.(next);
+    }
+  };
+
+  params.onStatusChange?.('acquiring');
+
+  const clearHighAccWatch = () => {
+    if (watchId !== null && typeof navigator !== 'undefined' && 'geolocation' in navigator) {
+      try {
+        navigator.geolocation.clearWatch(watchId);
+      } catch {
+        // ignore
+      }
+      watchId = null;
+    }
+  };
+
+  const clearLowAccWatch = () => {
+    if (lowAccWatchId !== null && typeof navigator !== 'undefined' && 'geolocation' in navigator) {
+      try {
+        navigator.geolocation.clearWatch(lowAccWatchId);
+      } catch {
+        // ignore
+      }
+      lowAccWatchId = null;
+    }
+  };
 
   const saveAndEmit = (coords: AutoAcquiredCoordinates) => {
     if (disposed) return;
@@ -938,6 +1041,11 @@ export function startAutomaticMultiPlatformLocationEngine(params: {
       if (coords.accuracyMeters <= lastBestAccuracy || nowMs - lastBestFixAtMs >= 45_000) {
         lastBestAccuracy = coords.accuracyMeters;
         lastBestFixAtMs = nowMs;
+      }
+      emitStatus(coords.accuracyMeters <= 100 ? 'gps_live' : 'wifi_live');
+    } else if (coords.method === 'ip_geo') {
+      if (currentStatus !== 'denied' && currentStatus !== 'gps_live' && currentStatus !== 'wifi_live') {
+        emitStatus('ip_fallback');
       }
     }
 
@@ -1071,44 +1179,89 @@ export function startAutomaticMultiPlatformLocationEngine(params: {
       typeof pos.coords.speed === 'number' && Number.isFinite(pos.coords.speed) && pos.coords.speed > 0
         ? Math.round(pos.coords.speed * 3.6)
         : 0;
+    const acc = Math.max(3, Math.round(pos.coords.accuracy || (highAcc ? 10 : 25)));
     saveAndEmit({
       lat: pos.coords.latitude,
       lng: pos.coords.longitude,
-      accuracyMeters: Math.max(3, Math.round(pos.coords.accuracy || (highAcc ? 10 : 25))),
+      accuracyMeters: acc,
       speedKmh: spdKmh,
-      method: highAcc ? 'gps_hardware' : 'wifi_network',
+      method: highAcc && acc <= 150 ? 'gps_hardware' : 'wifi_network',
     });
   };
 
-  const startHtml5Geolocation = () => {
+  const startLowAccuracyWatchFallback = () => {
     if (disposed || typeof navigator === 'undefined' || !('geolocation' in navigator)) return;
+    if (lowAccWatchId !== null) return;
+    try {
+      lowAccWatchId = navigator.geolocation.watchPosition(
+        (pos) => handleNativePosition(pos, false),
+        (err) => {
+          clearLowAccWatch();
+          if (err?.code === 1) {
+            emitStatus('denied');
+            void fetchNetworkGeoFallback();
+          }
+        },
+        {
+          enableHighAccuracy: false,
+          maximumAge: 10_000,
+          timeout: 12_000,
+        }
+      );
+    } catch {
+      lowAccWatchId = null;
+    }
+  };
+
+  const startHtml5Geolocation = () => {
+    if (disposed) return;
+    if (typeof navigator === 'undefined' || !('geolocation' in navigator)) {
+      emitStatus('unsupported');
+      return;
+    }
     try {
       // Fast low-latency Wi-Fi/Cell fix first so PC & phones get an immediate coordinate
       navigator.geolocation.getCurrentPosition(
         (pos) => handleNativePosition(pos, false),
-        () => {},
+        (err) => {
+          if (err?.code === 1) {
+            emitStatus('denied');
+            void fetchNetworkGeoFallback();
+          }
+        },
         { enableHighAccuracy: false, maximumAge: 10_000, timeout: 6_000 }
       );
 
       // High-Accuracy GPS fix
       navigator.geolocation.getCurrentPosition(
         (pos) => handleNativePosition(pos, true),
-        () => {},
+        (err) => {
+          if (err?.code === 1) {
+            emitStatus('denied');
+            void fetchNetworkGeoFallback();
+          }
+        },
         { enableHighAccuracy: true, maximumAge: 2_000, timeout: 10_000 }
       );
 
-      if (watchId !== null) {
-        try {
-          navigator.geolocation.clearWatch(watchId);
-        } catch {
-          // ignore
-        }
-      }
+      clearHighAccWatch();
 
       watchId = navigator.geolocation.watchPosition(
-        (pos) => handleNativePosition(pos, true),
-        () => {
-          // If High-Accuracy watch fails (e.g. desktop PC without GPS chip), fallback to Wi-Fi triangulation
+        (pos) => {
+          clearLowAccWatch();
+          handleNativePosition(pos, true);
+        },
+        (err) => {
+          // CRITICAL: Always clear and null out watchId on error so fallback watch & polling loop activate!
+          clearHighAccWatch();
+          if (err?.code === 1) {
+            clearLowAccWatch();
+            emitStatus('denied');
+            void fetchNetworkGeoFallback();
+            return;
+          }
+          // TIMEOUT (3) or POSITION_UNAVAILABLE (2): switch automatically to low-accuracy watch + immediate Wi-Fi/4G fix
+          startLowAccuracyWatchFallback();
           if (!disposed && typeof navigator !== 'undefined' && 'geolocation' in navigator) {
             navigator.geolocation.getCurrentPosition(
               (pos) => handleNativePosition(pos, false),
@@ -1130,22 +1283,33 @@ export function startAutomaticMultiPlatformLocationEngine(params: {
 
   startHtml5Geolocation();
 
-  // Only fall back to periodic polling if watchPosition could not be established
+  // Periodic 15s polling when high-accuracy watch is not active (keeps Wi-Fi/4G position live on desktop & indoors)
   if (typeof window !== 'undefined') {
     retryIntervalId = window.setInterval(() => {
-      if (disposed || watchId !== null) return;
+      if (disposed || currentStatus === 'denied') return;
+      if (watchId !== null) return;
       if (typeof navigator !== 'undefined' && 'geolocation' in navigator) {
         try {
           navigator.geolocation.getCurrentPosition(
             (pos) => handleNativePosition(pos, false),
-            () => {},
-            { enableHighAccuracy: false, maximumAge: 10_000, timeout: 6_000 }
+            (err) => {
+              if (err?.code === 1) {
+                emitStatus('denied');
+              }
+            },
+            { enableHighAccuracy: false, maximumAge: 8_000, timeout: 6_000 }
           );
         } catch {
           // ignore
         }
       }
-    }, 30_000);
+    }, 15_000);
+
+    // Retry high-accuracy satellite GPS every 60s when degraded to low-accuracy watch
+    highAccRetryIntervalId = window.setInterval(() => {
+      if (disposed || currentStatus === 'denied' || watchId !== null) return;
+      startHtml5Geolocation();
+    }, 60_000);
   }
 
   // On Apple iOS Safari & Android mobile browsers, geolocation accepts cleanly on first user gesture
@@ -1178,9 +1342,18 @@ export function startAutomaticMultiPlatformLocationEngine(params: {
       .then((status) => {
         if (disposed) return;
         permStatusRef = status;
+        if (status.state === 'denied') {
+          emitStatus('denied');
+        }
         status.onchange = () => {
-          if (!disposed && status.state === 'granted') {
+          if (disposed) return;
+          if (status.state === 'granted') {
+            emitStatus('acquiring');
             startHtml5Geolocation();
+          } else if (status.state === 'denied') {
+            clearHighAccWatch();
+            clearLowAccWatch();
+            emitStatus('denied');
           }
         };
       })
@@ -1196,13 +1369,11 @@ export function startAutomaticMultiPlatformLocationEngine(params: {
     if (retryIntervalId !== null && typeof window !== 'undefined') {
       window.clearInterval(retryIntervalId);
     }
-    if (watchId !== null && typeof navigator !== 'undefined' && 'geolocation' in navigator) {
-      try {
-        navigator.geolocation.clearWatch(watchId);
-      } catch {
-        // ignore
-      }
+    if (highAccRetryIntervalId !== null && typeof window !== 'undefined') {
+      window.clearInterval(highAccRetryIntervalId);
     }
+    clearHighAccWatch();
+    clearLowAccWatch();
     if (typeof window !== 'undefined') {
       window.removeEventListener('pointerdown', handleFirstUserGesture);
       window.removeEventListener('touchstart', handleFirstUserGesture);

@@ -389,7 +389,7 @@ async function startServer() {
     });
   });
 
-  app.get('/api/rtc/ice-servers', (_req, res) => {
+  app.get('/api/rtc/ice-servers', async (_req, res) => {
     const iceServers: Array<{
       urls: string | string[];
       username?: string;
@@ -400,22 +400,52 @@ async function startServer() {
           'stun:stun.l.google.com:19302',
           'stun:stun1.l.google.com:19302',
           'stun:stun2.l.google.com:19302',
+          'stun:stun.cloudflare.com:3478',
         ],
       },
     ];
+    let turnConfigured = false;
+    const turnApiUrl = process.env.TURN_CREDENTIAL_API_URL?.trim();
+    if (turnApiUrl) {
+      try {
+        const resp = await fetch(turnApiUrl, { signal: AbortSignal.timeout(4000) });
+        if (resp.ok) {
+          const payload = (await resp.json()) as unknown;
+          const dynamicList = Array.isArray(payload)
+            ? payload
+            : Array.isArray((payload as { iceServers?: unknown[] })?.iceServers)
+              ? (payload as { iceServers: unknown[] }).iceServers
+              : [];
+          for (const item of dynamicList) {
+            if (item && typeof item === 'object' && 'urls' in item) {
+              const entry = item as { urls: string | string[]; username?: string; credential?: string };
+              iceServers.push(entry);
+              const urlsArr = Array.isArray(entry.urls) ? entry.urls : [entry.urls];
+              if (urlsArr.some((u) => typeof u === 'string' && /^turns?:/i.test(u.trim()))) {
+                turnConfigured = true;
+              }
+            }
+          }
+        }
+      } catch {
+        // Fallback to static TURN_URL env vars if dynamic endpoint is unreachable
+      }
+    }
+
     const turnUrl = process.env.TURN_URL?.trim();
     const turnUsername = process.env.TURN_USERNAME?.trim();
     const turnCredential = process.env.TURN_CREDENTIAL?.trim();
-    if (turnUrl) {
+    if (!turnConfigured && turnUrl) {
       iceServers.push({
         urls: turnUrl.includes(',') ? turnUrl.split(',').map((u) => u.trim()).filter(Boolean) : turnUrl,
         ...(turnUsername ? { username: turnUsername } : {}),
         ...(turnCredential ? { credential: turnCredential } : {}),
       });
+      turnConfigured = true;
     }
     res.json({
       iceServers,
-      turnConfigured: Boolean(turnUrl),
+      turnConfigured,
     });
   });
 

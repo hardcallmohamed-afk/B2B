@@ -12,6 +12,7 @@ import {
   Mail,
   MapPin,
   Phone,
+  RefreshCw,
   Save,
   ShieldCheck,
   SlidersHorizontal,
@@ -151,6 +152,12 @@ interface AccountSettingsPanelProps {
     deviceLabel: string;
     isSuperAdmin: boolean;
   };
+  presenceSyncStatus?: {
+    ok: boolean;
+    lastSyncIso: string;
+    error: string;
+  };
+  onForcePresenceAndGpsSync?: () => void;
 }
 
 export const AccountSettingsPanel: React.FC<AccountSettingsPanelProps> = ({
@@ -177,6 +184,8 @@ export const AccountSettingsPanel: React.FC<AccountSettingsPanelProps> = ({
   onTestBadgeAlert,
   onNotify,
   myPresenceStatus,
+  presenceSyncStatus,
+  onForcePresenceAndGpsSync,
 }) => {
   const [displayName, setDisplayName] = useState(profile.displayName);
   const [avatarDataUrl, setAvatarDataUrl] = useState(profile.avatarDataUrl);
@@ -507,6 +516,48 @@ export const AccountSettingsPanel: React.FC<AccountSettingsPanelProps> = ({
                   <strong className="text-emerald-700">En ligne</strong> en temps réel.
                 </div>
               )}
+
+              {/* Diagnostic de synchro Firestore user_presence en direct + Bouton Forcer synchro présence & GPS */}
+              <div
+                data-testid="account-presence-sync-diagnostic"
+                className={`rounded-lg border px-2.5 py-1.5 text-[11px] flex flex-wrap items-center justify-between gap-2 ${
+                  presenceSyncStatus && !presenceSyncStatus.ok
+                    ? 'bg-red-50 border-red-200 text-red-800'
+                    : 'bg-emerald-50/70 border-emerald-200 text-emerald-900'
+                }`}
+              >
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <span
+                    className={`w-2 h-2 rounded-full shrink-0 ${
+                      presenceSyncStatus && !presenceSyncStatus.ok
+                        ? 'bg-red-500'
+                        : 'bg-emerald-500 animate-pulse'
+                    }`}
+                  />
+                  <strong>Synchro Présence &amp; GPS Firestore :</strong>
+                  <span>
+                    {presenceSyncStatus && !presenceSyncStatus.ok
+                      ? `Erreur (${presenceSyncStatus.error || 'Écriture différée'})`
+                      : 'Synchronisé avec le Cloud'}
+                  </span>
+                  {presenceSyncStatus?.lastSyncIso && (
+                    <span className="text-[10px] opacity-80 font-mono">
+                      · {new Date(presenceSyncStatus.lastSyncIso).toLocaleTimeString('fr-FR')}
+                    </span>
+                  )}
+                </div>
+                {onForcePresenceAndGpsSync && (
+                  <button
+                    type="button"
+                    data-testid="force-presence-gps-sync-btn"
+                    onClick={onForcePresenceAndGpsSync}
+                    className="px-2 py-0.5 rounded-md bg-white hover:bg-stone-100 border border-stone-300 text-stone-800 font-bold text-[10px] inline-flex items-center gap-1 shadow-2xs transition-colors"
+                  >
+                    <RefreshCw className="w-3 h-3 text-orange-600" />
+                    Forcer la synchro présence &amp; GPS
+                  </button>
+                )}
+              </div>
 
               <div className="flex flex-wrap items-center gap-1.5 pt-1">
                 <button

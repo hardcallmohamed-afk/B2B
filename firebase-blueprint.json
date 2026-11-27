@@ -1198,6 +1198,20 @@
         "createdAt": { "type": "string", "format": "date-time" }
       },
       "required": ["id", "senderUid", "fromRole", "candidateJson", "createdAtIso", "createdAt"]
+    },
+    "RtcIceConfig": {
+      "title": "RtcIceConfig",
+      "description": "Configuration non-sensible des serveurs ICE/TURN WebRTC pour la traversée NAT 4G/5G en mode statique GitHub Pages.",
+      "type": "object",
+      "properties": {
+        "iceServersJson": { "type": "string", "maxLength": 4000 },
+        "turnEnabled": { "type": "boolean" },
+        "providerLabel": { "type": "string", "maxLength": 120 },
+        "updatedBy": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["iceServersJson", "turnEnabled", "providerLabel", "updatedAt"]
     }
   },
   "firestore": {
@@ -1206,6 +1220,12 @@
         "$ref": "#/entities/ApiKeyConfig"
       },
       "description": "Coffre des clés API externes (Groq, Mistral, Gemini, etc.) accessible exclusivement au Super-Admin."
+    },
+    "/app_config/{configId}": {
+      "schema": {
+        "$ref": "#/entities/RtcIceConfig"
+      },
+      "description": "Configuration ICE/TURN WebRTC partagée aux membres approuvés pour le coaching audio 4G/5G Maroc."
     },
     "/app_users/{userId}": {
       "schema": {
