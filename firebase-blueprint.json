@@ -40,8 +40,7 @@
         },
         "avatarDataUrl": {
           "type": "string",
-          "maxLength": 45000,
-          "pattern": "^(|data:image/(jpeg|png|webp);base64,[A-Za-z0-9+/=]+)$"
+          "maxLength": 45000
         },
         "phonePro": {
           "type": "string",
@@ -480,8 +479,7 @@
         },
         "avatarDataUrl": {
           "type": "string",
-          "maxLength": 45000,
-          "pattern": "^(|data:image/(jpeg|png|webp);base64,[A-Za-z0-9+/=]+)$"
+          "maxLength": 45000
         },
         "createdAt": {
           "type": "string",
@@ -725,8 +723,7 @@
         },
         "avatarDataUrl": {
           "type": "string",
-          "maxLength": 45000,
-          "pattern": "^(|data:image/(jpeg|png|webp);base64,[A-Za-z0-9+/=]+)$"
+          "maxLength": 45000
         },
         "role": {
           "type": "string",

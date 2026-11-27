@@ -3238,6 +3238,7 @@ export default function App() {
     deviceLabel: string;
     baseDeviceLabel: string;
     closed: boolean;
+    manualSignOut?: boolean;
   } | null>(null);
   const lastNetworkHeartbeatMsRef = useRef<number>(0);
   const lastSelfHealPresenceMsRef = useRef<number>(0);
@@ -3796,11 +3797,12 @@ export default function App() {
           if (
             cur &&
             cur.uid === uid &&
-            !cur.closed &&
+            !cur.manualSignOut &&
             document.visibilityState !== 'hidden' &&
             navigator.onLine !== false &&
             now - lastSelfHealPresenceMsRef.current >= 6000
           ) {
+            cur.closed = false;
             lastSelfHealPresenceMsRef.current = now;
             lastNetworkHeartbeatMsRef.current = now;
             const snapNow = latestLocalStateRef.current;
@@ -3923,11 +3925,24 @@ export default function App() {
         });
         setMyPresenceRecord(record);
 
-        // Auto-réparation immédiate : si l'utilisateur est actif au premier plan mais que Firestore indique hors ligne / ancienne session
+        // Synchroniser immédiatement les compteurs de base avec le serveur pour éviter tout écrasement à 0s/15s
         const cur = activeAttendanceRef.current;
+        if (cur && cur.uid === uid) {
+          if (record.activeDateKey === cur.dateKey && record.todayWorkedSeconds > cur.todayBaseSeconds) {
+            cur.todayBaseSeconds = record.todayWorkedSeconds;
+          }
+          if (record.totalWorkedSeconds > cur.totalBaseSeconds) {
+            cur.totalBaseSeconds = record.totalWorkedSeconds;
+          }
+        }
+
+        // Auto-réparation : si l'utilisateur est actif au premier plan mais que Firestore indique hors ligne
+        // ou une ancienne session (après la fenêtre d'initialisation de 10s de startAttendanceSession)
+        const isInitializingSession = Boolean(cur && Date.now() - cur.startedAtMs < 10_000);
         if (
           cur &&
           cur.uid === uid &&
+          !isInitializingSession &&
           (!record.isOnline || (cur.sessionId && record.currentSessionId !== cur.sessionId)) &&
           (!snap.metadata.hasPendingWrites || !record.isOnline)
         ) {
@@ -4122,8 +4137,12 @@ export default function App() {
           }, 5000);
         }
       })
-      .catch(() => {
+      .catch((startErr) => {
         if (cancelled) return;
+        console.warn('[PresenceDebug] Échec startAttendanceSession initial, reprise dans 3s', {
+          uid,
+          message: startErr instanceof Error ? startErr.message : String(startErr),
+        });
         // Reprise automatique fiable après 3s : retenter startAttendanceSession + heartbeat auto-réparateur
         window.setTimeout(() => {
           if (cancelled) return;
@@ -4152,7 +4171,11 @@ export default function App() {
                 curRetry.totalBaseSeconds = Math.max(curRetry.totalBaseSeconds, r.totalWorkedSeconds);
                 curRetry.closed = false;
               })
-              .catch(() => {
+              .catch((retryErr) => {
+                console.warn('[PresenceDebug] Échec reprise startAttendanceSession, bascule heartbeat', {
+                  uid,
+                  message: retryErr instanceof Error ? retryErr.message : String(retryErr),
+                });
                 sessionReadyOnServer = true;
                 accumulateElapsed(true, true);
               });
@@ -5705,6 +5728,7 @@ export default function App() {
       const cur = activeAttendanceRef.current;
       if (cur && !cur.closed) {
         cur.closed = true;
+        cur.manualSignOut = true;
         const outMs = Date.now();
         const outKey = getLocalDateKey(new Date(outMs));
         if (outKey !== cur.dateKey) {

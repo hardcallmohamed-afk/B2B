@@ -1086,6 +1086,67 @@ export function sanitizeTeamStatPayload(input: TeamStatLike): SanitizedTeamStatD
   return doc;
 }
 
+export const TEAM_STAT_REQUIRED_DATA_KEYS = [
+  'uid',
+  'orgScope',
+  'displayName',
+  'role',
+  'zone',
+  'active',
+  'totalProspects',
+  'totalQualified',
+  'totalContracts',
+  'totalPayoutMad',
+  'xp',
+  'unlockedCount',
+  'manualBadges',
+  'monthlyHistory',
+] as const;
+
+export const TEAM_STAT_ALLOWED_KEYS = new Set<string>([
+  ...TEAM_STAT_REQUIRED_DATA_KEYS,
+  'avatarDataUrl',
+  'createdAt',
+  'updatedAt',
+]);
+
+export function inspectTeamStatDocKeys(existingData: Record<string, unknown>): {
+  missingDataKeys: string[];
+  extraKeys: string[];
+} {
+  const missingDataKeys = TEAM_STAT_REQUIRED_DATA_KEYS.filter(
+    (key) => !(key in existingData)
+  );
+  const extraKeys = Object.keys(existingData).filter(
+    (key) => !TEAM_STAT_ALLOWED_KEYS.has(key)
+  );
+  return { missingDataKeys, extraKeys };
+}
+
+export function buildTeamStatRepairUpdatePayload(
+  existingData: Record<string, unknown>,
+  cleanDoc: SanitizedTeamStatDoc,
+  sentinels: {
+    updatedAtSentinel: unknown;
+    createdAtSentinel: unknown;
+    deleteFieldSentinel: unknown;
+    hasValidCreatedAtTimestamp: boolean;
+  }
+): Record<string, unknown> {
+  const payload: Record<string, unknown> = {
+    ...cleanDoc,
+    updatedAt: sentinels.updatedAtSentinel,
+  };
+  if (!sentinels.hasValidCreatedAtTimestamp) {
+    payload.createdAt = sentinels.createdAtSentinel;
+  }
+  const { extraKeys } = inspectTeamStatDocKeys(existingData);
+  for (const extraKey of extraKeys) {
+    payload[extraKey] = sentinels.deleteFieldSentinel;
+  }
+  return payload;
+}
+
 export interface SignedContractLike {
   id: string;
   ownerId: string;

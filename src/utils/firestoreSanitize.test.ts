@@ -686,3 +686,54 @@ test('buildUserPresenceRepairUpdatePayload omits valid createdAt, heals invalid 
   assert.equal(repairMissingTs.createdAt, SERVER_TS_CREATED);
   assert.equal(repairMissingTs.oldField, DELETE_SENTINEL);
 });
+
+test('buildTeamStatRepairUpdatePayload detects missing/extra keys and heals legacy team_stats docs', async () => {
+  const {
+    sanitizeTeamStatPayload,
+    inspectTeamStatDocKeys,
+    buildTeamStatRepairUpdatePayload,
+  } = await import('./firestoreSanitize');
+
+  const cleanStat = sanitizeTeamStatPayload({
+    uid: 'eHlHBvh4asbWuG24W1RAph3SHil1',
+    displayName: 'HARDCALL CONTACT',
+    role: 'super_admin',
+    zone: 'Meknès',
+    active: true,
+    totalProspects: 10,
+    totalQualified: 4,
+    totalContracts: 2,
+    totalPayoutMad: 3500,
+    xp: 250,
+    unlockedCount: 5,
+    manualBadges: ['top_closer'],
+    monthlyHistory: ['2026-11:2:3500'],
+    avatarDataUrl: '',
+  });
+
+  const legacyStat: Record<string, unknown> = {
+    uid: 'eHlHBvh4asbWuG24W1RAph3SHil1',
+    displayName: 'HARDCALL',
+    legacyScore: 99,
+  };
+  const inspected = inspectTeamStatDocKeys(legacyStat);
+  assert.ok(inspected.missingDataKeys.includes('orgScope'));
+  assert.ok(inspected.missingDataKeys.includes('manualBadges'));
+  assert.deepEqual(inspected.extraKeys, ['legacyScore']);
+
+  const DELETE_SENTINEL = Symbol('deleteField');
+  const SERVER_TS_CREATED = Symbol('serverCreatedAt');
+  const SERVER_TS_UPDATED = Symbol('serverUpdatedAt');
+
+  const repaired = buildTeamStatRepairUpdatePayload(legacyStat, cleanStat, {
+    updatedAtSentinel: SERVER_TS_UPDATED,
+    createdAtSentinel: SERVER_TS_CREATED,
+    deleteFieldSentinel: DELETE_SENTINEL,
+    hasValidCreatedAtTimestamp: false,
+  });
+  assert.equal(repaired.createdAt, SERVER_TS_CREATED);
+  assert.equal(repaired.updatedAt, SERVER_TS_UPDATED);
+  assert.equal(repaired.legacyScore, DELETE_SENTINEL);
+  assert.equal(repaired.orgScope, 'orange_pro_team');
+});
+

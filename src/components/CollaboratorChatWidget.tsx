@@ -580,7 +580,15 @@ export const CollaboratorChatWidget: React.FC<CollaboratorChatWidgetProps> = ({
   };
 
   useEffect(() => {
+    const handlePageHide = (ev: PageTransitionEvent) => {
+      if (ev.persisted) return;
+      if (coachingActiveRef.current) {
+        void stopCollaboratorCoaching(true);
+      }
+    };
+    window.addEventListener('pagehide', handlePageHide);
     return () => {
+      window.removeEventListener('pagehide', handlePageHide);
       void stopCollaboratorCoaching(true);
     };
   }, []);

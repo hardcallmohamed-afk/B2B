@@ -131,36 +131,7 @@ service cloud.firestore {
     function isValidStringList(arr, maxItems, maxItemLen) {
       return arr is list
         && arr.size() <= maxItems
-        && (arr.size() == 0 || (arr[0] is string && arr[0].size() <= maxItemLen))
-        && (arr.size() <= 1 || (arr[1] is string && arr[1].size() <= maxItemLen))
-        && (arr.size() <= 2 || (arr[2] is string && arr[2].size() <= maxItemLen))
-        && (arr.size() <= 3 || (arr[3] is string && arr[3].size() <= maxItemLen))
-        && (arr.size() <= 4 || (arr[4] is string && arr[4].size() <= maxItemLen))
-        && (arr.size() <= 5 || (arr[5] is string && arr[5].size() <= maxItemLen))
-        && (arr.size() <= 6 || (arr[6] is string && arr[6].size() <= maxItemLen))
-        && (arr.size() <= 7 || (arr[7] is string && arr[7].size() <= maxItemLen))
-        && (arr.size() <= 8 || (arr[8] is string && arr[8].size() <= maxItemLen))
-        && (arr.size() <= 9 || (arr[9] is string && arr[9].size() <= maxItemLen))
-        && (arr.size() <= 10 || (arr[10] is string && arr[10].size() <= maxItemLen))
-        && (arr.size() <= 11 || (arr[11] is string && arr[11].size() <= maxItemLen))
-        && (arr.size() <= 12 || (arr[12] is string && arr[12].size() <= maxItemLen))
-        && (arr.size() <= 13 || (arr[13] is string && arr[13].size() <= maxItemLen))
-        && (arr.size() <= 14 || (arr[14] is string && arr[14].size() <= maxItemLen))
-        && (arr.size() <= 15 || (arr[15] is string && arr[15].size() <= maxItemLen))
-        && (arr.size() <= 16 || (arr[16] is string && arr[16].size() <= maxItemLen))
-        && (arr.size() <= 17 || (arr[17] is string && arr[17].size() <= maxItemLen))
-        && (arr.size() <= 18 || (arr[18] is string && arr[18].size() <= maxItemLen))
-        && (arr.size() <= 19 || (arr[19] is string && arr[19].size() <= maxItemLen))
-        && (arr.size() <= 20 || (arr[20] is string && arr[20].size() <= maxItemLen))
-        && (arr.size() <= 21 || (arr[21] is string && arr[21].size() <= maxItemLen))
-        && (arr.size() <= 22 || (arr[22] is string && arr[22].size() <= maxItemLen))
-        && (arr.size() <= 23 || (arr[23] is string && arr[23].size() <= maxItemLen))
-        && (arr.size() <= 24 || (arr[24] is string && arr[24].size() <= maxItemLen))
-        && (arr.size() <= 25 || (arr[25] is string && arr[25].size() <= maxItemLen))
-        && (arr.size() <= 26 || (arr[26] is string && arr[26].size() <= maxItemLen))
-        && (arr.size() <= 27 || (arr[27] is string && arr[27].size() <= maxItemLen))
-        && (arr.size() <= 28 || (arr[28] is string && arr[28].size() <= maxItemLen))
-        && (arr.size() <= 29 || (arr[29] is string && arr[29].size() <= maxItemLen));
+        && (arr.size() == 0 || (arr[0] is string && arr[0].size() <= maxItemLen));
     }
 
     // 3. Entity Validation Blueprints (Anti-Update-Gap)
@@ -208,14 +179,7 @@ service cloud.firestore {
     }
 
     function isValidAvatarDataUrl(val) {
-      return val is string
-        && val.size() <= 45000
-        && (
-          val.size() == 0
-          || (val.size() > 23 && val[0:23] == 'data:image/jpeg;base64,')
-          || (val.size() > 22 && val[0:22] == 'data:image/png;base64,')
-          || (val.size() > 23 && val[0:23] == 'data:image/webp;base64,')
-        );
+      return val is string && val.size() <= 45000;
     }
 
     function isValidTeamStat(data, targetUid) {
@@ -239,12 +203,12 @@ service cloud.firestore {
         && isValidTeamRole(data.role)
         && data.zone is string && data.zone.size() <= 100
         && data.active is bool
-        && data.totalProspects is int && data.totalProspects >= 0 && data.totalProspects <= 100000
-        && data.totalQualified is int && data.totalQualified >= 0 && data.totalQualified <= 100000
-        && data.totalContracts is int && data.totalContracts >= 0 && data.totalContracts <= 100000
+        && data.totalProspects is number && data.totalProspects >= 0 && data.totalProspects <= 100000
+        && data.totalQualified is number && data.totalQualified >= 0 && data.totalQualified <= 100000
+        && data.totalContracts is number && data.totalContracts >= 0 && data.totalContracts <= 100000
         && data.totalPayoutMad is number && data.totalPayoutMad >= 0 && data.totalPayoutMad <= 100000000
-        && data.xp is int && data.xp >= 0 && data.xp <= 10000000
-        && data.unlockedCount is int && data.unlockedCount >= 0 && data.unlockedCount <= 100
+        && data.xp is number && data.xp >= 0 && data.xp <= 10000000
+        && data.unlockedCount is number && data.unlockedCount >= 0 && data.unlockedCount <= 100
         && isValidStringList(data.manualBadges, 20, 64)
         && isValidStringList(data.monthlyHistory, 24, 40)
         && (!('avatarDataUrl' in data) || isValidAvatarDataUrl(data.avatarDataUrl))
@@ -354,7 +318,7 @@ service cloud.firestore {
         && data.loginAt is string && data.loginAt.size() >= 1 && data.loginAt.size() <= 64
         && data.lastSeenAt is string && data.lastSeenAt.size() >= 1 && data.lastSeenAt.size() <= 64
         && data.logoutAt is string && data.logoutAt.size() <= 64
-        && data.workedSeconds is int && data.workedSeconds >= 0 && data.workedSeconds <= 86400
+        && data.workedSeconds is number && data.workedSeconds >= 0 && data.workedSeconds <= 86400
         && data.deviceLabel is string && data.deviceLabel.size() >= 1 && data.deviceLabel.size() <= 160
         && isValidDeviceType(data.deviceType)
         && isValidSessionStatus(data.status)
@@ -395,7 +359,7 @@ service cloud.firestore {
         && (!('phonePro' in data) || (data.phonePro is string && data.phonePro.size() <= 30))
         && (!('zone' in data) || (data.zone is string && data.zone.size() <= 100))
         && (!('bio' in data) || (data.bio is string && data.bio.size() <= 240))
-        && (!('monthlyGoalContracts' in data) || (data.monthlyGoalContracts is int && data.monthlyGoalContracts >= 1 && data.monthlyGoalContracts <= 200))
+        && (!('monthlyGoalContracts' in data) || (data.monthlyGoalContracts is number && data.monthlyGoalContracts >= 1 && data.monthlyGoalContracts <= 200))
         && (!('notifyBadges' in data) || data.notifyBadges is bool)
         && (!('notifySound' in data) || data.notifySound is bool)
         && (!('compactUi' in data) || data.compactUi is bool)
@@ -745,18 +709,21 @@ service cloud.firestore {
 
       allow update: if isValidId(userId)
         && isValidTeamStat(incoming(), userId)
-        && incoming().uid == existing().uid
-        && incoming().orgScope == existing().orgScope
-        && incoming().createdAt == existing().createdAt
+        && (
+          ('createdAt' in existing() && existing().createdAt is timestamp && incoming().createdAt == existing().createdAt)
+          || incoming().createdAt == request.time
+        )
         && incoming().updatedAt == request.time
         && (
-          // Action 1: Super-Admin awards manual badges or updates any team stat fields
+          // Action 1: Super-Admin awards manual badges or updates/repairs any team stat fields (including legacy doc self-heal)
           (
             isSuperAdmin()
+            && (!('uid' in existing()) || !(existing().uid is string) || existing().uid == '' || incoming().uid == existing().uid)
+            && (!('orgScope' in existing()) || !(existing().orgScope is string) || existing().orgScope != 'orange_pro_team' || incoming().orgScope == existing().orgScope)
             && incoming().diff(existing()).affectedKeys().hasOnly([
-              'displayName', 'role', 'zone', 'active', 'avatarDataUrl',
+              'uid', 'orgScope', 'displayName', 'role', 'zone', 'active', 'avatarDataUrl',
               'totalProspects', 'totalQualified', 'totalContracts', 'totalPayoutMad',
-              'xp', 'unlockedCount', 'manualBadges', 'monthlyHistory', 'updatedAt'
+              'xp', 'unlockedCount', 'manualBadges', 'monthlyHistory', 'createdAt', 'updatedAt'
             ])
           )
           ||
@@ -764,6 +731,10 @@ service cloud.firestore {
           (
             isOwner(userId)
             && incoming().uid == request.auth.uid
+            && existing().uid == request.auth.uid
+            && existing().orgScope == 'orange_pro_team'
+            && existing().createdAt is timestamp
+            && incoming().createdAt == existing().createdAt
             && incoming().manualBadges == existing().manualBadges
             && incoming().role == existing().role
             && incoming().active == existing().active
@@ -910,7 +881,7 @@ service cloud.firestore {
         && isValidUserPresence(incoming(), userId)
         && (
           ('createdAt' in existing() && existing().createdAt is timestamp && incoming().createdAt == existing().createdAt)
-          || ((!('createdAt' in existing()) || !(existing().createdAt is timestamp)) && incoming().createdAt == request.time)
+          || incoming().createdAt == request.time
         )
         && incoming().updatedAt == request.time
         && (
@@ -920,17 +891,14 @@ service cloud.firestore {
             && (!('uid' in existing()) || !(existing().uid is string) || existing().uid == '' || incoming().uid == existing().uid)
             && (!('orgScope' in existing()) || !(existing().orgScope is string) || existing().orgScope != 'orange_pro_team' || incoming().orgScope == existing().orgScope)
             && (!('email' in existing()) || !(existing().email is string) || existing().email.size() < 3 || incoming().email.lower() == existing().email.lower() || userId == request.auth.uid)
-            && (
-              incoming().diff(existing()).affectedKeys().hasOnly([
-                'email', 'displayName', 'firstName', 'lastName', 'phonePro', 'avatarDataUrl',
-                'role', 'zone', 'isOnline', 'currentDevice', 'devicesUsed',
-                'lastLoginAt', 'lastLogoutAt', 'lastSeenAt', 'lastWorkDisconnectAt',
-                'workHoursDisconnectCount', 'workHoursDisconnectTimes',
-                'activeDateKey', 'todayWorkedSeconds', 'totalWorkedSeconds',
-                'currentSessionId', 'updatedAt'
-              ])
-              || !isValidUserPresence(existing(), userId)
-            )
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+              'uid', 'orgScope', 'email', 'displayName', 'firstName', 'lastName', 'phonePro', 'avatarDataUrl',
+              'role', 'zone', 'isOnline', 'currentDevice', 'devicesUsed',
+              'lastLoginAt', 'lastLogoutAt', 'lastSeenAt', 'lastWorkDisconnectAt',
+              'workHoursDisconnectCount', 'workHoursDisconnectTimes',
+              'activeDateKey', 'todayWorkedSeconds', 'totalWorkedSeconds',
+              'currentSessionId', 'createdAt', 'updatedAt'
+            ])
           )
           ||
           // Action 2: Collaborator updates own profile, device list, and live attendance status (role & email strictly bound)
@@ -939,7 +907,14 @@ service cloud.firestore {
             && incoming().uid == request.auth.uid
             && (!('uid' in existing()) || !(existing().uid is string) || existing().uid == '' || incoming().uid == existing().uid)
             && (!('orgScope' in existing()) || !(existing().orgScope is string) || existing().orgScope != 'orange_pro_team' || incoming().orgScope == existing().orgScope)
-            && (!('email' in existing()) || !(existing().email is string) || existing().email.size() < 3 || incoming().email.lower() == existing().email.lower())
+            && (
+              (('email' in existing()) && existing().email is string && existing().email.size() >= 3 && incoming().email.lower() == existing().email.lower())
+              || (
+                (!('email' in existing()) || !(existing().email is string) || existing().email.size() < 3)
+                && request.auth.token.email is string
+                && incoming().email.lower() == request.auth.token.email.lower()
+              )
+            )
             && (
               !('role' in existing())
               || incoming().role == existing().role
@@ -984,26 +959,22 @@ service cloud.firestore {
             )
             && (
               incoming().diff(existing()).affectedKeys().hasOnly([
-                'displayName', 'firstName', 'lastName', 'phonePro', 'avatarDataUrl',
+                'uid', 'orgScope', 'email', 'displayName', 'firstName', 'lastName', 'phonePro', 'avatarDataUrl',
                 'zone', 'isOnline', 'currentDevice', 'devicesUsed',
                 'lastLoginAt', 'lastLogoutAt', 'lastSeenAt', 'lastWorkDisconnectAt',
                 'workHoursDisconnectCount', 'workHoursDisconnectTimes',
                 'activeDateKey', 'todayWorkedSeconds', 'totalWorkedSeconds',
-                'currentSessionId', 'updatedAt'
+                'currentSessionId', 'createdAt', 'updatedAt'
               ])
               || (
                 incoming().diff(existing()).affectedKeys().hasOnly([
-                  'displayName', 'firstName', 'lastName', 'phonePro', 'avatarDataUrl',
+                  'uid', 'orgScope', 'email', 'displayName', 'firstName', 'lastName', 'phonePro', 'avatarDataUrl',
                   'role', 'zone', 'isOnline', 'currentDevice', 'devicesUsed',
                   'lastLoginAt', 'lastLogoutAt', 'lastSeenAt', 'lastWorkDisconnectAt',
                   'workHoursDisconnectCount', 'workHoursDisconnectTimes',
                   'activeDateKey', 'todayWorkedSeconds', 'totalWorkedSeconds',
-                  'currentSessionId', 'updatedAt'
+                  'currentSessionId', 'createdAt', 'updatedAt'
                 ])
-                && incoming().role == get(/databases/$(database)/documents/app_users/$(userId)).data.role
-              )
-              || (
-                !isValidUserPresence(existing(), userId)
                 && incoming().role == get(/databases/$(database)/documents/app_users/$(userId)).data.role
               )
             )

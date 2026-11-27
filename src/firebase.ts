@@ -40,6 +40,8 @@ import {
   sanitizeWorkspacePayload,
   sanitizeAppUserPayload,
   sanitizeTeamStatPayload,
+  inspectTeamStatDocKeys,
+  buildTeamStatRepairUpdatePayload,
   sanitizeSignedContractPayload,
   sanitizeApiKeyConfigPayload,
   sanitizeUserPresencePayload,
@@ -60,6 +62,7 @@ import {
   type EmailSkillLike,
   type WorkspaceLike,
   type TeamStatLike,
+  type SanitizedTeamStatDoc,
   type SignedContractLike,
   type ApiKeyConfigLike,
   type ActiviteLike,
@@ -662,51 +665,169 @@ export async function syncMyTeamStat(
   const ref = doc(db, 'team_stats', uid);
   const clean = sanitizeTeamStatPayload({ ...input, uid });
 
-  try {
-    const snap = await getDoc(ref);
-    if (!snap.exists()) {
-      const createPayload = isSuperAdmin
-        ? clean
-        : {
-            ...clean,
-            totalProspects: 0,
-            totalQualified: 0,
-            totalContracts: 0,
-            totalPayoutMad: 0,
-            xp: 0,
-            unlockedCount: 0,
-            manualBadges: [],
-            monthlyHistory: [],
-          };
-      await setDoc(ref, {
-        ...createPayload,
-        createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
-      });
-      return;
-    }
+  const repairTeamStatDoc = async (existingData: DocumentData, nextDoc: SanitizedTeamStatDoc) => {
+    const repairPayload = buildTeamStatRepairUpdatePayload(
+      existingData as Record<string, unknown>,
+      nextDoc,
+      {
+        updatedAtSentinel: serverTimestamp(),
+        createdAtSentinel: serverTimestamp(),
+        deleteFieldSentinel: deleteField(),
+        hasValidCreatedAtTimestamp: isFirestoreTimestampValue(existingData.createdAt),
+      }
+    );
+    await updateDoc(ref, repairPayload);
+  };
 
-    if (isSuperAdmin) {
-      const payload: DocumentData = {
-        displayName: clean.displayName,
-        role: clean.role,
-        zone: clean.zone,
-        active: clean.active,
-        totalProspects: clean.totalProspects,
-        totalQualified: clean.totalQualified,
-        totalContracts: clean.totalContracts,
-        totalPayoutMad: clean.totalPayoutMad,
-        xp: clean.xp,
-        unlockedCount: clean.unlockedCount,
-        monthlyHistory: clean.monthlyHistory,
-        updatedAt: serverTimestamp(),
+  const executeAttempt = async () => {
+    let diagStep = 'get';
+    let diagPrimaryErr = '';
+    let diagExisted = false;
+    let diagHadTs = false;
+    let diagMissingCount = 0;
+    let diagExtraCount = 0;
+
+    try {
+      const snap = await getDocFromServer(ref).catch(() => getDoc(ref));
+
+      const selfHealFromServer = async (fallbackPrev: DocumentData = {}) => {
+        diagStep = 'selfHeal_get';
+        const freshSnap = await getDocFromServer(ref).catch(() => snap);
+        if (!freshSnap.exists()) {
+          diagStep = 'selfHeal_create';
+          diagExisted = false;
+          const createPayload: SanitizedTeamStatDoc = isSuperAdmin
+            ? clean
+            : {
+                ...clean,
+                totalProspects: 0,
+                totalQualified: 0,
+                totalContracts: 0,
+                totalPayoutMad: 0,
+                xp: 0,
+                unlockedCount: 0,
+                manualBadges: [],
+                monthlyHistory: [],
+              };
+          await setDoc(ref, {
+            ...createPayload,
+            createdAt: serverTimestamp(),
+            updatedAt: serverTimestamp(),
+          });
+          return;
+        }
+        const freshData = freshSnap.data() || fallbackPrev;
+        diagExisted = true;
+        diagHadTs = isFirestoreTimestampValue(freshData.createdAt);
+        const { missingDataKeys, extraKeys } = inspectTeamStatDocKeys(freshData);
+        diagMissingCount = missingDataKeys.length;
+        diagExtraCount = extraKeys.length;
+
+        if (isSuperAdmin) {
+          diagStep = 'selfHeal_repair_update';
+          const repairedDoc: SanitizedTeamStatDoc = sanitizeTeamStatPayload({
+            ...clean,
+            uid,
+            manualBadges: Array.isArray(freshData.manualBadges)
+              ? (freshData.manualBadges as string[])
+              : clean.manualBadges,
+          });
+          await repairTeamStatDoc(freshData, repairedDoc);
+          return;
+        }
+
+        diagStep = 'collab_update';
+        const collabPayload: DocumentData = {
+          displayName: clean.displayName,
+          zone: clean.zone,
+          updatedAt: serverTimestamp(),
+        };
+        if (typeof clean.avatarDataUrl === 'string') {
+          collabPayload.avatarDataUrl = clean.avatarDataUrl;
+        }
+        await updateDoc(ref, collabPayload);
       };
-      if (typeof clean.avatarDataUrl === 'string') {
-        payload.avatarDataUrl = clean.avatarDataUrl;
+
+      if (!snap.exists()) {
+        diagStep = 'create_new';
+        diagExisted = false;
+        const createPayload = isSuperAdmin
+          ? clean
+          : {
+              ...clean,
+              totalProspects: 0,
+              totalQualified: 0,
+              totalContracts: 0,
+              totalPayoutMad: 0,
+              xp: 0,
+              unlockedCount: 0,
+              manualBadges: [],
+              monthlyHistory: [],
+            };
+        try {
+          await setDoc(ref, {
+            ...createPayload,
+            createdAt: serverTimestamp(),
+            updatedAt: serverTimestamp(),
+          });
+          return;
+        } catch (primaryErr) {
+          diagPrimaryErr = primaryErr instanceof Error ? primaryErr.message : String(primaryErr);
+          await selfHealFromServer();
+          return;
+        }
       }
-      await updateDoc(ref, payload);
-    } else {
+
+      const prev = snap.data();
+      diagExisted = true;
+      diagHadTs = isFirestoreTimestampValue(prev.createdAt);
+      const { missingDataKeys, extraKeys } = inspectTeamStatDocKeys(prev);
+      diagMissingCount = missingDataKeys.length;
+      diagExtraCount = extraKeys.length;
+
+      const hasValidSchema =
+        prev.uid === uid &&
+        prev.orgScope === 'orange_pro_team' &&
+        diagHadTs &&
+        diagMissingCount === 0 &&
+        diagExtraCount === 0;
+
+      if (isSuperAdmin) {
+        if (hasValidSchema) {
+          diagStep = 'fast_update';
+          const payload: DocumentData = {
+            displayName: clean.displayName,
+            role: clean.role,
+            zone: clean.zone,
+            active: clean.active,
+            totalProspects: clean.totalProspects,
+            totalQualified: clean.totalQualified,
+            totalContracts: clean.totalContracts,
+            totalPayoutMad: clean.totalPayoutMad,
+            xp: clean.xp,
+            unlockedCount: clean.unlockedCount,
+            monthlyHistory: clean.monthlyHistory,
+            updatedAt: serverTimestamp(),
+          };
+          if (typeof clean.avatarDataUrl === 'string') {
+            payload.avatarDataUrl = clean.avatarDataUrl;
+          }
+          try {
+            await updateDoc(ref, payload);
+            return;
+          } catch (primaryErr) {
+            diagPrimaryErr = primaryErr instanceof Error ? primaryErr.message : String(primaryErr);
+            await selfHealFromServer(prev);
+            return;
+          }
+        } else {
+          await selfHealFromServer(prev);
+          return;
+        }
+      }
+
       // Phase 3 Rules: Collaborator can only update displayName, zone, and avatarDataUrl on /team_stats
+      diagStep = 'collab_update';
       const payload: DocumentData = {
         displayName: clean.displayName,
         zone: clean.zone,
@@ -716,6 +837,25 @@ export async function syncMyTeamStat(
         payload.avatarDataUrl = clean.avatarDataUrl;
       }
       await updateDoc(ref, payload);
+    } catch (innerErr) {
+      throw withPresenceStepTag(
+        innerErr,
+        `step=${diagStep};exists=${diagExisted};hadTs=${diagHadTs};miss=${diagMissingCount};extra=${diagExtraCount}${diagPrimaryErr ? `;firstErr=${diagPrimaryErr.slice(0, 80)}` : ''};role=${clean.role};hist=${clean.monthlyHistory.length};badges=${clean.manualBadges.length}`
+      );
+    }
+  };
+
+  try {
+    await ensureFreshAuthUser(uid);
+    try {
+      await executeAttempt();
+    } catch (firstErr) {
+      if (isPermissionDeniedError(firstErr)) {
+        await ensureFreshAuthUser(uid, true);
+        await executeAttempt();
+      } else {
+        throw firstErr;
+      }
     }
   } catch (error) {
     handleFirestoreError(error, OperationType.WRITE, path);
@@ -1344,11 +1484,15 @@ function summarizePresenceDiag(
   const exRole = existing && typeof existing.role === 'string' ? existing.role : 'none';
   const exEmailOk =
     existing && typeof existing.email === 'string' ? existing.email.length >= 3 : false;
+  const exOrgOk = existing ? existing.orgScope === 'orange_pro_team' : false;
+  const exUpdTs = existing ? isFirestoreTimestampValue(existing.updatedAt) : false;
   return [
     `uidEq=${clean.uid === expectedUid}`,
     `role=${clean.role}`,
     `exRole=${exRole}`,
     `exEmailOk=${exEmailOk}`,
+    `exOrgOk=${exOrgOk}`,
+    `exUpdTs=${exUpdTs}`,
     `emailLen=${clean.email.length}`,
     `nameLen=${clean.displayName.length}`,
     `firstLen=${clean.firstName.length}`,
@@ -1747,8 +1891,18 @@ export async function startAttendanceSession(params: {
           displayName: params.displayName,
           firstName,
           lastName,
-          phonePro: params.phonePro,
-          avatarDataUrl: params.avatarDataUrl,
+          phonePro:
+            params.phonePro.trim().length > 0
+              ? params.phonePro
+              : base && typeof base.phonePro === 'string'
+                ? base.phonePro
+                : '',
+          avatarDataUrl:
+            params.avatarDataUrl.trim().length > 0
+              ? params.avatarDataUrl
+              : base && typeof base.avatarDataUrl === 'string'
+                ? base.avatarDataUrl
+                : '',
           role: VALID_TEAM_ROLES.has(params.role as never)
             ? params.role
             : base && typeof base.role === 'string' && VALID_TEAM_ROLES.has(base.role as never)
@@ -2167,8 +2321,14 @@ export async function heartbeatAttendanceSession(params: {
           updatedAt: serverTimestamp(),
         });
       }
-    } catch {
-      // Avoid crashing UI on transient network loss; next heartbeat will retry
+    } catch (hbErr) {
+      const fbHbErr = hbErr as { code?: string; message?: string };
+      console.warn('[PresenceDebug] Échec heartbeatAttendanceSession', {
+        uid: params.uid,
+        sessionId: safeSessionId,
+        code: fbHbErr?.code || 'unknown',
+        message: fbHbErr?.message || (hbErr instanceof Error ? hbErr.message : String(hbErr)),
+      });
     }
   }
 

@@ -4,18 +4,26 @@ import App from './App.tsx';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import './index.css';
 
-// Register PWA service worker for Chrome PC, Android, and Apple Safari installability & offline shell
+// Register PWA service worker in production; unregister stale dev service workers in dev preview
 try {
-  registerSW({
-    immediate: true,
-    onRegisteredSW(_swUrl, registration) {
-      if (registration) {
-        window.setInterval(() => {
-          void registration.update().catch(() => {});
-        }, 60 * 60 * 1000);
+  if (import.meta.env.DEV && typeof navigator !== 'undefined' && 'serviceWorker' in navigator) {
+    void navigator.serviceWorker.getRegistrations().then((registrations) => {
+      for (const reg of registrations) {
+        void reg.unregister().catch(() => {});
       }
-    },
-  });
+    });
+  } else {
+    registerSW({
+      immediate: true,
+      onRegisteredSW(_swUrl, registration) {
+        if (registration) {
+          window.setInterval(() => {
+            void registration.update().catch(() => {});
+          }, 60 * 60 * 1000);
+        }
+      },
+    });
+  }
 } catch {
   // Ignore in non-SW environments (e.g. unit tests)
 }
