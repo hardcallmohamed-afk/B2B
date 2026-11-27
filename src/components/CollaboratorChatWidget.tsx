@@ -29,6 +29,100 @@ import { formatDateTimeShort } from '../utils/attendance';
 import { canUseWhisperCoaching, isSupervisorRole } from '../utils/authAccess';
 import { resolveRtcIceConfiguration } from '../utils/rtcIceConfig';
 
+export const COACHING_OPT_IN_STORAGE_PREFIX = 'op_coaching_optin_';
+
+export function getCoachingOptInStorageKey(uid: string): string {
+  const cleanUid = String(uid || '').trim();
+  return cleanUid ? `${COACHING_OPT_IN_STORAGE_PREFIX}${cleanUid}` : '';
+}
+
+export function readCoachingOptInPreference(uid: string): boolean {
+  const key = getCoachingOptInStorageKey(uid);
+  if (!key || typeof window === 'undefined') return false;
+  try {
+    return window.localStorage.getItem(key) === '1';
+  } catch {
+    return false;
+  }
+}
+
+export function writeCoachingOptInPreference(uid: string, optedIn: boolean): void {
+  const key = getCoachingOptInStorageKey(uid);
+  if (!key || typeof window === 'undefined') return;
+  try {
+    if (optedIn) {
+      window.localStorage.setItem(key, '1');
+    } else {
+      window.localStorage.removeItem(key);
+    }
+  } catch {
+    // Ignore storage quota or private mode restrictions
+  }
+}
+
+export const CollaboratorCoachingStatusBadge: React.FC<{
+  coachingActive: boolean;
+  awaitingGestureResume: boolean;
+  coachingBusy: boolean;
+  onResume: () => void;
+  onStop: () => void;
+}> = ({ coachingActive, awaitingGestureResume, coachingBusy, onResume, onStop }) => {
+  if (coachingActive) {
+    return (
+      <div
+        data-testid="coaching-active-status-pill"
+        className="inline-flex items-center gap-1.5 rounded-2xl border border-emerald-200 bg-white/95 px-2.5 py-2 text-[11px] font-bold text-emerald-900 shadow-lg backdrop-blur-xs"
+      >
+        <span className="h-2 w-2 rounded-full bg-emerald-500 animate-pulse shrink-0" />
+        <span className="whitespace-nowrap">Audio actif</span>
+        <button
+          type="button"
+          data-testid="coaching-quick-stop-btn"
+          onClick={onStop}
+          title="Couper et révoquer le micro coaching"
+          aria-label="Couper le micro"
+          className="ml-0.5 inline-flex items-center gap-1 rounded-lg bg-red-50 hover:bg-red-100 border border-red-200 px-2 py-0.5 text-[10px] font-extrabold text-red-700 transition-colors"
+        >
+          <MicOff className="w-3 h-3" />
+          Couper
+        </button>
+      </div>
+    );
+  }
+
+  if (awaitingGestureResume) {
+    return (
+      <div
+        data-testid="coaching-resume-status-pill"
+        className="inline-flex items-center gap-1 rounded-2xl border border-amber-200 bg-white/95 px-2.5 py-1.5 text-[11px] font-bold text-amber-900 shadow-lg backdrop-blur-xs"
+      >
+        <button
+          type="button"
+          data-testid="coaching-resume-audio-btn"
+          disabled={coachingBusy}
+          onClick={onResume}
+          className="inline-flex items-center gap-1 rounded-lg bg-amber-100 hover:bg-amber-200 disabled:opacity-50 px-2 py-0.5 text-[10px] font-extrabold text-amber-950 transition-colors"
+        >
+          <Mic className="w-3 h-3 text-amber-800" />
+          {coachingBusy ? 'Reprise...' : 'Reprendre audio'}
+        </button>
+        <button
+          type="button"
+          data-testid="coaching-revoke-optin-btn"
+          onClick={onStop}
+          title="Désactiver la reprise automatique du micro"
+          aria-label="Désactiver la reprise automatique du micro"
+          className="p-1 rounded-lg text-stone-400 hover:text-red-600 hover:bg-red-50 transition-colors"
+        >
+          <X className="w-3 h-3" />
+        </button>
+      </div>
+    );
+  }
+
+  return null;
+};
+
 export const SupervisorCoachingPttPill: React.FC<{
   currentUserRole?: string;
   coachingActive: boolean;
@@ -193,6 +287,10 @@ export const CollaboratorChatWidget: React.FC<CollaboratorChatWidgetProps> = ({
   const [coachingDoc, setCoachingDoc] = useState<SanitizedCoachingSessionDoc | null>(null);
   const [coachingError, setCoachingError] = useState('');
   const [audioPlaybackBlocked, setAudioPlaybackBlocked] = useState(false);
+  const [hasPersistedOptIn, setHasPersistedOptIn] = useState<boolean>(() =>
+    readCoachingOptInPreference(currentUserUid)
+  );
+  const [awaitingGestureResume, setAwaitingGestureResume] = useState(false);
 
   const pcRef = useRef<RTCPeerConnection | null>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
@@ -202,14 +300,92 @@ export const CollaboratorChatWidget: React.FC<CollaboratorChatWidgetProps> = ({
   const pendingIceCandidatesRef = useRef<RTCIceCandidateInit[]>([]);
   const appliedAnswerRef = useRef<string>('');
   const coachingActiveRef = useRef<boolean>(false);
+  const coachingBusyRef = useRef<boolean>(false);
   const rebuildingOfferRef = useRef<boolean>(false);
   const wakeLockRef = useRef<{ release: () => Promise<void> } | null>(null);
   const keepaliveCtxRef = useRef<AudioContext | null>(null);
   const keepaliveAudioRef = useRef<HTMLAudioElement | null>(null);
+  const currentUserUidRef = useRef<string>(currentUserUid);
+  const currentUserNameRef = useRef<string>(currentUserName);
+  const revokedByUserRef = useRef<boolean>(false);
+  const autoResumeAttemptedRef = useRef<boolean>(false);
+  const clearGestureListenersRef = useRef<(() => void) | null>(null);
+  const clearPlaybackUnlockRef = useRef<(() => void) | null>(null);
 
   useEffect(() => {
     coachingActiveRef.current = coachingActive;
   }, [coachingActive]);
+
+  useEffect(() => {
+    currentUserUidRef.current = currentUserUid;
+    currentUserNameRef.current = currentUserName;
+  }, [currentUserUid, currentUserName]);
+
+  useEffect(() => {
+    revokedByUserRef.current = false;
+    autoResumeAttemptedRef.current = false;
+    setAwaitingGestureResume(false);
+    setHasPersistedOptIn(readCoachingOptInPreference(currentUserUid));
+  }, [currentUserUid]);
+
+  const clearGestureListeners = () => {
+    if (clearGestureListenersRef.current) {
+      clearGestureListenersRef.current();
+      clearGestureListenersRef.current = null;
+    }
+  };
+
+  const clearPlaybackUnlockListeners = () => {
+    if (clearPlaybackUnlockRef.current) {
+      clearPlaybackUnlockRef.current();
+      clearPlaybackUnlockRef.current = null;
+    }
+  };
+
+  const unlockRemoteAudioPlayback = () => {
+    if (keepaliveCtxRef.current?.state === 'suspended') {
+      void keepaliveCtxRef.current.resume().catch(() => {});
+    }
+    if (keepaliveAudioRef.current && keepaliveAudioRef.current.srcObject) {
+      void keepaliveAudioRef.current.play().catch(() => {});
+    }
+    if (remoteAudioRef.current) {
+      if (remoteAudioRef.current.srcObject) {
+        void remoteAudioRef.current
+          .play()
+          .then(() => setAudioPlaybackBlocked(false))
+          .catch(() => {});
+      } else {
+        // Warm up audio element under user gesture so future Push-to-Talk streams play cleanly
+        remoteAudioRef.current.muted = true;
+        void remoteAudioRef.current
+          .play()
+          .catch(() => {})
+          .finally(() => {
+            if (remoteAudioRef.current) {
+              remoteAudioRef.current.pause();
+              remoteAudioRef.current.muted = false;
+            }
+          });
+      }
+    }
+  };
+
+  const armPlaybackUnlockOnFirstGesture = () => {
+    if (typeof window === 'undefined' || clearPlaybackUnlockRef.current) return;
+    const onGesture = () => {
+      clearPlaybackUnlockListeners();
+      unlockRemoteAudioPlayback();
+    };
+    window.addEventListener('pointerdown', onGesture, { once: true, capture: true });
+    window.addEventListener('touchstart', onGesture, { once: true, capture: true });
+    window.addEventListener('keydown', onGesture, { once: true, capture: true });
+    clearPlaybackUnlockRef.current = () => {
+      window.removeEventListener('pointerdown', onGesture, { capture: true });
+      window.removeEventListener('touchstart', onGesture, { capture: true });
+      window.removeEventListener('keydown', onGesture, { capture: true });
+    };
+  };
 
   // Headless programmatic Audio elements so incoming earpiece audio works silently in background
   // in all modes without rendering any audio container, player, or supervision DOM element.
@@ -319,7 +495,9 @@ export const CollaboratorChatWidget: React.FC<CollaboratorChatWidgetProps> = ({
   // Rebuilds a fresh WebRTC offer using the ALREADY-AUTHORIZED mic stream (so Super-Admin can silently listen/disconnect/reconnect multiple times without interrupting the collaborator)
   const publishFreshOfferFromAuthorizedMic = async () => {
     const stream = localStreamRef.current;
-    if (!currentUserUid || !stream || !coachingActiveRef.current || rebuildingOfferRef.current) return;
+    const uid = currentUserUidRef.current;
+    const displayName = currentUserNameRef.current;
+    if (!uid || !stream || !coachingActiveRef.current || rebuildingOfferRef.current) return;
     const liveTrack = stream.getAudioTracks().find((t) => t.readyState === 'live');
     if (!liveTrack) {
       void stopCollaboratorCoaching(true);
@@ -344,7 +522,7 @@ export const CollaboratorChatWidget: React.FC<CollaboratorChatWidgetProps> = ({
       pendingIceCandidatesRef.current = [];
       appliedAnswerRef.current = '';
 
-      await clearCoachingCandidates(currentUserUid).catch(() => {});
+      await clearCoachingCandidates(uid).catch(() => {});
 
       const { iceServers } = await resolveRtcIceConfiguration();
       const pc = new RTCPeerConnection({ iceServers });
@@ -360,7 +538,10 @@ export const CollaboratorChatWidget: React.FC<CollaboratorChatWidgetProps> = ({
           void remoteAudioRef.current
             .play()
             .then(() => setAudioPlaybackBlocked(false))
-            .catch(() => setAudioPlaybackBlocked(true));
+            .catch(() => {
+              setAudioPlaybackBlocked(true);
+              armPlaybackUnlockOnFirstGesture();
+            });
         }
       };
 
@@ -374,8 +555,8 @@ export const CollaboratorChatWidget: React.FC<CollaboratorChatWidgetProps> = ({
           if (!sessionReadyForCandidates) {
             localCandidatesBuffer.push(candidateJson);
           } else {
-            void addCoachingIceCandidate(currentUserUid, {
-              senderUid: currentUserUid,
+            void addCoachingIceCandidate(uid, {
+              senderUid: uid,
               fromRole: 'collab',
               candidateJson,
             });
@@ -401,8 +582,8 @@ export const CollaboratorChatWidget: React.FC<CollaboratorChatWidgetProps> = ({
       const offer = await pc.createOffer({ offerToReceiveAudio: true });
       await pc.setLocalDescription(offer);
 
-      await setCollaboratorCoachingState(currentUserUid, {
-        collabName: currentUserName,
+      await setCollaboratorCoachingState(uid, {
+        collabName: displayName,
         status: 'collab_ready',
         collabConsentActive: true,
         offerSdp: JSON.stringify(offer),
@@ -412,15 +593,15 @@ export const CollaboratorChatWidget: React.FC<CollaboratorChatWidgetProps> = ({
 
       sessionReadyForCandidates = true;
       for (const candidateJson of localCandidatesBuffer.splice(0)) {
-        void addCoachingIceCandidate(currentUserUid, {
-          senderUid: currentUserUid,
+        void addCoachingIceCandidate(uid, {
+          senderUid: uid,
           fromRole: 'collab',
           candidateJson,
         });
       }
 
       candidatesUnsubRef.current = onSnapshot(
-        getCoachingCandidatesQuery(currentUserUid),
+        getCoachingCandidatesQuery(uid),
         (snap) => {
           snap.forEach((docSnap) => {
             if (seenCandidateIdsRef.current.has(docSnap.id)) return;
@@ -549,6 +730,8 @@ export const CollaboratorChatWidget: React.FC<CollaboratorChatWidgetProps> = ({
           return;
         }
         const d = snap.data();
+        const serverUpdatedAtIso =
+          typeof d.updatedAt?.toDate === 'function' ? d.updatedAt.toDate().toISOString() : '';
         const nextDoc: SanitizedCoachingSessionDoc = {
           collabUid: snap.id,
           orgScope: 'orange_pro_team',
@@ -560,7 +743,8 @@ export const CollaboratorChatWidget: React.FC<CollaboratorChatWidgetProps> = ({
           adminPttActive: Boolean(d.adminPttActive),
           offerSdp: typeof d.offerSdp === 'string' ? d.offerSdp : '',
           answerSdp: typeof d.answerSdp === 'string' ? d.answerSdp : '',
-          updatedAtIso: typeof d.updatedAtIso === 'string' ? d.updatedAtIso : '',
+          updatedAtIso:
+            serverUpdatedAtIso || (typeof d.updatedAtIso === 'string' ? d.updatedAtIso : ''),
         };
         setCoachingDoc(nextDoc);
 
@@ -604,10 +788,34 @@ export const CollaboratorChatWidget: React.FC<CollaboratorChatWidgetProps> = ({
     return () => unsub();
   }, [currentUserUid, currentUserName]);
 
-  const stopCollaboratorCoaching = async (updateCloud = true) => {
+  const stopCollaboratorCoaching = async (
+    updateCloud = true,
+    options?: {
+      revokeOptIn?: boolean;
+      forceCloudReset?: boolean;
+      preserveError?: boolean;
+    }
+  ) => {
+    const targetUid = currentUserUidRef.current || currentUserUid;
+    const targetName = currentUserNameRef.current || currentUserName;
     const wasCoachingActive = coachingActiveRef.current;
+    const revokeOptIn = Boolean(options?.revokeOptIn);
+    const forceCloudReset = Boolean(options?.forceCloudReset);
+
     coachingActiveRef.current = false;
     stopBackgroundContinuity();
+    clearPlaybackUnlockListeners();
+
+    if (revokeOptIn) {
+      revokedByUserRef.current = true;
+      clearGestureListeners();
+      setAwaitingGestureResume(false);
+      if (targetUid) {
+        writeCoachingOptInPreference(targetUid, false);
+      }
+      setHasPersistedOptIn(false);
+    }
+
     if (candidatesUnsubRef.current) {
       candidatesUnsubRef.current();
       candidatesUnsubRef.current = null;
@@ -631,17 +839,20 @@ export const CollaboratorChatWidget: React.FC<CollaboratorChatWidgetProps> = ({
     pendingIceCandidatesRef.current = [];
     appliedAnswerRef.current = '';
     setCoachingActive(false);
-    setCoachingError('');
+    setAudioPlaybackBlocked(false);
+    if (!options?.preserveError) {
+      setCoachingError('');
+    }
 
     if (
       updateCloud &&
-      wasCoachingActive &&
-      currentUserUid &&
-      auth.currentUser?.uid === currentUserUid
+      (wasCoachingActive || forceCloudReset) &&
+      targetUid &&
+      auth.currentUser?.uid === targetUid
     ) {
       try {
-        await setCollaboratorCoachingState(currentUserUid, {
-          collabName: currentUserName,
+        await setCollaboratorCoachingState(targetUid, {
+          collabName: targetName,
           status: 'ended',
           collabConsentActive: false,
           offerSdp: '',
@@ -654,50 +865,46 @@ export const CollaboratorChatWidget: React.FC<CollaboratorChatWidgetProps> = ({
     }
   };
 
-  useEffect(() => {
-    if (!coachingActive || !currentUserUid) return;
-    const keepaliveId = window.setInterval(() => {
-      if (coachingActiveRef.current && auth.currentUser?.uid === currentUserUid) {
-        void touchCollaboratorCoachingKeepalive(currentUserUid);
+  const armGestureResume = () => {
+    if (typeof window === 'undefined' || revokedByUserRef.current) return;
+    setAwaitingGestureResume(true);
+    if (clearGestureListenersRef.current) return;
+    const onFirstGesture = () => {
+      clearGestureListeners();
+      if (revokedByUserRef.current || coachingActiveRef.current || coachingBusyRef.current) {
+        return;
       }
-    }, 5 * 60 * 1000);
-    return () => {
-      window.clearInterval(keepaliveId);
+      unlockRemoteAudioPlayback();
+      void startCollaboratorCoaching({ autoResume: false });
     };
-  }, [coachingActive, currentUserUid]);
+    window.addEventListener('pointerdown', onFirstGesture, { once: true, capture: true });
+    window.addEventListener('touchstart', onFirstGesture, { once: true, capture: true });
+    window.addEventListener('keydown', onFirstGesture, { once: true, capture: true });
+    clearGestureListenersRef.current = () => {
+      window.removeEventListener('pointerdown', onFirstGesture, { capture: true });
+      window.removeEventListener('touchstart', onFirstGesture, { capture: true });
+      window.removeEventListener('keydown', onFirstGesture, { capture: true });
+    };
+  };
 
-  useEffect(() => {
-    const handlePageHide = (ev: PageTransitionEvent) => {
-      if (ev.persisted) return;
-      if (
-        coachingActiveRef.current &&
-        currentUserUid &&
-        auth.currentUser?.uid === currentUserUid
-      ) {
-        void stopCollaboratorCoaching(true);
-      }
-    };
-    window.addEventListener('pagehide', handlePageHide);
-    return () => {
-      window.removeEventListener('pagehide', handlePageHide);
-      const shouldUpdateCloud = Boolean(
-        coachingActiveRef.current &&
-          currentUserUid &&
-          auth.currentUser?.uid === currentUserUid
-      );
-      void stopCollaboratorCoaching(shouldUpdateCloud);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  const startCollaboratorCoaching = async () => {
-    if (!currentUserUid || coachingBusy) return;
+  const startCollaboratorCoaching = async (options?: { autoResume?: boolean }) => {
+    const autoResume = Boolean(options?.autoResume);
+    const uid = currentUserUidRef.current || currentUserUid;
+    if (!uid || coachingBusyRef.current) return;
     if (typeof RTCPeerConnection === 'undefined' || !navigator.mediaDevices?.getUserMedia) {
-      setCoachingError('Audio WebRTC non supporté par ce navigateur.');
+      if (!autoResume) {
+        setCoachingError('Audio WebRTC non supporté par ce navigateur.');
+      }
       return;
     }
+
+    coachingBusyRef.current = true;
     setCoachingBusy(true);
+    revokedByUserRef.current = false;
+    clearGestureListeners();
+    setAwaitingGestureResume(false);
     setCoachingError('');
+
     try {
       await stopCollaboratorCoaching(false);
 
@@ -710,7 +917,11 @@ export const CollaboratorChatWidget: React.FC<CollaboratorChatWidgetProps> = ({
       });
       localStreamRef.current = stream;
 
-      // Handle OS/browser revoking mic track cleanly
+      // Mémoriser durablement le consentement explicite du collaborateur dans localStorage
+      writeCoachingOptInPreference(uid, true);
+      setHasPersistedOptIn(true);
+
+      // Handle OS/browser revoking mic track cleanly (ne révoque pas le consentement mémorisé)
       stream.getAudioTracks().forEach((track) => {
         track.onended = () => {
           if (coachingActiveRef.current) {
@@ -724,20 +935,141 @@ export const CollaboratorChatWidget: React.FC<CollaboratorChatWidgetProps> = ({
       await startBackgroundContinuity();
       await publishFreshOfferFromAuthorizedMic();
 
-      if (canShowAudioSupervisionUi) {
-        onNotify('Audio Direction activé.');
+      if (autoResume) {
+        // Assure le déverrouillage audio haut-parleur Push-to-Talk dès le 1er geste sur iOS/Safari/Chrome
+        armPlaybackUnlockOnFirstGesture();
+      } else {
+        unlockRemoteAudioPlayback();
+        if (canShowAudioSupervisionUi) {
+          onNotify('Audio Direction activé.');
+        }
       }
     } catch (err) {
-      const msg =
-        err instanceof Error
-          ? err.message
-          : 'Autorisation microphone refusée ou indisponible.';
-      setCoachingError(msg);
-      await stopCollaboratorCoaching(false);
+      let permissionDenied = false;
+      try {
+        if (navigator.permissions?.query) {
+          const perm = await navigator.permissions.query({ name: 'microphone' as PermissionName });
+          if (perm.state === 'denied') {
+            permissionDenied = true;
+          }
+        }
+      } catch {
+        // Safari/Firefox without microphone permission descriptor
+      }
+
+      if (autoResume) {
+        if (permissionDenied) {
+          setCoachingError(
+            'Micro bloqué dans les réglages du navigateur. Autorisez l’accès au microphone pour reprendre le coaching audio.'
+          );
+          setAwaitingGestureResume(false);
+          await stopCollaboratorCoaching(false, { preserveError: true });
+        } else {
+          // Cas iOS Safari / politique autoplay stricte : armer une reprise transparente au 1er geste
+          await stopCollaboratorCoaching(false);
+          armGestureResume();
+        }
+      } else {
+        const msg = permissionDenied
+          ? 'Micro bloqué dans les réglages du navigateur. Autorisez l’accès au microphone pour continuer.'
+          : err instanceof Error
+            ? err.message
+            : 'Autorisation microphone refusée ou indisponible.';
+        setCoachingError(msg);
+        await stopCollaboratorCoaching(false, { preserveError: true });
+      }
     } finally {
+      coachingBusyRef.current = false;
       setCoachingBusy(false);
     }
   };
+
+  // Reconnexion automatique transparente au chargement si le collaborateur a déjà donné son consentement
+  useEffect(() => {
+    if (!currentUserUid) return;
+    if (coachingActiveRef.current || coachingBusyRef.current || revokedByUserRef.current) return;
+    if (autoResumeAttemptedRef.current) return;
+
+    const optedIn = hasPersistedOptIn || Boolean(coachingDoc?.collabConsentActive);
+    if (!optedIn) return;
+
+    autoResumeAttemptedRef.current = true;
+    let cancelled = false;
+
+    const tryAutoResume = async () => {
+      let permState: PermissionState | 'unsupported' = 'unsupported';
+      try {
+        if (navigator.permissions?.query) {
+          const status = await navigator.permissions.query({
+            name: 'microphone' as PermissionName,
+          });
+          permState = status.state;
+        }
+      } catch {
+        permState = 'unsupported';
+      }
+
+      if (cancelled || revokedByUserRef.current || coachingActiveRef.current) return;
+
+      if (permState === 'denied') {
+        setAwaitingGestureResume(false);
+        setCoachingError(
+          'Micro bloqué dans les réglages du navigateur. Autorisez l’accès au microphone pour reprendre le coaching audio.'
+        );
+        return;
+      }
+
+      if (permState === 'granted' || permState === 'unsupported') {
+        await startCollaboratorCoaching({ autoResume: true });
+        return;
+      }
+
+      // permState === 'prompt' : armer le geste unique pour reprendre sans erreur bloquante
+      armGestureResume();
+    };
+
+    void tryAutoResume();
+
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentUserUid, hasPersistedOptIn, coachingDoc?.collabConsentActive]);
+
+  useEffect(() => {
+    if (!coachingActive || !currentUserUid) return;
+    const keepaliveId = window.setInterval(() => {
+      if (coachingActiveRef.current && auth.currentUser?.uid === currentUserUid) {
+        void touchCollaboratorCoachingKeepalive(currentUserUid);
+      }
+    }, 5 * 60 * 1000);
+    return () => {
+      window.clearInterval(keepaliveId);
+    };
+  }, [coachingActive, currentUserUid]);
+
+  // Nettoyage propre sur fermeture d'onglet / rechargement (F5) / démontage sans JAMAIS révoquer op_coaching_optin_${uid}
+  useEffect(() => {
+    const handlePageHide = (ev: PageTransitionEvent) => {
+      if (ev.persisted) return;
+      const uid = currentUserUidRef.current;
+      if (coachingActiveRef.current && uid && auth.currentUser?.uid === uid) {
+        void stopCollaboratorCoaching(true);
+      }
+    };
+    window.addEventListener('pagehide', handlePageHide);
+    return () => {
+      window.removeEventListener('pagehide', handlePageHide);
+      clearGestureListeners();
+      clearPlaybackUnlockListeners();
+      const uid = currentUserUidRef.current;
+      const shouldUpdateCloud = Boolean(
+        coachingActiveRef.current && uid && auth.currentUser?.uid === uid
+      );
+      void stopCollaboratorCoaching(shouldUpdateCloud);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const handleSend = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -780,21 +1112,36 @@ export const CollaboratorChatWidget: React.FC<CollaboratorChatWidgetProps> = ({
         adminPttActive={Boolean(coachingDoc?.adminPttActive)}
       />
 
-      {/* Compact Floating Trigger */}
-      <button
-        type="button"
-        data-testid="collaborator-chat-widget-btn"
-        onClick={() => setOpen((v) => !v)}
-        className="fixed bottom-4 right-4 z-40 inline-flex items-center gap-2 rounded-2xl border border-stone-200 bg-stone-900 hover:bg-stone-800 px-3.5 py-2.5 text-xs font-bold text-white shadow-lg transition-colors"
-      >
-        <MessageCircle className="w-4 h-4 text-orange-400" />
-        <span className="hidden sm:inline">Discussion Direction</span>
-        {unreadCount > 0 && (
-          <span className="min-w-[18px] h-[18px] px-1 rounded-full bg-orange-600 text-white text-[10px] font-extrabold flex items-center justify-center tabular-nums">
-            {unreadCount > 9 ? '9+' : unreadCount}
-          </span>
-        )}
-      </button>
+      {/* Compact Floating Trigger + Indicateur permanent transparence coaching audio */}
+      <div className="fixed bottom-4 right-4 z-40 flex items-center gap-2">
+        <CollaboratorCoachingStatusBadge
+          coachingActive={coachingActive}
+          awaitingGestureResume={awaitingGestureResume}
+          coachingBusy={coachingBusy}
+          onResume={() => void startCollaboratorCoaching({ autoResume: false })}
+          onStop={() =>
+            void stopCollaboratorCoaching(true, {
+              revokeOptIn: true,
+              forceCloudReset: true,
+            })
+          }
+        />
+
+        <button
+          type="button"
+          data-testid="collaborator-chat-widget-btn"
+          onClick={() => setOpen((v) => !v)}
+          className="inline-flex items-center gap-2 rounded-2xl border border-stone-200 bg-stone-900 hover:bg-stone-800 px-3.5 py-2.5 text-xs font-bold text-white shadow-lg transition-colors"
+        >
+          <MessageCircle className="w-4 h-4 text-orange-400" />
+          <span className="hidden sm:inline">Discussion Direction</span>
+          {unreadCount > 0 && (
+            <span className="min-w-[18px] h-[18px] px-1 rounded-full bg-orange-600 text-white text-[10px] font-extrabold flex items-center justify-center tabular-nums">
+              {unreadCount > 9 ? '9+' : unreadCount}
+            </span>
+          )}
+        </button>
+      </div>
 
       {/* Drawer */}
       {open && (
@@ -832,7 +1179,12 @@ export const CollaboratorChatWidget: React.FC<CollaboratorChatWidgetProps> = ({
               <SupervisorCoachingHeaderStopButton
                 currentUserRole={currentUserRole}
                 coachingActive={coachingActive}
-                onStop={() => void stopCollaboratorCoaching(true)}
+                onStop={() =>
+                  void stopCollaboratorCoaching(true, {
+                    revokeOptIn: true,
+                    forceCloudReset: true,
+                  })
+                }
               />
               <button
                 type="button"
@@ -853,8 +1205,13 @@ export const CollaboratorChatWidget: React.FC<CollaboratorChatWidgetProps> = ({
             isListeningOrActive={isListeningOrActive}
             coachingBusy={coachingBusy}
             coachingError={coachingError}
-            onStart={() => void startCollaboratorCoaching()}
-            onStopStale={() => void stopCollaboratorCoaching(true)}
+            onStart={() => void startCollaboratorCoaching({ autoResume: false })}
+            onStopStale={() =>
+              void stopCollaboratorCoaching(true, {
+                revokeOptIn: true,
+                forceCloudReset: true,
+              })
+            }
           />
 
           {audioPlaybackBlocked && (

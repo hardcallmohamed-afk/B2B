@@ -4,9 +4,13 @@ import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import {
   CollaboratorChatWidget,
+  CollaboratorCoachingStatusBadge,
   SupervisorAudioControlsContainer,
   SupervisorCoachingHeaderStopButton,
   SupervisorCoachingPttPill,
+  getCoachingOptInStorageKey,
+  readCoachingOptInPreference,
+  writeCoachingOptInPreference,
 } from './components/CollaboratorChatWidget';
 import { NotificationBell } from './components/NotificationBell';
 import { AchievementToast } from './components/AchievementToast';
@@ -329,6 +333,95 @@ test('CollaboratorChatWidget hides audio controls by default for non-supervisors
       ).includes('coaching-ptt-live-pill')
     );
   }
+});
+
+test('Coaching Audio persistent opt-in storage and status badge maintain explicit consent and permanent visibility', () => {
+  assert.equal(getCoachingOptInStorageKey('u_collab_42'), 'op_coaching_optin_u_collab_42');
+  assert.equal(getCoachingOptInStorageKey('  u_collab_42  '), 'op_coaching_optin_u_collab_42');
+  assert.equal(getCoachingOptInStorageKey(''), '');
+
+  // Safe fallback when window/localStorage is unavailable (SSR / Node)
+  assert.equal(readCoachingOptInPreference('u_collab_42'), false);
+  writeCoachingOptInPreference('u_collab_42', true);
+
+  // Mock browser localStorage to verify per-UID opt-in & explicit revoke isolation
+  const store = new Map<string, string>();
+  const prevWindow = (globalThis as Record<string, unknown>).window;
+  (globalThis as Record<string, unknown>).window = {
+    localStorage: {
+      getItem: (k: string) => (store.has(k) ? store.get(k)! : null),
+      setItem: (k: string, v: string) => {
+        store.set(k, String(v));
+      },
+      removeItem: (k: string) => {
+        store.delete(k);
+      },
+    },
+  };
+  try {
+    assert.equal(readCoachingOptInPreference('u_1'), false);
+    writeCoachingOptInPreference('u_1', true);
+    writeCoachingOptInPreference('u_2', true);
+    assert.equal(store.get('op_coaching_optin_u_1'), '1');
+    assert.equal(readCoachingOptInPreference('u_1'), true);
+    assert.equal(readCoachingOptInPreference('u_2'), true);
+
+    // Explicit revoke deletes only the targeted UID's consent key
+    writeCoachingOptInPreference('u_1', false);
+    assert.equal(store.has('op_coaching_optin_u_1'), false);
+    assert.equal(readCoachingOptInPreference('u_1'), false);
+    assert.equal(readCoachingOptInPreference('u_2'), true);
+  } finally {
+    if (prevWindow === undefined) {
+      delete (globalThis as Record<string, unknown>).window;
+    } else {
+      (globalThis as Record<string, unknown>).window = prevWindow;
+    }
+  }
+
+  // Idle badge returns null (no extraneous audio UI in DOM)
+  assert.equal(
+    renderToStaticMarkup(
+      React.createElement(CollaboratorCoachingStatusBadge, {
+        coachingActive: false,
+        awaitingGestureResume: false,
+        coachingBusy: false,
+        onResume: () => {},
+        onStop: () => {},
+      })
+    ),
+    ''
+  );
+
+  // Active session always shows visible indicator + 1-click stop button
+  const activeBadgeHtml = renderToStaticMarkup(
+    React.createElement(CollaboratorCoachingStatusBadge, {
+      coachingActive: true,
+      awaitingGestureResume: false,
+      coachingBusy: false,
+      onResume: () => {},
+      onStop: () => {},
+    })
+  );
+  assert.ok(activeBadgeHtml.includes('coaching-active-status-pill'));
+  assert.ok(activeBadgeHtml.includes('Audio actif'));
+  assert.ok(activeBadgeHtml.includes('coaching-quick-stop-btn'));
+  assert.ok(activeBadgeHtml.includes('Couper'));
+
+  // Saved opt-in waiting for browser user gesture (e.g., iOS Safari) shows discreet resume + revoke pill
+  const resumeBadgeHtml = renderToStaticMarkup(
+    React.createElement(CollaboratorCoachingStatusBadge, {
+      coachingActive: false,
+      awaitingGestureResume: true,
+      coachingBusy: false,
+      onResume: () => {},
+      onStop: () => {},
+    })
+  );
+  assert.ok(resumeBadgeHtml.includes('coaching-resume-status-pill'));
+  assert.ok(resumeBadgeHtml.includes('coaching-resume-audio-btn'));
+  assert.ok(resumeBadgeHtml.includes('Reprendre audio'));
+  assert.ok(resumeBadgeHtml.includes('coaching-revoke-optin-btn'));
 });
 
 test('NotificationBell and AchievementToast deliver coaching_invite to collaborators for explicit opt-in consent and keep direct_message clean', () => {
