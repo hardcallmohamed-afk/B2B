@@ -1,4 +1,4 @@
-import React, { useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   Award,
   Bell,
@@ -203,6 +203,46 @@ export const AccountSettingsPanel: React.FC<AccountSettingsPanelProps> = ({
   const [uploadingPhoto, setUploadingPhoto] = useState(false);
   const [savingProfile, setSavingProfile] = useState(false);
   const [pushStatus, setPushStatus] = useState<PushNotificationStatus>(() => getPushNotificationStatus());
+
+  // Resynchronisation automatique des champs lorsque le profil Cloud Firestore s'hydrate de manière asynchrone
+  useEffect(() => {
+    if (savingProfile || uploadingPhoto) return;
+    setDisplayName(profile.displayName);
+    setAvatarDataUrl(profile.avatarDataUrl);
+    setPhonePro(profile.phonePro);
+    setZone(profile.zone);
+    const resolved = resolveCityAndRegionFromZoneString(profile.zone);
+    setSelectedAccountRegion(resolved.regionId || 'all');
+    setBio(profile.bio);
+    setSignature(emailSignature);
+    setMonthlyGoalContracts(profile.monthlyGoalContracts);
+    setNotifyBadges(profile.notifyBadges);
+    setNotifySound(profile.notifySound);
+    setCompactUi(profile.compactUi);
+    setLegalRaisonSociale(profile.legalRaisonSociale || '');
+    setLegalIce(profile.legalIce || '');
+    setLegalAdresse(profile.legalAdresse || '');
+    setLegalTelephone(profile.legalTelephone || '');
+    setAdvPrefs(loadAdvancedAccountPrefs(uid));
+  }, [
+    uid,
+    profile.displayName,
+    profile.avatarDataUrl,
+    profile.phonePro,
+    profile.zone,
+    profile.bio,
+    profile.monthlyGoalContracts,
+    profile.notifyBadges,
+    profile.notifySound,
+    profile.compactUi,
+    profile.legalRaisonSociale,
+    profile.legalIce,
+    profile.legalAdresse,
+    profile.legalTelephone,
+    emailSignature,
+    savingProfile,
+    uploadingPhoto,
+  ]);
 
   // Sécurité / Mot de passe
   const [newPassword, setNewPassword] = useState('');

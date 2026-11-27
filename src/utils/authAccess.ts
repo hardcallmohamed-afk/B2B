@@ -49,47 +49,53 @@ export const MANAGED_ROLE_OPTIONS: ReadonlyArray<{
     value: 'commercial',
     label: 'Commercial B2B',
     shortLabel: 'Commercial',
-    description: 'Prospection terrain, qualification & signatures TPE/PME',
+    description:
+      'Prospection terrain, Portefeuille/Kanban, Crawler Profond N1/N2, Déduplication MDM, Audit 8 workers, Export CSV/JSON, Studio Email IA & Devis PDF',
     perks: [
-      'Portefeuille CRM personnel & Pipeline Kanban',
-      'Calculateur de commission DIVERSIFIA & Studio Email IA',
-      'Suivi de ses contrats signés & 50 badges de progression',
+      'Portefeuille CRM personnel & Pipeline Kanban 5 étapes',
+      'Crawler Profond Niveau 1 & 2, Audit IA par lot (8 workers) & Déduplication MDM',
+      'Export CSV 9 colonnes, Sauvegarde JSON complète, Studio Email IA & Devis PDF',
     ],
   },
   {
     value: 'grand_compte',
     label: 'Expert Grand Compte',
     shortLabel: 'Grand Compte',
-    description: 'Fibre Dédiée, flottes corporate & dossiers grands comptes',
+    description:
+      'Fibre Dédiée, flottes corporate, priorité dossiers Grands Comptes (≥ 30 sal.), Crawler N1/N2, MDM & Audit 8 workers',
     perks: [
-      'Tous les accès Commercial B2B + Priorité Grands Comptes (≥ 30 sal.)',
-      'Audit & Enrichissement IA en rafale (8 workers parallèles)',
-      'Simulateur avancé Fibre Dédiée / Flotte Corporate & Export CSV complet',
+      'Tous les outils Commercial B2B + Priorité Grands Comptes (≥ 30 sal.)',
+      'Crawler Profond N1/N2, Audit IA en rafale (8 workers) & Déduplication MDM',
+      'Simulateur avancé Fibre Dédiée / Flotte Corporate & Export CSV/JSON complet',
     ],
   },
   {
     value: 'team_lead',
     label: 'Chef d’Équipe',
     shortLabel: 'Chef d’Équipe',
-    description: 'Animation d’escouade terrain & accompagnement commercial',
+    description:
+      'Supervision multi-portefeuilles d’escouade, attribution/restitution de fiches signées & accompagnement terrain',
     perks: [
-      'Tous les accès Expert Grand Compte + Crawler Profond Niveau 1 & 2',
-      'Module Déduplication MDM & Fusion intelligente des doublons',
-      'Suivi détaillé des performances et objectifs de son escouade',
+      'Tous les outils Expert Grand Compte + Supervision multi-portefeuilles',
+      'Attribution de fiches & Restitution de fiches signées verrouillées',
+      'Suivi détaillé du classement, des performances et objectifs de son escouade',
     ],
   },
   {
     value: 'manager',
     label: 'Superviseur / Manager',
     shortLabel: 'Superviseur',
-    description: 'Pilotage commercial, suivi territorial & performance équipe (sans accès Admin/API/Map)',
+    description:
+      'Pilotage commercial multi-zones, validation/refus motivé des contrats & gestion des versements (Payouts)',
     perks: [
       'Tous les accès Chef d’Équipe + Supervision Équipe & Payouts multi-zones',
-      'Pré-validation des commissions & Attribution de distinctions d’équipe',
-      'Export Backup JSON global (Sans accès Comptes, Coffre API ni Carte GPS)',
+      'Validation, refus motivé & mise en paiement (Versé + Réf. virement)',
+      'Attribution de distinctions d’équipe (Sans accès Comptes, Coffre API ni Carte GPS)',
     ],
   },
 ];
+
+export const MANAGED_ROLE_CATALOG = MANAGED_ROLE_OPTIONS;
 
 export function getRoleCapabilities(
   role: ManagedUserRole | 'super_admin' | string | undefined,
@@ -144,14 +150,14 @@ export function getRoleCapabilities(
     canManageOwnPortfolio: true,
     canUseAiEmailStudio: true,
     canUseCommissionCalculator: true,
-    canBatchAudit8Workers: level >= 2,
+    canBatchAudit8Workers: true,
     canPrioritizeGrandCompte: level >= 2,
-    canUseDeepCrawlerL2: level >= 3,
-    canUseMdmDeduplication: level >= 3,
+    canUseDeepCrawlerL2: true,
+    canUseMdmDeduplication: true,
     canViewSquadLeaderboard: level >= 3,
     canSuperviseTeamPayouts: level >= 4,
     canAwardTeamDistinctions: level >= 4,
-    canExportFullBackupJson: level >= 4,
+    canExportFullBackupJson: true,
     // STRICTEMENT VERROUILLÉ : Aucun rôle autre que le Super-Admin n'a accès à ces 3 modules
     canManageUsers: false,
     canAccessApiKeysVault: false,

@@ -120,8 +120,17 @@ export function computeFicheMaturityPure(f: FicheEntreprise): number {
   return Math.min(100, score);
 }
 
+export function parseSafeHeadcount(raw: string | number | undefined | null): number {
+  if (raw === undefined || raw === null) return 0;
+  const cleaned = String(raw).trim();
+  if (!cleaned || !/^\d+$/.test(cleaned)) return 0;
+  const n = Number.parseInt(cleaned, 10);
+  if (!Number.isFinite(n) || n <= 0 || n > 50000) return 0;
+  return n;
+}
+
 function getOfferTierPure(f: FicheEntreprise): 'Grand Compte' | 'PME' | 'TPE / Libéral' {
-  const eff = parseInt(f.effectif, 10) || 0;
+  const eff = parseSafeHeadcount(f.effectif);
   if (eff >= 30 || f.secteur === 'clinique' || f.secteur === 'industrie') {
     return 'Grand Compte';
   }
@@ -303,7 +312,7 @@ export function buildPipelineFunnelStats(fiches: FicheEntreprise[]): FunnelStage
       }
     }
 
-    const totalEffectif = items.reduce((acc, f) => acc + (parseInt(f.effectif, 10) || 0), 0);
+    const totalEffectif = items.reduce((acc, f) => acc + parseSafeHeadcount(f.effectif), 0);
     const avgMaturity =
       count > 0
         ? Math.round(items.reduce((acc, f) => acc + computeFicheMaturityPure(f), 0) / count)
@@ -380,7 +389,7 @@ export function buildCityAndOfferBreakdown(fiches: FicheEntreprise[]): CityOffer
 
   for (const f of fiches) {
     const ville = (f.ville || 'Non précisée').trim() || 'Non précisée';
-    const eff = parseInt(f.effectif, 10) || 0;
+    const eff = parseSafeHeadcount(f.effectif);
     const isQual =
       f.statut === 'RDV pris' || f.statut === 'Devis envoyé' || f.statut === 'Signé Orange Pro';
     const isSigned = f.statut === 'Signé Orange Pro';
@@ -480,7 +489,7 @@ export interface KanbanColumnData {
 export function groupFichesByStatut(fiches: FicheEntreprise[]): KanbanColumnData[] {
   return KANBAN_STAGES.map((meta) => {
     const items = fiches.filter((f) => f.statut === meta.statut);
-    const totalEffectif = items.reduce((acc, f) => acc + (parseInt(f.effectif, 10) || 0), 0);
+    const totalEffectif = items.reduce((acc, f) => acc + parseSafeHeadcount(f.effectif), 0);
     const avgMaturity =
       items.length > 0
         ? Math.round(items.reduce((acc, f) => acc + computeFicheMaturityPure(f), 0) / items.length)
@@ -715,7 +724,7 @@ export function buildPortfolioAiSummary(fiches: FicheEntreprise[]): string {
   const offersLine = breakdown.offerTiers.map((t) => `${t.tier}: ${t.count}`).join(' | ');
 
   const topAccounts = [...fiches]
-    .sort((a, b) => (parseInt(b.effectif, 10) || 0) - (parseInt(a.effectif, 10) || 0))
+    .sort((a, b) => parseSafeHeadcount(b.effectif) - parseSafeHeadcount(a.effectif))
     .slice(0, 10)
     .map((f) => {
       const code = f.numeroFiche ? `[${f.numeroFiche}] ` : '';

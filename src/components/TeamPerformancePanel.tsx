@@ -729,6 +729,7 @@ export const TeamPerformancePanel: React.FC<TeamPerformancePanelProps> = ({
                 <th className="px-4 py-3">Collaborateur</th>
                 <th className="px-4 py-3 text-right">Contrats</th>
                 <th className="px-4 py-3 text-right">Payout Total</th>
+                <th className="px-4 py-3 text-right">Prospects</th>
                 <th className="px-4 py-3 text-right">Qualifiés</th>
                 <th className="px-4 py-3 text-right">Conversion</th>
                 <th className="px-4 py-3 text-right">XP &amp; Badges</th>
@@ -739,7 +740,7 @@ export const TeamPerformancePanel: React.FC<TeamPerformancePanelProps> = ({
             <tbody className="divide-y divide-stone-100">
               {leaderboard.length === 0 ? (
                 <tr>
-                  <td colSpan={9} className="px-4 py-8 text-center text-stone-500">
+                  <td colSpan={10} className="px-4 py-8 text-center text-stone-500">
                     Les statistiques d’équipe se synchronisent dès la première activité.
                   </td>
                 </tr>
@@ -830,6 +831,9 @@ export const TeamPerformancePanel: React.FC<TeamPerformancePanelProps> = ({
                             {formatMad(row.enAttenteMad)} en attente
                           </div>
                         )}
+                      </td>
+                      <td className="px-4 py-3 text-right font-semibold text-stone-700 tabular-nums">
+                        {row.prospectsCount}
                       </td>
                       <td className="px-4 py-3 text-right font-semibold text-stone-700 tabular-nums">
                         {row.qualifiedCount}

@@ -691,44 +691,58 @@ export const CollaboratorProfileChatModal: React.FC<CollaboratorProfileChatModal
           </div>
 
           {/* Super-Admin Navigation Tabs */}
-          <div className="mt-4 pt-3 border-t border-stone-100 flex flex-wrap items-center gap-1.5">
-            {(
-              [
-                { id: 'profile', label: 'Profil & Performances', icon: User },
-                { id: 'chat', label: `Discussion Directe (${messages.length})`, icon: MessageCircle },
-                {
-                  id: 'coaching',
-                  label:
-                    coachingDoc?.collabConsentActive
-                      ? 'Coaching Live & Push-to-Talk (Prêt)'
-                      : 'Coaching Live & Push-to-Talk',
-                  icon: Headphones,
-                },
-              ] as const
-            ).map((tab) => {
-              const Icon = tab.icon;
-              const active = activeTab === tab.id;
-              return (
-                <button
-                  key={tab.id}
-                  type="button"
-                  data-testid={`collab-modal-tab-${tab.id}`}
-                  onClick={() => setActiveTab(tab.id)}
-                  className={`inline-flex items-center gap-1.5 rounded-xl px-3 py-1.5 text-xs font-bold transition-colors ${
-                    active
-                      ? 'bg-orange-600 text-white shadow-xs'
-                      : 'bg-stone-100 text-stone-700 hover:bg-stone-200'
-                  }`}
-                >
-                  <Icon className="w-3.5 h-3.5" />
-                  {tab.label}
-                  {tab.id === 'coaching' && coachingDoc?.collabConsentActive && (
-                    <span className="h-2 w-2 rounded-full bg-emerald-400 animate-pulse" />
-                  )}
-                </button>
-              );
-            })}
-          </div>
+          {(() => {
+            const isRecentCoachingSignal = Boolean(
+              coachingDoc?.updatedAtIso &&
+                Number.isFinite(Date.parse(coachingDoc.updatedAtIso)) &&
+                Date.now() - Date.parse(coachingDoc.updatedAtIso) <= 20 * 60 * 1000
+            );
+            const isCoachingReadyAndOnline = Boolean(
+              coachingDoc?.collabConsentActive &&
+                coachingDoc?.offerSdp &&
+                effectiveOnline &&
+                isRecentCoachingSignal
+            );
+            return (
+              <div className="mt-4 pt-3 border-t border-stone-100 flex flex-wrap items-center gap-1.5">
+                {(
+                  [
+                    { id: 'profile', label: 'Profil & Performances', icon: User },
+                    { id: 'chat', label: `Discussion Directe (${messages.length})`, icon: MessageCircle },
+                    {
+                      id: 'coaching',
+                      label: isCoachingReadyAndOnline
+                        ? 'Coaching Live & Push-to-Talk (Prêt)'
+                        : 'Coaching Live & Push-to-Talk',
+                      icon: Headphones,
+                    },
+                  ] as const
+                ).map((tab) => {
+                  const Icon = tab.icon;
+                  const active = activeTab === tab.id;
+                  return (
+                    <button
+                      key={tab.id}
+                      type="button"
+                      data-testid={`collab-modal-tab-${tab.id}`}
+                      onClick={() => setActiveTab(tab.id)}
+                      className={`inline-flex items-center gap-1.5 rounded-xl px-3 py-1.5 text-xs font-bold transition-colors ${
+                        active
+                          ? 'bg-orange-600 text-white shadow-xs'
+                          : 'bg-stone-100 text-stone-700 hover:bg-stone-200'
+                      }`}
+                    >
+                      <Icon className="w-3.5 h-3.5" />
+                      {tab.label}
+                      {tab.id === 'coaching' && isCoachingReadyAndOnline && (
+                        <span className="h-2 w-2 rounded-full bg-emerald-400 animate-pulse" />
+                      )}
+                    </button>
+                  );
+                })}
+              </div>
+            );
+          })()}
         </div>
 
         {/* Body */}
@@ -981,86 +995,111 @@ export const CollaboratorProfileChatModal: React.FC<CollaboratorProfileChatModal
               </div>
 
               {/* Live Coaching Control Card */}
-              <div className="rounded-2xl border border-stone-200 bg-white p-5 space-y-4">
-                <div className="flex flex-wrap items-center justify-between gap-3">
-                  <div>
-                    <div className="text-xs font-semibold text-stone-500">
-                      Statut Supervision Audio de {target.displayName}
-                    </div>
-                    <div className="mt-1 flex flex-wrap items-center gap-2">
-                      <span
-                        className={`inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1 text-xs font-extrabold ${
-                          rtcStatus === 'connected'
-                            ? 'bg-emerald-100 text-emerald-900 border border-emerald-300'
-                            : coachingDoc?.collabConsentActive
-                              ? 'bg-orange-100 text-orange-900 border border-orange-300'
-                              : 'bg-stone-100 text-stone-700 border border-stone-200'
-                        }`}
+              {(() => {
+                const isRecentCoachingSignal = Boolean(
+                  coachingDoc?.updatedAtIso &&
+                    Number.isFinite(Date.parse(coachingDoc.updatedAtIso)) &&
+                    Date.now() - Date.parse(coachingDoc.updatedAtIso) <= 20 * 60 * 1000
+                );
+                const isCoachingReadyAndOnline = Boolean(
+                  coachingDoc?.collabConsentActive &&
+                    coachingDoc?.offerSdp &&
+                    effectiveOnline &&
+                    isRecentCoachingSignal
+                );
+                const isCoachingSessionExpiredOrOffline = Boolean(
+                  coachingDoc?.collabConsentActive && !isCoachingReadyAndOnline
+                );
+                return (
+                  <div className="rounded-2xl border border-stone-200 bg-white p-5 space-y-4">
+                    <div className="flex flex-wrap items-center justify-between gap-3">
+                      <div>
+                        <div className="text-xs font-semibold text-stone-500">
+                          Statut Supervision Audio de {target.displayName}
+                        </div>
+                        <div className="mt-1 flex flex-wrap items-center gap-2">
+                          <span
+                            data-testid="coaching-supervision-status-badge"
+                            className={`inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1 text-xs font-extrabold ${
+                              rtcStatus === 'connected'
+                                ? 'bg-emerald-100 text-emerald-900 border border-emerald-300'
+                                : isCoachingReadyAndOnline
+                                  ? 'bg-orange-100 text-orange-900 border border-orange-300'
+                                  : isCoachingSessionExpiredOrOffline
+                                    ? 'bg-amber-50 text-amber-900 border border-amber-300'
+                                    : 'bg-stone-100 text-stone-700 border border-stone-200'
+                            }`}
+                          >
+                            <Radio
+                              className={`w-3.5 h-3.5 ${
+                                rtcStatus === 'connected' || isCoachingReadyAndOnline
+                                  ? 'animate-pulse'
+                                  : ''
+                              }`}
+                            />
+                            {rtcStatus === 'connected'
+                              ? pttActive
+                                ? 'Soufflage Push-to-Talk en cours'
+                                : 'Écoute Supervision Silencieuse Active (Votre micro est muet)'
+                              : isCoachingReadyAndOnline
+                                ? 'Micro autorisé (Arrière-plan prêt) — Cliquez pour écouter'
+                                : isCoachingSessionExpiredOrOffline
+                                  ? 'Session précédente expirée (collaborateur hors ligne)'
+                                  : 'En attente d’autorisation micro du collaborateur'}
+                          </span>
+                        </div>
+                      </div>
+
+                      <button
+                        type="button"
+                        onClick={() => void handleInviteCoaching()}
+                        disabled={sendingInvite}
+                        className="inline-flex items-center gap-1.5 rounded-xl border border-orange-300 bg-orange-50 hover:bg-orange-100 px-3 py-2 text-xs font-bold text-orange-900 disabled:opacity-50"
                       >
-                        <Radio
-                          className={`w-3.5 h-3.5 ${
-                            rtcStatus === 'connected' || coachingDoc?.collabConsentActive
-                              ? 'animate-pulse'
-                              : ''
-                          }`}
-                        />
-                        {rtcStatus === 'connected'
-                          ? pttActive
-                            ? 'Soufflage Push-to-Talk en cours'
-                            : 'Écoute Supervision Silencieuse Active (Votre micro est muet)'
-                          : coachingDoc?.collabConsentActive
-                            ? 'Micro autorisé (Arrière-plan prêt) — Cliquez pour écouter'
-                            : 'En attente d’autorisation micro du collaborateur'}
-                      </span>
+                        <PhoneCall className="w-3.5 h-3.5" />
+                        {sendingInvite
+                          ? 'Envoi...'
+                          : isCoachingSessionExpiredOrOffline
+                            ? 'Envoyer une nouvelle invitation'
+                            : 'Demander autorisation micro'}
+                      </button>
                     </div>
-                  </div>
 
-                  <button
-                    type="button"
-                    onClick={() => void handleInviteCoaching()}
-                    disabled={sendingInvite}
-                    className="inline-flex items-center gap-1.5 rounded-xl border border-orange-300 bg-orange-50 hover:bg-orange-100 px-3 py-2 text-xs font-bold text-orange-900 disabled:opacity-50"
-                  >
-                    <PhoneCall className="w-3.5 h-3.5" />
-                    {sendingInvite ? 'Envoi...' : 'Demander autorisation micro'}
-                  </button>
-                </div>
+                    {rtcStatus === 'connected' && (
+                      <div className="rounded-xl border border-emerald-200 bg-emerald-50/60 px-3.5 py-2.5 flex items-center gap-3 text-xs">
+                        <span className="font-bold text-emerald-900 shrink-0">Signal micro terrain :</span>
+                        <div className="flex-1 h-2 rounded-full bg-emerald-200/80 overflow-hidden">
+                          <div
+                            className="h-full bg-emerald-600 transition-all duration-150"
+                            style={{ width: `${Math.max(4, remoteAudioLevel)}%` }}
+                          />
+                        </div>
+                        <span className="font-mono text-[11px] font-bold text-emerald-800 tabular-nums w-9 text-right">
+                          {remoteAudioLevel}%
+                        </span>
+                      </div>
+                    )}
 
-                {rtcStatus === 'connected' && (
-                  <div className="rounded-xl border border-emerald-200 bg-emerald-50/60 px-3.5 py-2.5 flex items-center gap-3 text-xs">
-                    <span className="font-bold text-emerald-900 shrink-0">Signal micro terrain :</span>
-                    <div className="flex-1 h-2 rounded-full bg-emerald-200/80 overflow-hidden">
-                      <div
-                        className="h-full bg-emerald-600 transition-all duration-150"
-                        style={{ width: `${Math.max(4, remoteAudioLevel)}%` }}
-                      />
-                    </div>
-                    <span className="font-mono text-[11px] font-bold text-emerald-800 tabular-nums w-9 text-right">
-                      {remoteAudioLevel}%
-                    </span>
-                  </div>
-                )}
+                    {rtcError && (
+                      <div className="rounded-xl border border-red-200 bg-red-50 px-3.5 py-2.5 text-xs font-medium text-red-800">
+                        {rtcError}
+                      </div>
+                    )}
 
-                {rtcError && (
-                  <div className="rounded-xl border border-red-200 bg-red-50 px-3.5 py-2.5 text-xs font-medium text-red-800">
-                    {rtcError}
-                  </div>
-                )}
-
-                <div className="flex flex-wrap items-center gap-2.5 pt-2 border-t border-stone-100">
-                  {rtcStatus !== 'connected' ? (
-                    <button
-                      type="button"
-                      disabled={!coachingDoc?.collabConsentActive || rtcStatus === 'connecting'}
-                      onClick={() => void handleJoinLiveCoaching()}
-                      className="inline-flex items-center gap-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 disabled:opacity-45 px-4 py-2.5 text-xs font-extrabold text-white shadow-xs"
-                    >
-                      <Headphones className="w-4 h-4" />
-                      {rtcStatus === 'connecting'
-                        ? 'Connexion audio P2P...'
-                        : 'Lancer Écoute Supervision (Silencieuse)'}
-                    </button>
-                  ) : (
+                    <div className="flex flex-wrap items-center gap-2.5 pt-2 border-t border-stone-100">
+                      {rtcStatus !== 'connected' ? (
+                        <button
+                          type="button"
+                          disabled={!isCoachingReadyAndOnline || rtcStatus === 'connecting'}
+                          onClick={() => void handleJoinLiveCoaching()}
+                          className="inline-flex items-center gap-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 disabled:opacity-45 px-4 py-2.5 text-xs font-extrabold text-white shadow-xs"
+                        >
+                          <Headphones className="w-4 h-4" />
+                          {rtcStatus === 'connecting'
+                            ? 'Connexion audio P2P...'
+                            : 'Lancer Écoute Supervision (Silencieuse)'}
+                        </button>
+                      ) : (
                     <>
                       <button
                         type="button"
@@ -1133,6 +1172,8 @@ export const CollaboratorProfileChatModal: React.FC<CollaboratorProfileChatModal
                   <span>P2P Audio chiffré DTLS-SRTP</span>
                 </div>
               </div>
+                );
+              })()}
             </div>
           )}
         </div>

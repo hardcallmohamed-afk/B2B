@@ -122,6 +122,7 @@ import { buildMemberContractSyncSummary } from './utils/clientProfiles';
 import {
   moveFicheToStatut,
   computePortfolioVelocity,
+  parseSafeHeadcount,
   type VelocityLevel,
 } from './utils/analytics';
 import {
@@ -218,6 +219,7 @@ import {
   createSignedContract,
   adminUpdateSignedContract,
   adminSyncMemberContractStats,
+  adminResyncTeamMemberStats,
   managerUpdateSignedContract,
   fetchTeamMemberFiches,
   getUserNotificationsQuery,
@@ -1642,7 +1644,7 @@ export function parseCsvOrJsonImport(raw: string, villesCibles: string[]): Fiche
 // 6. MOTEUR FETCH MULTI-FALLBACK CORS (ALLORIGINS / CORSPROXY / R.JINA.AI / DIRECT)
 // ============================================================================
 
-export type ProxyStrategy = 'auto' | 'allorigins' | 'corsproxy' | 'jina' | 'direct';
+export type ProxyStrategy = 'auto' | 'server' | 'allorigins' | 'corsproxy' | 'jina' | 'direct';
 
 async function fetchTimed(
   url: string,
@@ -1698,20 +1700,25 @@ async function fetchWithFallback(
   timeoutMs = 6500
 ): Promise<{ text: string; usedStrategy: string }> {
   const cleanUrl = url.trim();
+  if (strategy === 'server') {
+    const serverRes = await tryServerCrawlProxy(cleanUrl, signal, timeoutMs);
+    if (serverRes) return serverRes;
+    return fetchWithFallback(cleanUrl, 'auto', signal, timeoutMs);
+  }
   if (strategy === 'auto') {
     const serverRes = await tryServerCrawlProxy(cleanUrl, signal, timeoutMs);
     if (serverRes) return serverRes;
   }
 
-  const builders: Record<Exclude<ProxyStrategy, 'auto'>, (u: string) => string> = {
+  const builders: Record<Exclude<ProxyStrategy, 'auto' | 'server'>, (u: string) => string> = {
     allorigins: (u) => `https://api.allorigins.win/raw?url=${encodeURIComponent(u)}`,
     corsproxy: (u) => `https://corsproxy.io/?${encodeURIComponent(u)}`,
     jina: (u) => `https://r.jina.ai/${u}`,
     direct: (u) => u,
   };
 
-  const order: Exclude<ProxyStrategy, 'auto'>[] =
-    strategy === 'auto' ? ['allorigins', 'corsproxy', 'jina', 'direct'] : [strategy];
+  const order: Exclude<ProxyStrategy, 'auto' | 'server'>[] =
+    strategy === 'auto' ? ['jina', 'allorigins', 'direct'] : [strategy];
 
   let lastErr = 'Échec réseau';
   for (const mode of order) {
@@ -1742,7 +1749,7 @@ async function fetchFastest(
   timeoutMs = 3500
 ): Promise<{ text: string; usedStrategy: string }> {
   const cleanUrl = url.trim();
-  const builders: Record<Exclude<ProxyStrategy, 'auto'>, (u: string) => string> = {
+  const builders: Record<Exclude<ProxyStrategy, 'auto' | 'server'>, (u: string) => string> = {
     allorigins: (u) => `https://api.allorigins.win/raw?url=${encodeURIComponent(u)}`,
     corsproxy: (u) => `https://corsproxy.io/?${encodeURIComponent(u)}`,
     jina: (u) => `https://r.jina.ai/${u}`,
@@ -1756,7 +1763,7 @@ async function fetchFastest(
   const serverRes = await tryServerCrawlProxy(cleanUrl, signal, timeoutMs);
   if (serverRes) return serverRes;
 
-  const tryOne = async (mode: Exclude<ProxyStrategy, 'auto'>) => {
+  const tryOne = async (mode: Exclude<ProxyStrategy, 'auto' | 'server'>) => {
     const res = await fetchTimed(builders[mode](cleanUrl), signal, timeoutMs);
     if (!res.ok) throw new Error(`${mode} HTTP ${res.status}`);
     const text = await res.text();
@@ -1765,10 +1772,10 @@ async function fetchFastest(
   };
 
   try {
-    return await Promise.any([tryOne('allorigins'), tryOne('corsproxy')]);
+    return await Promise.any([tryOne('jina'), tryOne('allorigins')]);
   } catch {
     if (signal.aborted) throw new Error('Arrêté par l’utilisateur');
-    return await tryOne('jina');
+    return await tryOne('direct');
   }
 }
 
@@ -3022,11 +3029,23 @@ export default function App() {
     if (isStaticHostingEnvironment()) return;
     fetch('/api/email/status')
       .then((r) => (r.ok ? r.json() : null))
-      .then((d: { configured?: boolean; fromEmail?: string } | null) => {
-        if (d && typeof d.configured === 'boolean') {
-          setSmtpStatus({ configured: d.configured, fromEmail: String(d.fromEmail || '') });
+      .then(
+        (
+          d: {
+            available?: boolean;
+            configured?: boolean;
+            fromAddress?: string | null;
+            fromEmail?: string | null;
+          } | null
+        ) => {
+          if (d && (typeof d.available === 'boolean' || typeof d.configured === 'boolean')) {
+            setSmtpStatus({
+              configured: Boolean(d.available ?? d.configured),
+              fromEmail: String(d.fromAddress || d.fromEmail || ''),
+            });
+          }
         }
-      })
+      )
       .catch(() => {});
   }, []);
 
@@ -3686,6 +3705,15 @@ export default function App() {
       setRdvModalFiche(null);
       setRdvModalOwnerUid(null);
       setAssignRestoreTarget(null);
+      setProfileChatModal(null);
+      setSignContractTarget(null);
+      setShowApiHub(false);
+      setShowAiCopilot(false);
+      setCopilotFiche(null);
+      setAssistModalFiche(null);
+      setShowQuickAdd(false);
+      setShowSkillEditor(false);
+      setEmailModalFiche(null);
       cloudNotifsHydratedRef.current = false;
       seenCloudNotifIdsRef.current = new Set();
       accessNotifCooldownRef.current = new Map();
@@ -5064,9 +5092,12 @@ export default function App() {
       getCoachingSessionsQuery(),
       (snap) => {
         const ready = new Set<string>();
+        const nowMs = Date.now();
         snap.forEach((docSnap) => {
           const d = docSnap.data();
-          if (Boolean(d.collabConsentActive)) {
+          const updatedAtMs = Date.parse(String(d.updatedAtIso || ''));
+          const isRecent = Number.isFinite(updatedAtMs) && nowMs - updatedAtMs <= 20 * 60 * 1000;
+          if (Boolean(d.collabConsentActive) && Boolean(d.offerSdp) && isRecent) {
             ready.add(docSnap.id);
           }
         });
@@ -6043,6 +6074,24 @@ export default function App() {
         activeAttendanceRef.current = null;
       }
       await signOutUser();
+      setDetailModalFicheId(null);
+      setDetailModalExternalTarget(null);
+      setQuoteModalFiche(null);
+      setQuoteModalOwnerUid(null);
+      setActiviteModalFiche(null);
+      setActiviteModalOwnerUid(null);
+      setRdvModalFiche(null);
+      setRdvModalOwnerUid(null);
+      setAssignRestoreTarget(null);
+      setProfileChatModal(null);
+      setSignContractTarget(null);
+      setShowApiHub(false);
+      setShowAiCopilot(false);
+      setCopilotFiche(null);
+      setAssistModalFiche(null);
+      setShowQuickAdd(false);
+      setShowSkillEditor(false);
+      setEmailModalFiche(null);
       setActiveTab('portefeuille');
       notify('Session fermée en toute sécurité.');
     } catch {
@@ -6541,7 +6590,7 @@ export default function App() {
       if (tierFilter && getOrangeProRecommendation(f).tier !== tierFilter) return false;
 
       if (effectifFilter) {
-        const eff = parseInt(f.effectif, 10) || 0;
+        const eff = parseSafeHeadcount(f.effectif);
         if (effectifFilter === 'vide' && eff > 0) return false;
         if (effectifFilter === 'tpe' && (eff <= 0 || eff >= 10)) return false;
         if (effectifFilter === 'pme' && (eff < 10 || eff >= 30)) return false;
@@ -6578,7 +6627,7 @@ export default function App() {
       let cmp = 0;
       if (sortField === 'societe') cmp = a.societe.localeCompare(b.societe);
       else if (sortField === 'ville') cmp = a.ville.localeCompare(b.ville);
-      else if (sortField === 'effectif') cmp = (parseInt(a.effectif, 10) || 0) - (parseInt(b.effectif, 10) || 0);
+      else if (sortField === 'effectif') cmp = parseSafeHeadcount(a.effectif) - parseSafeHeadcount(b.effectif);
       else if (sortField === 'dateAjout') {
         cmp = parseDateAjoutTimestamp(a.dateAjout) - parseDateAjoutTimestamp(b.dateAjout);
         if (cmp === 0) cmp = a.societe.localeCompare(b.societe);
@@ -6601,6 +6650,42 @@ export default function App() {
     effectifFilter, completudeFilter, sourceFilter, statutFilter, onlyReadyToCall,
     onlyBottlenecks, velocityReport, sortField, sortDir,
   ]);
+
+  const [portfolioPageSize, setPortfolioPageSize] = useState<25 | 50 | 100 | 'all'>(50);
+  const [portfolioPage, setPortfolioPage] = useState<number>(1);
+
+  useEffect(() => {
+    setPortfolioPage(1);
+  }, [
+    search,
+    couleurFilter,
+    secteurFilter,
+    regionFilter,
+    villeFilter,
+    tierFilter,
+    effectifFilter,
+    completudeFilter,
+    sourceFilter,
+    statutFilter,
+    onlyReadyToCall,
+    onlyBottlenecks,
+    sortField,
+    sortDir,
+    portfolioPageSize,
+  ]);
+
+  const portfolioTotalPages = useMemo(() => {
+    if (portfolioPageSize === 'all') return 1;
+    return Math.max(1, Math.ceil(filteredFiches.length / portfolioPageSize));
+  }, [filteredFiches.length, portfolioPageSize]);
+
+  const safePortfolioPage = Math.min(portfolioPage, portfolioTotalPages);
+
+  const paginatedFiches = useMemo(() => {
+    if (portfolioPageSize === 'all') return filteredFiches;
+    const startIdx = (safePortfolioPage - 1) * portfolioPageSize;
+    return filteredFiches.slice(startIdx, startIdx + portfolioPageSize);
+  }, [filteredFiches, portfolioPageSize, safePortfolioPage]);
 
   const incompleteFilteredFiches = useMemo(
     () => filteredFiches.filter((f) => !f.telephone || !f.email || !f.contact || !f.effectif),
@@ -8075,7 +8160,8 @@ ${assistPasteText.slice(0, 6000)}`;
     const rawNextCode = generateNextNumeroFiche(fiches);
     const nextCode = formatFicheNumeroWithPrefix(rawNextCode, advPrefs.ficheNumberPrefix);
     const safeInitialStatut: StatutCRM =
-      !isTeamSupervisor && quickAddStatut === 'Signé Orange Pro' ? 'À contacter' : quickAddStatut;
+      quickAddStatut === 'Signé Orange Pro' ? 'À contacter' : quickAddStatut;
+    const parsedQuickEffectif = parseSafeHeadcount(quickForm.effectif);
     const f: FicheEntreprise = {
       id: makeId(),
       numeroFiche: nextCode,
@@ -8089,7 +8175,7 @@ ${assistPasteText.slice(0, 6000)}`;
       contact: quickForm.contact.trim(),
       role: quickForm.role.trim(),
       source: quickForm.source.trim() || 'Saisie manuelle',
-      effectif: quickForm.effectif ? String(parseInt(quickForm.effectif, 10) || '') : '',
+      effectif: parsedQuickEffectif > 0 ? String(parsedQuickEffectif) : '',
       statut: safeInitialStatut,
       dateAjout: new Date().toISOString(),
       statutUpdatedAt: new Date().toISOString(),
@@ -8477,9 +8563,6 @@ ${assistPasteText.slice(0, 6000)}`;
   );
 
   const handleSelectNotification = async (n: AppNotification) => {
-    if (n.kind === 'coaching_invite' && !isSupervisorRole(currentUserRole)) {
-      return;
-    }
     if (n.kind === 'direct_message' || n.kind === 'coaching_invite') {
       if (isSuperAdmin && n.ficheMeta?.ficheOwnerId) {
         openCollaboratorProfileByUid(
@@ -11097,7 +11180,7 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
                         </td>
                       </tr>
                     ) : (
-                      filteredFiches.map((f) => {
+                      paginatedFiches.map((f) => {
                         const secMeta = SECTEURS_META[f.secteur] || SECTEURS_META.pme;
                         const seg = SEGMENTS_COULEUR[secMeta.couleur];
                         const reco = getOrangeProRecommendation(f);
@@ -11657,6 +11740,77 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
                   </tbody>
                 </table>
               </div>
+              {filteredFiches.length > 0 && (
+                <div
+                  data-testid="portfolio-pagination-bar"
+                  className="px-4 py-2.5 bg-white border-t border-stone-200 flex flex-wrap items-center justify-between gap-3 text-xs text-stone-600"
+                >
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="font-medium text-stone-700">
+                      Affichage{' '}
+                      <strong className="text-stone-900">
+                        {portfolioPageSize === 'all'
+                          ? 1
+                          : Math.min(
+                              filteredFiches.length,
+                              (safePortfolioPage - 1) * portfolioPageSize + 1
+                            )}
+                      </strong>
+                      –
+                      <strong className="text-stone-900">
+                        {portfolioPageSize === 'all'
+                          ? filteredFiches.length
+                          : Math.min(filteredFiches.length, safePortfolioPage * portfolioPageSize)}
+                      </strong>{' '}
+                      sur <strong className="text-stone-900">{filteredFiches.length}</strong> fiches
+                    </span>
+                    <label className="inline-flex items-center gap-1.5 ml-2">
+                      <span className="text-stone-500">Par page :</span>
+                      <select
+                        aria-label="Nombre de fiches par page"
+                        value={String(portfolioPageSize)}
+                        onChange={(e) => {
+                          const v = e.target.value;
+                          setPortfolioPageSize(
+                            v === 'all' ? 'all' : (Number(v) as 25 | 50 | 100)
+                          );
+                        }}
+                        className="px-2 py-1 rounded-lg border border-stone-300 bg-white text-stone-800 font-semibold"
+                      >
+                        <option value="25">25</option>
+                        <option value="50">50</option>
+                        <option value="100">100</option>
+                        <option value="all">Tout</option>
+                      </select>
+                    </label>
+                  </div>
+                  {portfolioPageSize !== 'all' && portfolioTotalPages > 1 && (
+                    <div className="flex items-center gap-1.5">
+                      <button
+                        type="button"
+                        disabled={safePortfolioPage <= 1}
+                        onClick={() => setPortfolioPage((p) => Math.max(1, p - 1))}
+                        className="px-2.5 py-1 rounded-lg border border-stone-300 bg-white hover:bg-stone-100 disabled:opacity-40 font-semibold text-stone-800"
+                      >
+                        Précédent
+                      </button>
+                      <span className="px-2 font-mono font-semibold text-stone-700">
+                        Page {safePortfolioPage} / {portfolioTotalPages}
+                      </span>
+                      <button
+                        type="button"
+                        disabled={safePortfolioPage >= portfolioTotalPages}
+                        onClick={() =>
+                          setPortfolioPage((p) => Math.min(portfolioTotalPages, p + 1))
+                        }
+                        className="px-2.5 py-1 rounded-lg border border-stone-300 bg-white hover:bg-stone-100 disabled:opacity-40 font-semibold text-stone-800"
+                      >
+                        Suivant
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
               <div className="px-4 py-2.5 bg-stone-50 border-t border-stone-200 flex flex-wrap items-center justify-between gap-2 text-xs text-stone-500">
                 <span>
                   Astuce : clique directement sur n’importe quelle cellule (société, tél, email, contact, rôle, effectif) pour l’éditer en place.
@@ -11827,10 +11981,16 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
                     onChange={(e) => setProxyStrategy(e.target.value as ProxyStrategy)}
                     className="w-full px-2.5 py-2 rounded-lg border border-stone-300 bg-white"
                   >
-                    <option value="auto">Auto (course allorigins / corsproxy → r.jina.ai → direct)</option>
-                    <option value="allorigins">allorigins.win</option>
-                    <option value="corsproxy">corsproxy.io</option>
+                    <option value="auto">
+                      {isStaticHostingEnvironment()
+                        ? 'Auto (r.jina.ai → allorigins.win → Fetch direct)'
+                        : 'Auto (Serveur Node → r.jina.ai → allorigins.win → Fetch direct)'}
+                    </option>
+                    {!isStaticHostingEnvironment() && (
+                      <option value="server">Relais Serveur Node (/api/crawl)</option>
+                    )}
                     <option value="jina">r.jina.ai (SPA / React / Angular)</option>
+                    <option value="allorigins">allorigins.win</option>
                     <option value="direct">Fetch direct</option>
                   </select>
                 </div>
@@ -12512,6 +12672,14 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
             signedContracts={signedContracts}
             initialSelectedUid={badgesFocusUid}
             onAdminToggleManualBadge={isSuperAdmin ? handleAdminToggleManualBadge : undefined}
+            onAdminResyncMemberStat={
+              isSuperAdmin
+                ? async (targetUid, patch) => {
+                    await adminResyncTeamMemberStats(targetUid, patch);
+                    notify('Statistiques équipe resynchronisées avec succès.');
+                  }
+                : undefined
+            }
           />
         )}
 
@@ -12603,6 +12771,7 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
             unreadChatByUid={unreadChatByUid}
             coachingReadyUids={coachingReadyUids}
             onRequestMyGpsRefresh={handleActivateOrRefreshGps}
+            onOpenLocalApiHub={() => setShowApiHub(true)}
             onNotify={notify}
           />
         )}
@@ -13474,10 +13643,7 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
                   onChange={(e) => setQuickAddStatut(e.target.value as StatutCRM)}
                   className="w-full px-3 py-2 rounded-lg border border-stone-300 bg-white"
                 >
-                  {(isTeamSupervisor
-                    ? STATUTS_CRM
-                    : STATUTS_CRM.filter((s) => s !== 'Signé Orange Pro')
-                  ).map((s) => (
+                  {STATUTS_CRM.filter((s) => s !== 'Signé Orange Pro').map((s) => (
                     <option key={s} value={s}>
                       {s}
                     </option>
@@ -14052,7 +14218,11 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
             userPresences.find((p) => p.role === 'super_admin')?.uid
           }
           forceOpenSignal={collabChatOpenSignal}
-          hasCoachingInvite={notifications.some((n) => n.kind === 'coaching_invite' && !n.read)}
+          hasCoachingInvite={notifications.some((n) => {
+            if (n.kind !== 'coaching_invite') return false;
+            const ts = Date.parse(n.createdAt || '');
+            return !n.read || (Number.isFinite(ts) && Date.now() - ts <= 24 * 60 * 60 * 1000);
+          })}
           onNotify={(msg, type) =>
             notify(msg, type === 'err' ? 'err' : type === 'warn' ? 'warn' : 'ok')
           }

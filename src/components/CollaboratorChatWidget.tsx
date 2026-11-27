@@ -50,16 +50,11 @@ async function fetchRtcIceServers(): Promise<RTCIceServer[]> {
 }
 
 export const SupervisorCoachingPttPill: React.FC<{
-  currentUserRole: string;
+  currentUserRole?: string;
   coachingActive: boolean;
   adminPttActive: boolean;
-}> = ({ currentUserRole, coachingActive, adminPttActive }) => {
-  if (
-    !isSupervisorRole(currentUserRole) ||
-    !canUseWhisperCoaching(currentUserRole) ||
-    !coachingActive ||
-    !adminPttActive
-  ) {
+}> = ({ coachingActive, adminPttActive }) => {
+  if (!coachingActive || !adminPttActive) {
     return null;
   }
   return (
@@ -97,21 +92,27 @@ export const SupervisorCoachingHeaderStopButton: React.FC<{
 export const SupervisorAudioControlsContainer: React.FC<{
   currentUserRole: string;
   hasCoachingInvite?: boolean;
+  hasStaleSession?: boolean;
+  allowManualOptIn?: boolean;
   isListeningOrActive: boolean;
   coachingBusy: boolean;
   coachingError: string;
   onStart: () => void;
+  onStopStale?: () => void;
 }> = ({
   currentUserRole,
   hasCoachingInvite = false,
+  hasStaleSession = false,
+  allowManualOptIn = false,
   isListeningOrActive,
   coachingBusy,
   coachingError,
   onStart,
+  onStopStale,
 }) => {
   const isSupervisor =
     isSupervisorRole(currentUserRole) && canUseWhisperCoaching(currentUserRole);
-  if (!isSupervisor && !hasCoachingInvite) {
+  if (!isSupervisor && !hasCoachingInvite && !hasStaleSession && !allowManualOptIn) {
     return null;
   }
   if (isListeningOrActive) {
@@ -121,21 +122,46 @@ export const SupervisorAudioControlsContainer: React.FC<{
     <>
       <div
         data-testid="supervisor-audio-controls-container"
-        className="px-3.5 py-2 border-b border-stone-200 bg-stone-50 flex items-center justify-between gap-2"
+        className="px-3.5 py-2 border-b border-stone-200 bg-stone-50 flex flex-wrap items-center justify-between gap-2"
       >
         <div className="text-[11px] font-semibold text-stone-700 flex items-center gap-1.5">
           <Mic className="w-3.5 h-3.5 text-orange-600" />
-          <span>{isSupervisor ? 'Audio Direction' : 'Invitation Audio Direction'}</span>
+          <span>
+            {hasStaleSession
+              ? 'Session audio interrompue'
+              : isSupervisor
+                ? 'Audio Direction'
+                : hasCoachingInvite
+                  ? 'Invitation Audio Direction'
+                  : 'Coaching Terrain (Opt-in)'}
+          </span>
         </div>
-        <button
-          type="button"
-          disabled={coachingBusy}
-          onClick={onStart}
-          className="inline-flex items-center gap-1 rounded-lg bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 px-2.5 py-1 text-[10px] font-bold text-white"
-        >
-          <Mic className="w-3 h-3" />
-          {coachingBusy ? 'Activation...' : 'Autoriser micro'}
-        </button>
+        <div className="flex items-center gap-1.5">
+          {hasStaleSession && onStopStale && (
+            <button
+              type="button"
+              disabled={coachingBusy}
+              onClick={onStopStale}
+              data-testid="close-stale-coaching-session-btn"
+              className="inline-flex items-center gap-1 rounded-lg border border-stone-300 bg-white hover:bg-stone-100 disabled:opacity-50 px-2 py-1 text-[10px] font-bold text-stone-700"
+            >
+              Clôturer la session précédente
+            </button>
+          )}
+          <button
+            type="button"
+            disabled={coachingBusy}
+            onClick={onStart}
+            className="inline-flex items-center gap-1 rounded-lg bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 px-2.5 py-1 text-[10px] font-bold text-white"
+          >
+            <Mic className="w-3 h-3" />
+            {coachingBusy
+              ? 'Activation...'
+              : hasStaleSession
+                ? 'Réactiver le micro'
+                : 'Autoriser micro'}
+          </button>
+        </div>
       </div>
       {coachingError && (
         <div className="px-3.5 py-1.5 bg-red-50 border-b border-red-200 text-[10px] font-semibold text-red-700">
@@ -172,6 +198,7 @@ export const CollaboratorChatWidget: React.FC<CollaboratorChatWidgetProps> = ({
   onNotify,
 }) => {
   const [open, setOpen] = useState(initialOpen);
+  const [manualCoachingOptInOpen, setManualCoachingOptInOpen] = useState(false);
   const canShowAudioSupervisionUi =
     isSupervisorRole(currentUserRole) && canUseWhisperCoaching(currentUserRole);
   const [unreadCount, setUnreadCount] = useState(0);
@@ -703,11 +730,16 @@ export const CollaboratorChatWidget: React.FC<CollaboratorChatWidgetProps> = ({
     }
   };
 
-  const isListeningOrActive = coachingActive || coachingDoc?.status === 'live';
+  const isListeningOrActive = coachingActive;
+  const hasStaleSession =
+    !coachingActive &&
+    Boolean(coachingDoc?.collabConsentActive || coachingDoc?.status === 'live');
+  const isSupervisor =
+    isSupervisorRole(currentUserRole) && canUseWhisperCoaching(currentUserRole);
 
   return (
     <>
-      {/* Contrôles & indicateur audio/supervision strictement réservés aux superviseurs (return null sinon) */}
+      {/* Indicateur Push-to-Talk : affiché dès que le collaborateur a autorisé son micro (coachingActive) et que la Direction parle */}
       <SupervisorCoachingPttPill
         currentUserRole={currentUserRole}
         coachingActive={coachingActive}
@@ -747,6 +779,22 @@ export const CollaboratorChatWidget: React.FC<CollaboratorChatWidgetProps> = ({
               </div>
             </div>
             <div className="flex items-center gap-1">
+              {!isSupervisor && !coachingActive && !hasCoachingInvite && !hasStaleSession && (
+                <button
+                  type="button"
+                  data-testid="collab-coaching-optin-toggle"
+                  onClick={() => setManualCoachingOptInOpen((v) => !v)}
+                  title="Coaching Terrain (Opt-in micro)"
+                  className={`px-2 py-1 rounded-lg text-[10px] font-bold inline-flex items-center gap-1 transition-colors ${
+                    manualCoachingOptInOpen
+                      ? 'bg-orange-600 text-white'
+                      : 'bg-stone-800 text-stone-300 hover:text-white'
+                  }`}
+                >
+                  <Mic className="w-3 h-3" />
+                  <span>Coaching</span>
+                </button>
+              )}
               <SupervisorCoachingHeaderStopButton
                 currentUserRole={currentUserRole}
                 coachingActive={coachingActive}
@@ -766,10 +814,13 @@ export const CollaboratorChatWidget: React.FC<CollaboratorChatWidgetProps> = ({
           <SupervisorAudioControlsContainer
             currentUserRole={currentUserRole}
             hasCoachingInvite={hasCoachingInvite}
+            hasStaleSession={hasStaleSession}
+            allowManualOptIn={manualCoachingOptInOpen}
             isListeningOrActive={isListeningOrActive}
             coachingBusy={coachingBusy}
             coachingError={coachingError}
             onStart={() => void startCollaboratorCoaching()}
+            onStopStale={() => void stopCollaboratorCoaching(true)}
           />
 
           {/* Messages */}

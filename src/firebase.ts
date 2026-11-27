@@ -948,6 +948,37 @@ export async function adminSyncMemberContractStats(
   }
 }
 
+export async function adminResyncTeamMemberStats(
+  targetUid: string,
+  patch: {
+    totalProspects: number;
+    totalQualified: number;
+    totalContracts: number;
+    totalPayoutMad: number;
+    xp: number;
+    unlockedCount: number;
+  }
+): Promise<void> {
+  if (!targetUid) return;
+  const path = `team_stats/${targetUid}`;
+  const ref = doc(db, 'team_stats', targetUid);
+  try {
+    const snap = await getDoc(ref);
+    if (!snap.exists()) return;
+    await updateDoc(ref, {
+      totalProspects: Math.max(0, Math.round(patch.totalProspects)),
+      totalQualified: Math.max(0, Math.round(patch.totalQualified)),
+      totalContracts: Math.max(0, Math.round(patch.totalContracts)),
+      totalPayoutMad: Math.max(0, Math.round(patch.totalPayoutMad)),
+      xp: Math.max(0, Math.round(patch.xp)),
+      unlockedCount: Math.max(0, Math.round(patch.unlockedCount)),
+      updatedAt: serverTimestamp(),
+    });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.UPDATE, path);
+  }
+}
+
 const BATCH_LIMIT = 400;
 
 function buildMutableFicheUpdate(docData: SanitizedFicheDoc): DocumentData {

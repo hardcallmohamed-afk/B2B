@@ -11,6 +11,7 @@ import {
 import { NotificationBell } from './components/NotificationBell';
 import { AchievementToast } from './components/AchievementToast';
 import { filterNotificationsForRole, type AppNotification } from './utils/notifications';
+import { parseSafeHeadcount, buildPipelineFunnelStats } from './utils/analytics';
 import {
   normalizeMoroccanPhone,
   normalizeProEmail,
@@ -392,5 +393,79 @@ test('NotificationBell and AchievementToast deliver coaching_invite to collabora
       })
     ).includes('Coaching Terrain Live')
   );
+
+  // When a collaborator has explicitly activated their mic (coachingActive=true), SupervisorCoachingPttPill shows the live indicator when adminPttActive is true
+  const activeCollabPttHtml = renderToStaticMarkup(
+    React.createElement(SupervisorCoachingPttPill, {
+      currentUserRole: 'commercial',
+      coachingActive: true,
+      adminPttActive: true,
+    })
+  );
+  assert.ok(activeCollabPttHtml.includes('coaching-ptt-live-pill'));
+  assert.ok(activeCollabPttHtml.includes('Direction en ligne (audio)'));
+
+  // Stale session recovery renders reactivation and close buttons for collaborator after reload
+  const staleCollabControlsHtml = renderToStaticMarkup(
+    React.createElement(SupervisorAudioControlsContainer, {
+      currentUserRole: 'commercial',
+      hasCoachingInvite: false,
+      hasStaleSession: true,
+      isListeningOrActive: false,
+      coachingBusy: false,
+      coachingError: '',
+      onStart: () => {},
+      onStopStale: () => {},
+    })
+  );
+  assert.ok(staleCollabControlsHtml.includes('Réactiver le micro'));
+  assert.ok(staleCollabControlsHtml.includes('Clôturer la session précédente'));
 });
+
+test('parseSafeHeadcount rejects phone numbers, ICE codes and outliers (> 50000) to protect Kanban and KPI headcount sums', () => {
+  assert.equal(parseSafeHeadcount('18'), 18);
+  assert.equal(parseSafeHeadcount(250), 250);
+  assert.equal(parseSafeHeadcount('50000'), 50000);
+  assert.equal(parseSafeHeadcount('50001'), 0);
+  assert.equal(parseSafeHeadcount('0535521840'), 0);
+  assert.equal(parseSafeHeadcount('0661482910'), 0);
+  assert.equal(parseSafeHeadcount('001524879000045'), 0);
+  assert.equal(parseSafeHeadcount('-12'), 0);
+  assert.equal(parseSafeHeadcount(''), 0);
+  assert.equal(parseSafeHeadcount(null), 0);
+
+  const breakdown = buildPipelineFunnelStats([
+    {
+      id: '1',
+      societe: 'Alpha SARL',
+      secteur: 'pme',
+      ville: 'Meknès',
+      telephone: '0535521010',
+      email: 'contact@alpha.ma',
+      contact: 'Karim',
+      role: 'Gérant',
+      source: 'Web',
+      effectif: '25',
+      statut: 'À contacter',
+      dateAjout: '2026-11-26T10:00:00.000Z',
+    },
+    {
+      id: '2',
+      societe: 'Beta Bad Effectif',
+      secteur: 'pme',
+      ville: 'Fès',
+      telephone: '0535601010',
+      email: 'contact@beta.ma',
+      contact: 'Sara',
+      role: 'DG',
+      source: 'Web',
+      effectif: '0535601010',
+      statut: 'À contacter',
+      dateAjout: '2026-11-26T10:05:00.000Z',
+    },
+  ]);
+  const aContacter = breakdown.find((b) => b.statut === 'À contacter');
+  assert.equal(aContacter?.totalEffectif, 25);
+});
+
 

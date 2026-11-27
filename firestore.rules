@@ -1092,7 +1092,7 @@ service cloud.firestore {
       // 10. Subcollection: /users/{userId}/fiches/{ficheId} (B2B CRM Prospects — Locked after Signing for Collaborators)
       match /fiches/{ficheId} {
         allow get: if isValidId(userId) && isValidId(ficheId) && (
-          (isOwner(userId) && (resource == null || existing().ownerId == request.auth.uid) && (isSuperAdmin() || resource == null || existing().statut != 'Signé Orange Pro'))
+          (isOwner(userId) && (resource == null || existing().ownerId == request.auth.uid))
           || ((isSuperAdmin() || isTeamLeadOrManager()) && (resource == null || existing().ownerId == userId))
         );
 

@@ -62,19 +62,19 @@ test('detectClientDeviceInfo identifies Windows Chrome desktop and iPhone Safari
   assert.equal(mobile.label, 'iPhone (iOS) · Safari (Mobile)');
 });
 
-test('isDuringWorkHours enforces Mon-Fri 08:30-18:30, Sat 09:00-13:00, and Sun off', () => {
-  // Wednesday 10:15 local
-  assert.equal(isDuringWorkHours(new Date(2026, 10, 25, 10, 15, 0)).duringWorkHours, true);
-  // Wednesday 07:45 local (before hours)
-  assert.equal(isDuringWorkHours(new Date(2026, 10, 25, 7, 45, 0)).duringWorkHours, false);
-  // Wednesday 20:00 local (after hours)
-  assert.equal(isDuringWorkHours(new Date(2026, 10, 25, 20, 0, 0)).duringWorkHours, false);
-  // Saturday 11:00 local
-  assert.equal(isDuringWorkHours(new Date(2026, 10, 28, 11, 0, 0)).duringWorkHours, true);
-  // Saturday 15:00 local
-  assert.equal(isDuringWorkHours(new Date(2026, 10, 28, 15, 0, 0)).duringWorkHours, false);
-  // Sunday 10:00 local
-  assert.equal(isDuringWorkHours(new Date(2026, 10, 29, 10, 0, 0)).duringWorkHours, false);
+test('isDuringWorkHours enforces Mon-Fri 08:30-18:30, Sat 09:00-13:00, and Sun off in Africa/Casablanca (UTC+1)', () => {
+  // Wednesday 10:15 Casablanca (09:15 UTC)
+  assert.equal(isDuringWorkHours(new Date('2026-11-25T09:15:00.000Z')).duringWorkHours, true);
+  // Wednesday 07:45 Casablanca (06:45 UTC - before hours)
+  assert.equal(isDuringWorkHours(new Date('2026-11-25T06:45:00.000Z')).duringWorkHours, false);
+  // Wednesday 20:00 Casablanca (19:00 UTC - after hours)
+  assert.equal(isDuringWorkHours(new Date('2026-11-25T19:00:00.000Z')).duringWorkHours, false);
+  // Saturday 11:00 Casablanca (10:00 UTC)
+  assert.equal(isDuringWorkHours(new Date('2026-11-28T10:00:00.000Z')).duringWorkHours, true);
+  // Saturday 15:00 Casablanca (14:00 UTC)
+  assert.equal(isDuringWorkHours(new Date('2026-11-28T14:00:00.000Z')).duringWorkHours, false);
+  // Sunday 10:00 Casablanca (09:00 UTC)
+  assert.equal(isDuringWorkHours(new Date('2026-11-29T09:00:00.000Z')).duringWorkHours, false);
 });
 
 test('formatWorkedDuration, disconnect entry parsing, and heartbeat delta caps behave accurately', () => {
@@ -99,7 +99,7 @@ test('formatWorkedDuration, disconnect entry parsing, and heartbeat delta caps b
     buildDeviceHistoryList(['Android · Chrome (Mobile)', 'Windows · Chrome (PC / Bureau)'], 'Windows · Chrome (PC / Bureau)'),
     ['Windows · Chrome (PC / Bureau)', 'Android · Chrome (Mobile)']
   );
-  assert.match(getLocalDateKey(new Date(2026, 10, 25)), /^2026-11-25$/);
+  assert.match(getLocalDateKey(new Date('2026-11-25T12:00:00.000Z')), /^2026-11-25$/);
 });
 
 test('encodeLiveFieldTelemetry, parseLiveFieldTelemetry, and resolveCollaboratorCoordinates keep telemetry <= 160 chars and decode accurately', () => {
@@ -213,7 +213,16 @@ test('getRoleCapabilities grants progressive CRM privileges per role while stric
     assert.ok(caps.unlockedPerks.length >= 3);
   }
 
-  // Progressive perks verification
+  // All commercial roles have full access to Crawler L2, Batch Audit 8 workers, MDM Deduplication, and Backup JSON
+  for (const r of nonAdminRoles) {
+    const caps = getRoleCapabilities(r, false);
+    assert.equal(caps.canUseDeepCrawlerL2, true);
+    assert.equal(caps.canBatchAudit8Workers, true);
+    assert.equal(caps.canUseMdmDeduplication, true);
+    assert.equal(caps.canExportFullBackupJson, true);
+  }
+
+  // Supervision & hierarchy perks verification
   const commCaps = getRoleCapabilities('commercial', false);
   const gcCaps = getRoleCapabilities('grand_compte', false);
   const leadCaps = getRoleCapabilities('team_lead', false);
@@ -221,8 +230,8 @@ test('getRoleCapabilities grants progressive CRM privileges per role while stric
 
   assert.equal(commCaps.canPrioritizeGrandCompte, false);
   assert.equal(gcCaps.canPrioritizeGrandCompte, true);
-  assert.equal(gcCaps.canUseMdmDeduplication, false);
-  assert.equal(leadCaps.canUseMdmDeduplication, true);
+  assert.equal(gcCaps.canViewSquadLeaderboard, false);
+  assert.equal(leadCaps.canViewSquadLeaderboard, true);
   assert.equal(leadCaps.canSuperviseTeamPayouts, false);
   assert.equal(mgrCaps.canSuperviseTeamPayouts, true);
 

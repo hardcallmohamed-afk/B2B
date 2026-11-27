@@ -146,6 +146,7 @@ interface AdminUsersPanelProps {
   unreadChatByUid?: Record<string, number>;
   coachingReadyUids?: Set<string>;
   onRequestMyGpsRefresh?: () => Promise<void> | void;
+  onOpenLocalApiHub?: () => void;
   onNotify: (msg: string, type?: 'ok' | 'warn' | 'err') => void;
 }
 
@@ -165,6 +166,7 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
   unreadChatByUid = {},
   coachingReadyUids,
   onRequestMyGpsRefresh,
+  onOpenLocalApiHub,
   onNotify,
 }) => {
   const [internalSection, setInternalSection] = useState<AdminPanelSection>('all');
@@ -3590,6 +3592,34 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
 }`}</pre>
         )}
 
+        {isStaticHostingEnvironment() && (
+          <div
+            data-testid="vault-static-hosting-banner"
+            className="rounded-xl border border-amber-300 bg-amber-50/90 p-3 text-xs text-amber-950 flex flex-wrap items-center justify-between gap-2.5"
+          >
+            <div className="space-y-0.5 max-w-2xl">
+              <div className="font-bold flex items-center gap-1.5 text-amber-900">
+                <AlertTriangle className="w-3.5 h-3.5 text-amber-700 shrink-0" />
+                Hébergement statique détecté (GitHub Pages) — Coffre Cloud Serveur en lecture
+              </div>
+              <p className="text-[11px] text-amber-800/90">
+                Le Coffre Cloud Serveur (<code className="font-mono">/api/admin/api-keys</code>) nécessite le serveur Node/Express (<code className="font-mono">server.ts</code>). Sur GitHub Pages, enregistrez vos clés IA dans le Hub API local du navigateur.
+              </p>
+            </div>
+            {onOpenLocalApiHub && (
+              <button
+                type="button"
+                data-testid="open-local-api-hub-from-vault-btn"
+                onClick={onOpenLocalApiHub}
+                className="shrink-0 px-3 py-1.5 rounded-lg bg-amber-900 hover:bg-amber-800 text-white text-[11px] font-bold inline-flex items-center gap-1.5"
+              >
+                <KeyRound className="w-3.5 h-3.5" />
+                Ouvrir le Hub API local (GitHub Pages)
+              </button>
+            )}
+          </div>
+        )}
+
         <form onSubmit={handleSaveCloudApiKey} className="grid grid-cols-1 sm:grid-cols-12 gap-2.5 items-start">
           <div className="sm:col-span-3 space-y-1">
             <label htmlFor="vault-provider" className="block text-[11px] font-semibold text-stone-700">
@@ -3644,7 +3674,7 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
           <div className="sm:col-span-3 sm:pt-5">
             <button
               type="submit"
-              disabled={apiKeyBusy || apiKeyInput.trim().length < 8}
+              disabled={isStaticHostingEnvironment() || apiKeyBusy || apiKeyInput.trim().length < 8}
               className="w-full py-2 px-3 rounded-lg bg-stone-900 hover:bg-stone-800 disabled:opacity-50 text-white text-xs font-semibold flex items-center justify-center gap-1.5"
             >
               <Lock className="w-3.5 h-3.5" />
@@ -3709,10 +3739,10 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
                     </button>
                     <button
                       type="button"
-                      disabled={apiKeyBusy}
+                      disabled={isStaticHostingEnvironment() || apiKeyBusy}
                       onClick={() => void handleDeleteCloudApiKey(item.provider)}
                       title="Supprimer cette clé"
-                      className="p-1.5 rounded-lg border border-stone-200 bg-white hover:border-red-300 hover:bg-red-50 text-stone-500 hover:text-red-700"
+                      className="p-1.5 rounded-lg border border-stone-200 bg-white hover:border-red-300 hover:bg-red-50 disabled:opacity-45 text-stone-500 hover:text-red-700"
                     >
                       <Trash2 className="w-3.5 h-3.5" />
                     </button>

@@ -30,6 +30,17 @@ interface AchievementsPanelProps {
   signedContracts?: SignedContractRecord[];
   initialSelectedUid?: string | null;
   onAdminToggleManualBadge?: (targetUid: string, nextBadges: string[]) => Promise<void>;
+  onAdminResyncMemberStat?: (
+    targetUid: string,
+    patch: {
+      totalProspects: number;
+      totalQualified: number;
+      totalContracts: number;
+      totalPayoutMad: number;
+      xp: number;
+      unlockedCount: number;
+    }
+  ) => Promise<void>;
 }
 
 export const AchievementsPanel: React.FC<AchievementsPanelProps> = ({
@@ -42,6 +53,7 @@ export const AchievementsPanel: React.FC<AchievementsPanelProps> = ({
   signedContracts = [],
   initialSelectedUid,
   onAdminToggleManualBadge,
+  onAdminResyncMemberStat,
 }) => {
   const [selectedUid, setSelectedUid] = useState<string>(
     initialSelectedUid || currentUserUid
@@ -89,11 +101,17 @@ export const AchievementsPanel: React.FC<AchievementsPanelProps> = ({
     };
   }, [isSuperAdmin, effectiveUid, currentUserUid, memberFichesByUid]);
 
+  const [resyncBusy, setResyncBusy] = useState(false);
+  const autoResyncedHashRef = React.useRef<string>('');
+
   // Build metrics for the viewed user: exact live metrics for self, and real Firestore contracts + fiches for inspected collaborator
-  const evaluated = useMemo(() => {
+  const { evaluated, liveInspectedMetrics } = useMemo(() => {
     const manualBadges = selectedStat?.manualBadges || [];
     if (effectiveUid === currentUserUid) {
-      return evaluateAchievements(myMetrics, manualBadges);
+      return {
+        evaluated: evaluateAchievements(myMetrics, manualBadges),
+        liveInspectedMetrics: myMetrics,
+      };
     }
 
     const memberContracts = signedContracts.filter(
@@ -153,8 +171,62 @@ export const AchievementsPanel: React.FC<AchievementsPanelProps> = ({
       highMaturityFiches,
       distinctCities,
     };
-    return evaluateAchievements(realMemberMetrics, manualBadges);
+    return {
+      evaluated: evaluateAchievements(realMemberMetrics, manualBadges),
+      liveInspectedMetrics: realMemberMetrics,
+    };
   }, [effectiveUid, currentUserUid, myMetrics, selectedStat, signedContracts, memberFichesByUid]);
+
+  const hasInspectedStatSkew = Boolean(
+    isSuperAdmin &&
+      effectiveUid !== currentUserUid &&
+      selectedStat &&
+      memberFichesByUid[effectiveUid] &&
+      (selectedStat.xp !== evaluated.totalXp ||
+        selectedStat.unlockedCount !== evaluated.unlockedCount ||
+        selectedStat.totalProspects !== liveInspectedMetrics.totalProspects ||
+        selectedStat.totalQualified !== liveInspectedMetrics.qualifiedCount)
+  );
+
+  useEffect(() => {
+    if (!hasInspectedStatSkew || !onAdminResyncMemberStat || !selectedStat) return;
+    const hash = `${effectiveUid}:${liveInspectedMetrics.totalProspects}:${liveInspectedMetrics.qualifiedCount}:${evaluated.totalXp}:${evaluated.unlockedCount}`;
+    if (autoResyncedHashRef.current === hash) return;
+    autoResyncedHashRef.current = hash;
+    void onAdminResyncMemberStat(effectiveUid, {
+      totalProspects: liveInspectedMetrics.totalProspects,
+      totalQualified: liveInspectedMetrics.qualifiedCount,
+      totalContracts: liveInspectedMetrics.contractsCount,
+      totalPayoutMad: liveInspectedMetrics.totalPayoutMad,
+      xp: evaluated.totalXp,
+      unlockedCount: evaluated.unlockedCount,
+    });
+  }, [
+    hasInspectedStatSkew,
+    onAdminResyncMemberStat,
+    selectedStat,
+    effectiveUid,
+    liveInspectedMetrics,
+    evaluated.totalXp,
+    evaluated.unlockedCount,
+  ]);
+
+  const handleManualResyncMemberStat = async () => {
+    if (!isSuperAdmin || !onAdminResyncMemberStat || effectiveUid === currentUserUid) return;
+    setResyncBusy(true);
+    try {
+      await onAdminResyncMemberStat(effectiveUid, {
+        totalProspects: liveInspectedMetrics.totalProspects,
+        totalQualified: liveInspectedMetrics.qualifiedCount,
+        totalContracts: liveInspectedMetrics.contractsCount,
+        totalPayoutMad: liveInspectedMetrics.totalPayoutMad,
+        xp: evaluated.totalXp,
+        unlockedCount: evaluated.unlockedCount,
+      });
+    } finally {
+      setResyncBusy(false);
+    }
+  };
 
   const viewedName =
     effectiveUid === currentUserUid
@@ -424,6 +496,17 @@ export const AchievementsPanel: React.FC<AchievementsPanelProps> = ({
                   </option>
                 ))}
               </select>
+              {effectiveUid !== currentUserUid && onAdminResyncMemberStat && (
+                <button
+                  type="button"
+                  data-testid="resync-member-team-stats-btn"
+                  disabled={resyncBusy}
+                  onClick={() => void handleManualResyncMemberStat()}
+                  className="rounded-xl border border-orange-300 bg-orange-50 hover:bg-orange-100 disabled:opacity-50 px-3 py-2 text-xs font-bold text-orange-900"
+                >
+                  {resyncBusy ? 'Synchronisation...' : 'Resynchroniser les stats équipe'}
+                </button>
+              )}
             </div>
           </div>
 

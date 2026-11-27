@@ -274,7 +274,7 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
                   <div className="flex items-center justify-between gap-2 mt-1 text-[11px] text-stone-500 tabular-nums">
                     <span className="flex items-center gap-1">
                       <Users className="w-3 h-3 text-stone-400" />
-                      {col.totalEffectif > 0 ? `${col.totalEffectif} sal.` : '—'}
+                      {col.totalEffectif > 0 ? `${col.totalEffectif.toLocaleString('fr-FR')} sal.` : '—'}
                     </span>
                     <span>Mat. {col.avgMaturity}%</span>
                   </div>
