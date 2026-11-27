@@ -20,7 +20,7 @@ import {
   type FicheEntreprise,
   type SecteurCode,
   type StatutCRM,
-} from '../App';
+} from '../utils/crmDomain';
 import {
   ROLE_BADGE_META,
   formatMad,

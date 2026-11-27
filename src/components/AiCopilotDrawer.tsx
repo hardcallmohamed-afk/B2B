@@ -17,7 +17,7 @@ import {
   getOrangeProRecommendation,
   type FicheEntreprise,
   type StatutCRM,
-} from '../App';
+} from '../utils/crmDomain';
 import { buildPortfolioAiSummary } from '../utils/analytics';
 import {
   buildCommercialBriefFromTextFallback,

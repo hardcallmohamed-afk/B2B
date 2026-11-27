@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useMemo, useRef, useCallback, Suspense, lazy } from 'react';
 import {
   Search,
   Globe,
@@ -51,38 +51,124 @@ import {
   FileSpreadsheet,
   UserPlus,
   RotateCcw,
+  MoreVertical,
+  LayoutGrid,
 } from 'lucide-react';
 import { onAuthStateChanged, type User } from 'firebase/auth';
 import { doc, onSnapshot, query, where } from 'firebase/firestore';
 import { KpiTrendChart } from './components/KpiTrendChart';
-import { KanbanBoard } from './components/KanbanBoard';
-import { AiCopilotDrawer } from './components/AiCopilotDrawer';
 import { LoginScreen, AccessGateNotice } from './components/LoginScreen';
-import { AdminUsersPanel, type AdminPanelSection } from './components/AdminUsersPanel';
-import { TeamPerformancePanel } from './components/TeamPerformancePanel';
-import { AchievementsPanel } from './components/AchievementsPanel';
+import type { AdminPanelSection } from './components/AdminUsersPanel';
 import { RoleBadge } from './components/RoleBadge';
-import { SignContractModal, type SignContractTarget } from './components/SignContractModal';
-import { AccountSettingsPanel, type UserProfileSettings } from './components/AccountSettingsPanel';
+import type { SignContractTarget } from './components/SignContractModal';
+import type { UserProfileSettings } from './components/AccountSettingsPanel';
 import { NotificationBell } from './components/NotificationBell';
 import { AchievementToast } from './components/AchievementToast';
 import { CrmSidebar, CRM_TAB_META, type CrmTabId } from './components/CrmSidebar';
-import { FicheDetailModal } from './components/FicheDetailModal';
-import { QuoteModal } from './components/QuoteModal';
 import { ActiviteModal } from './components/ActiviteModal';
 import { RdvModal } from './components/RdvModal';
 import {
   AssignRestoreFicheModal,
   type AssignRestoreMode,
 } from './components/AssignRestoreFicheModal';
-import {
-  CollaboratorProfileChatModal,
-  type CollaboratorProfileTarget,
-  type ProfileChatModalTab,
+import type {
+  CollaboratorProfileTarget,
+  ProfileChatModalTab,
 } from './components/CollaboratorProfileChatModal';
 import { CollaboratorChatWidget } from './components/CollaboratorChatWidget';
-import { PWAInstallButton, OfflineIndicator } from './components/PWAInstallButton';
+import { PWAInstallButton } from './components/PWAInstallButton';
+import { OfflineSyncBanner } from './components/OfflineSyncBanner';
 import type { PortfolioFicheItem } from './components/TeamPortfoliosPanel';
+import {
+  applySafeHygieneFixesToFiche,
+  isEffectifAberrant,
+  type HygieneAnomaly,
+} from './utils/dataHygiene';
+import {
+  SECTEURS_META,
+  SEGMENTS_COULEUR,
+  STATUTS_CRM,
+  DEFAULT_VILLES_MEKNES,
+  stripAccents,
+  normalizeMoroccanPhone,
+  getOrangeProRecommendation,
+  computeMaturityScore,
+  isReadyToCall,
+  toWa212,
+  makeId,
+  type SecteurCode,
+  type SegmentCouleur,
+  type StatutCRM,
+  type FicheEntreprise,
+  type CrawlLog,
+} from './utils/crmDomain';
+
+export {
+  SECTEURS_META,
+  SEGMENTS_COULEUR,
+  STATUTS_CRM,
+  DEFAULT_VILLES_MEKNES,
+  stripAccents,
+  normalizeMoroccanPhone,
+  parseSafeHeadcount,
+  getOrangeProRecommendation,
+  computeMaturityScore,
+  isReadyToCall,
+  toWa212,
+  makeId,
+  type SecteurCode,
+  type SegmentCouleur,
+  type StatutCRM,
+  type FicheEntreprise,
+  type CrawlLog,
+} from './utils/crmDomain';
+
+const KanbanBoard = lazy(() =>
+  import('./components/KanbanBoard').then((m) => ({ default: m.KanbanBoard }))
+);
+const AiCopilotDrawer = lazy(() =>
+  import('./components/AiCopilotDrawer').then((m) => ({ default: m.AiCopilotDrawer }))
+);
+const AdminUsersPanel = lazy(() =>
+  import('./components/AdminUsersPanel').then((m) => ({ default: m.AdminUsersPanel }))
+);
+const TeamPerformancePanel = lazy(() =>
+  import('./components/TeamPerformancePanel').then((m) => ({ default: m.TeamPerformancePanel }))
+);
+const AchievementsPanel = lazy(() =>
+  import('./components/AchievementsPanel').then((m) => ({ default: m.AchievementsPanel }))
+);
+const SignContractModal = lazy(() =>
+  import('./components/SignContractModal').then((m) => ({ default: m.SignContractModal }))
+);
+const AccountSettingsPanel = lazy(() =>
+  import('./components/AccountSettingsPanel').then((m) => ({ default: m.AccountSettingsPanel }))
+);
+const FicheDetailModal = lazy(() =>
+  import('./components/FicheDetailModal').then((m) => ({ default: m.FicheDetailModal }))
+);
+const QuoteModal = lazy(() =>
+  import('./components/QuoteModal').then((m) => ({ default: m.QuoteModal }))
+);
+const CollaboratorProfileChatModal = lazy(() =>
+  import('./components/CollaboratorProfileChatModal').then((m) => ({
+    default: m.CollaboratorProfileChatModal,
+  }))
+);
+const DataHygienePanel = lazy(() =>
+  import('./components/DataHygienePanel').then((m) => ({ default: m.DataHygienePanel }))
+);
+const GlobalSearchPalette = lazy(() =>
+  import('./components/GlobalSearchPalette').then((m) => ({ default: m.GlobalSearchPalette }))
+);
+import type { GlobalSearchActionHit } from './utils/globalSearch';
+
+const LazyViewFallback: React.FC<{ label?: string }> = ({ label = 'Chargement du module...' }) => (
+  <div className="bg-white rounded-xl border border-stone-200 p-8 flex flex-col items-center justify-center gap-2.5 text-stone-500">
+    <RefreshCw className="w-5 h-5 text-orange-600 animate-spin" />
+    <p className="text-xs font-medium">{label}</p>
+  </div>
+);
 import {
   buildHashFromRoute,
   getRouteBreadcrumb,
@@ -259,288 +345,14 @@ import {
 
 // ============================================================================
 // 1. TYPES, SCHÉMA STRICT (9 COLONNES) & CODE COULEUR ORANGE PRO (6 SEGMENTS)
+// (Centralisés dans ./utils/crmDomain et ré-exportés ci-dessus)
 // ============================================================================
-
-export type SecteurCode =
-  | 'fiduciaire'
-  | 'clinique'
-  | 'notaire'
-  | 'immobilier'
-  | 'riad_hotellerie'
-  | 'auto_ecole'
-  | 'pme'
-  | 'industrie'
-  | 'btp'
-  | 'gros'
-  | 'enseignement'
-  | 'liberal'
-  | 'commerce';
-
-export type SegmentCouleur = 'bleu' | 'vert' | 'orange' | 'jaune' | 'violet' | 'cyan';
-
-export type StatutCRM =
-  | 'À contacter'
-  | 'Appel en cours'
-  | 'RDV pris'
-  | 'Devis envoyé'
-  | 'Signé Orange Pro'
-  | 'Pas intéressé';
-
-export interface FicheEntreprise {
-  id: string;
-  numeroFiche?: string;
-  societe: string;
-  secteur: SecteurCode;
-  ville: string;
-  telephone: string;
-  telephonesSupplementaires?: string[];
-  email: string;
-  emailsSupplementaires?: string[];
-  contact: string;
-  role: string;
-  source: string;
-  effectif: string;
-  statut: StatutCRM;
-  siteWeb?: string;
-  verifieWeb?: boolean;
-  pistesEnrichissement?: string[];
-  dateAjout: string;
-  statutUpdatedAt?: string;
-  prochaineRelanceAt?: string;
-  rdvAt?: string;
-  rdvLieu?: string;
-  assignedByUid?: string;
-  assignedByName?: string;
-  assignedAt?: string;
-  restoredByName?: string;
-  restoredAt?: string;
-  restoredReason?: string;
-}
-
-export interface CrawlLog {
-  id: string;
-  time: string;
-  level: 'info' | 'ok' | 'warn' | 'err';
-  message: string;
-}
-
-export const SECTEURS_META: Record<
-  SecteurCode,
-  { label: string; couleur: SegmentCouleur; keywords: string[] }
-> = {
-  fiduciaire: {
-    label: 'Fiduciaire / Comptable',
-    couleur: 'bleu',
-    keywords: [
-      'fiduciaire', 'comptable', 'comptabilite', 'expert comptable', 'expertise comptable',
-      'commissaire aux comptes', 'audit', 'conseil fiscal', 'fiscalite', 'conseil juridique et fiscal',
-    ],
-  },
-  clinique: {
-    label: 'Clinique privée',
-    couleur: 'bleu',
-    keywords: [
-      'clinique', 'polyclinique', 'centre hospitalier', 'centre de radiologie', 'radiologie',
-      'centre d imagerie', 'imagerie medicale', 'centre de dialyse', 'dialyse', 'maternite',
-    ],
-  },
-  notaire: {
-    label: 'Notaire',
-    couleur: 'bleu',
-    keywords: ['notaire', 'etude notariale', 'office notarial', 'notariat', 'adoul'],
-  },
-  immobilier: {
-    label: 'Immobilier / Promoteur',
-    couleur: 'vert',
-    keywords: [
-      'immobilier', 'immobiliere', 'promoteur', 'promotion immobiliere', 'agence immobiliere',
-      'lotissement', 'syndic', 'gestion immobiliere', 'foncier', 'residence',
-    ],
-  },
-  riad_hotellerie: {
-    label: 'Riad / Hôtel',
-    couleur: 'orange',
-    keywords: [
-      'riad', 'hotel', 'hotellerie', 'maison d hotes', 'chambres d hotes', 'auberge',
-      'resort', 'palais d hotes', 'complexe touristique', 'camping', 'gite', 'dar',
-    ],
-  },
-  auto_ecole: {
-    label: 'Auto-école',
-    couleur: 'jaune',
-    keywords: ['auto ecole', 'autoecole', 'ecole de conduite', 'permis de conduire', 'conduite'],
-  },
-  pme: {
-    label: 'PME Services',
-    couleur: 'violet',
-    keywords: [
-      'pme', 'consulting', 'digital', 'informatique', 'developpement web', 'agence web',
-      'agence de communication', 'publicite', 'imprimerie', 'logistique', 'transport',
-      'transitaire', 'securite', 'gardiennage', 'nettoyage', 'centre d appel', 'call center',
-      'assurance', 'courtier', 'agence de voyage', 'location de voitures', 'location voiture',
-    ],
-  },
-  industrie: {
-    label: 'Industrie / Agro',
-    couleur: 'violet',
-    keywords: [
-      'industrie', 'industriel', 'industrielle', 'agroalimentaire', 'agro industrie', 'huilerie',
-      'conserverie', 'minoterie', 'usine', 'manufacture', 'plasturgie', 'textile', 'confection',
-      'cooperative agricole', 'moulin', 'abattoir', 'emballage', 'metallurgie', 'chaudronnerie',
-    ],
-  },
-  btp: {
-    label: 'BTP / Construction',
-    couleur: 'violet',
-    keywords: [
-      'btp', 'travaux publics', 'travaux divers', 'construction', 'genie civil', 'beton',
-      'carriere', 'batiment', 'terrassement', 'menuiserie', 'aluminium', 'plomberie',
-      'electricite batiment', 'climatisation', 'etancheite', 'charpente', 'ferronnerie',
-      'marbre', 'carrelage', 'ascenseur', 'peinture batiment', 'amenagement',
-    ],
-  },
-  gros: {
-    label: 'Commerce de gros',
-    couleur: 'violet',
-    keywords: [
-      'grossiste', 'commerce de gros', 'distribution', 'distributeur', 'negoce',
-      'import export', 'materiaux de construction', 'sanitaire', 'quincaillerie gros',
-      'pieces auto', 'pieces de rechange', 'fournitures industrielles', 'centrale d achat',
-    ],
-  },
-  enseignement: {
-    label: 'Enseignement / École',
-    couleur: 'violet',
-    keywords: [
-      'ecole privee', 'ecole', 'institut', 'groupe scolaire', 'universite', 'creche',
-      'maternelle', 'garderie', 'centre de formation', 'formation professionnelle',
-      'centre de langues', 'soutien scolaire', 'lycee', 'college', 'academie',
-    ],
-  },
-  liberal: {
-    label: 'Profession libérale',
-    couleur: 'cyan',
-    keywords: [
-      'avocat', 'avocate', 'barreau', 'huissier', 'architecte', 'architecture', 'bureau d etudes',
-      'bet', 'ingenierie', 'medecin', 'cabinet medical', 'maison medicale', 'ophtalmologie',
-      'ophtalmologue', 'dentiste', 'cabinet dentaire', 'chirurgien', 'pediatre', 'gynecologue',
-      'cardiologue', 'dermatologue', 'veterinaire', 'laboratoire d analyses', 'laboratoire',
-      'analyses medicales', 'geometre', 'topographe', 'kinesitherapeute', 'kine',
-      'orthodontiste', 'osteopathe', 'psychologue', 'docteur', 'dr',
-    ],
-  },
-  commerce: {
-    label: 'Pharmacie & Commerce',
-    couleur: 'cyan',
-    keywords: [
-      'pharmacie', 'parapharmacie', 'commerce', 'boutique', 'magasin', 'supermarche',
-      'restaurant', 'snack', 'cafe', 'boulangerie', 'patisserie', 'traiteur', 'optique',
-      'opticien', 'librairie', 'papeterie', 'bijouterie', 'quincaillerie', 'garage', 'station service',
-    ],
-  },
-};
-
-export const SEGMENTS_COULEUR: Record<
-  SegmentCouleur,
-  {
-    label: string;
-    description: string;
-    secteurs: SecteurCode[];
-    badgeCls: string;
-    dotCls: string;
-    ringCls: string;
-    topBarCls: string;
-  }
-> = {
-  bleu: {
-    label: 'Bleu',
-    description: 'Fiduciaires, Cliniques, Notaires',
-    secteurs: ['fiduciaire', 'clinique', 'notaire'],
-    badgeCls: 'bg-blue-50 text-blue-800 border-blue-200',
-    dotCls: 'bg-blue-600',
-    ringCls: 'ring-blue-600 border-blue-600',
-    topBarCls: 'border-t-2 border-t-blue-600',
-  },
-  vert: {
-    label: 'Vert',
-    description: 'Immobilier & Promoteurs',
-    secteurs: ['immobilier'],
-    badgeCls: 'bg-emerald-50 text-emerald-800 border-emerald-200',
-    dotCls: 'bg-emerald-600',
-    ringCls: 'ring-emerald-600 border-emerald-600',
-    topBarCls: 'border-t-2 border-t-emerald-600',
-  },
-  orange: {
-    label: 'Orange',
-    description: 'Riads, Hôtels & Maisons d’hôtes',
-    secteurs: ['riad_hotellerie'],
-    badgeCls: 'bg-orange-50 text-orange-800 border-orange-200',
-    dotCls: 'bg-orange-500',
-    ringCls: 'ring-orange-500 border-orange-500',
-    topBarCls: 'border-t-2 border-t-orange-500',
-  },
-  jaune: {
-    label: 'Jaune',
-    description: 'Auto-écoles',
-    secteurs: ['auto_ecole'],
-    badgeCls: 'bg-amber-50 text-amber-800 border-amber-200',
-    dotCls: 'bg-amber-500',
-    ringCls: 'ring-amber-500 border-amber-500',
-    topBarCls: 'border-t-2 border-t-amber-500',
-  },
-  violet: {
-    label: 'Violet',
-    description: 'PME, Industrie, BTP, Gros, Écoles',
-    secteurs: ['pme', 'industrie', 'btp', 'gros', 'enseignement'],
-    badgeCls: 'bg-violet-50 text-violet-800 border-violet-200',
-    dotCls: 'bg-violet-600',
-    ringCls: 'ring-violet-600 border-violet-600',
-    topBarCls: 'border-t-2 border-t-violet-600',
-  },
-  cyan: {
-    label: 'Cyan',
-    description: 'Libéral, Labos, Pharmacies, Commerces',
-    secteurs: ['liberal', 'commerce'],
-    badgeCls: 'bg-cyan-50 text-cyan-800 border-cyan-200',
-    dotCls: 'bg-cyan-600',
-    ringCls: 'ring-cyan-600 border-cyan-600',
-    topBarCls: 'border-t-2 border-t-cyan-600',
-  },
-};
-
-export const STATUTS_CRM: StatutCRM[] = [
-  'À contacter',
-  'Appel en cours',
-  'RDV pris',
-  'Devis envoyé',
-  'Signé Orange Pro',
-  'Pas intéressé',
-];
-
-export const DEFAULT_VILLES_MEKNES = [
-  'Meknès',
-  'El Hajeb',
-  'Ifrane',
-  'Azrou',
-  'Moulay Idriss Zerhoun',
-  'Boufekrane',
-  'Agouraï',
-  'Sebaa Ayoune',
-];
 
 const ALL_MOROCCAN_CITIES = ALL_MOROCCO_CITY_NAMES;
 
 // ============================================================================
 // 2. NETTOYAGE, NORMALISATION, FILTRAGE ANTI-BRUIT & SCORING ORANGE PRO
 // ============================================================================
-
-export function stripAccents(str: string): string {
-  return (str || '')
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .toLowerCase()
-    .trim();
-}
 
 export function normalizeCompanyForDedup(name: string): string {
   return stripAccents(name)
@@ -608,17 +420,7 @@ export function isValidCompanyName(raw: string): boolean {
   return true;
 }
 
-export function normalizeMoroccanPhone(raw: string): string {
-  let digits = (raw || '').replace(/\D/g, '');
-  if (!digits) return '';
-  if (digits.startsWith('002120') && digits.length >= 15) digits = '0' + digits.slice(6);
-  else if (digits.startsWith('00212')) digits = '0' + digits.slice(5);
-  else if (digits.startsWith('2120') && digits.length >= 13) digits = '0' + digits.slice(4);
-  else if (digits.startsWith('212') && digits.length >= 12) digits = '0' + digits.slice(3);
-  if (digits.length === 9 && /^[567]/.test(digits)) digits = '0' + digits;
-  if (/^0[567]\d{8}$/.test(digits)) return digits;
-  return '';
-}
+// normalizeMoroccanPhone importé et ré-exporté depuis ./utils/crmDomain
 
 export function htmlToReadableText(raw: string): string {
   if (!raw) return '';
@@ -967,60 +769,8 @@ export function extractEffectifFromText(text: string): string {
   return '';
 }
 
-export function getOrangeProRecommendation(f: FicheEntreprise): {
-  tier: 'Grand Compte' | 'PME' | 'TPE / Libéral';
-  offre: string;
-  badgeCls: string;
-} {
-  const eff = parseInt(f.effectif, 10) || 0;
-  if (eff >= 30 || f.secteur === 'clinique' || f.secteur === 'industrie') {
-    return {
-      tier: 'Grand Compte',
-      offre: 'Fibre Dédiée + Flotte Mobile Corporate + Standard Cloud',
-      badgeCls: 'bg-stone-900 text-amber-50',
-    };
-  }
-  if (eff >= 10 && eff <= 29) {
-    return {
-      tier: 'PME',
-      offre: 'Fibre Pro + Pack Flotte 5-20 lignes + Fixe VoIP',
-      badgeCls: 'bg-orange-100 text-orange-900',
-    };
-  }
-  return {
-    tier: 'TPE / Libéral',
-    offre: 'Fibre Pro Essentiel + Forfait Mobile Pro + Nom de domaine',
-    badgeCls: 'bg-stone-100 text-stone-800',
-  };
-}
-
-export function computeMaturityScore(f: FicheEntreprise): number {
-  let pts = 0;
-  if (f.societe.trim()) pts += 15;
-  if (f.secteur) pts += 10;
-  if (f.ville.trim()) pts += 10;
-  if (f.telephone.trim()) pts += 25;
-  if (f.contact.trim()) pts += 15;
-  if (f.email.trim()) pts += 10;
-  if (f.role.trim()) pts += 5;
-  if (f.effectif.trim()) pts += 5;
-  if (f.source.trim()) pts += 5;
-  return Math.min(100, pts);
-}
-
-export function isReadyToCall(f: FicheEntreprise): boolean {
-  return Boolean(f.telephone.trim() && f.contact.trim());
-}
-
-export function toWa212(tel: string): string {
-  const norm = normalizeMoroccanPhone(tel);
-  if (!norm) return '';
-  return '212' + norm.slice(1);
-}
-
-export function makeId(prefix = 'op'): string {
-  return `${prefix}_${Math.random().toString(36).slice(2, 9)}${Date.now().toString(36)}`;
-}
+// getOrangeProRecommendation, computeMaturityScore, isReadyToCall, toWa212, makeId
+// importés et ré-exportés depuis ./utils/crmDomain
 
 // ============================================================================
 // 3. PARSEUR CHIRURGICAL HTML / MARKDOWN / TEXTE + ANTI-CALL-CENTER
@@ -3055,6 +2805,10 @@ export default function App() {
 
   const [profileMenuOpen, setProfileMenuOpen] = useState(false);
   const profileMenuRef = useRef<HTMLDivElement | null>(null);
+  const [mobileMoreMenuOpen, setMobileMoreMenuOpen] = useState(false);
+  const mobileMoreMenuRef = useRef<HTMLDivElement | null>(null);
+  const [mobilePortfolioDisplay, setMobilePortfolioDisplay] = useState<'cards' | 'table'>('cards');
+  const [hygieneBusy, setHygieneBusy] = useState(false);
   const [notifications, setNotifications] = useState<AppNotification[]>([]);
   const [achievementToastQueue, setAchievementToastQueue] = useState<AppNotification[]>([]);
   const activeAchievementToast = achievementToastQueue[0] || null;
@@ -3100,6 +2854,19 @@ export default function App() {
   const [unreadChatByUid, setUnreadChatByUid] = useState<Record<string, number>>({});
   const [coachingReadyUids, setCoachingReadyUids] = useState<Set<string>>(() => new Set());
   const [collabChatOpenSignal, setCollabChatOpenSignal] = useState<number>(0);
+  const [globalSearchOpen, setGlobalSearchOpen] = useState(false);
+  const [teamFocusUid, setTeamFocusUid] = useState<string | undefined>(undefined);
+
+  useEffect(() => {
+    const handleGlobalSearchShortcut = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        setGlobalSearchOpen((prev) => !prev);
+      }
+    };
+    window.addEventListener('keydown', handleGlobalSearchShortcut);
+    return () => window.removeEventListener('keydown', handleGlobalSearchShortcut);
+  }, []);
 
   useEffect(() => {
     if (!profileMenuOpen) return;
@@ -3111,6 +2878,17 @@ export default function App() {
     document.addEventListener('mousedown', handleOutside);
     return () => document.removeEventListener('mousedown', handleOutside);
   }, [profileMenuOpen]);
+
+  useEffect(() => {
+    if (!mobileMoreMenuOpen) return;
+    const handleOutside = (e: MouseEvent) => {
+      if (mobileMoreMenuRef.current && !mobileMoreMenuRef.current.contains(e.target as Node)) {
+        setMobileMoreMenuOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleOutside);
+    return () => document.removeEventListener('mousedown', handleOutside);
+  }, [mobileMoreMenuOpen]);
 
   // 2. Panneau Villes Cibles persistant (Intègre l'ensemble des villes du Maroc + filtrage par Région + détection GPS automatique)
   const [villesState, setVillesState] = useState<{
@@ -8445,6 +8223,169 @@ ${assistPasteText.slice(0, 6000)}`;
     [cloudUser, currentUserDisplayName, currentUserRole]
   );
 
+  const handleApplySingleHygieneFix = useCallback(
+    async (anomaly: HygieneAnomaly) => {
+      if (!anomaly.autoFixable) return;
+      const target = fiches.find((f) => f.id === anomaly.ficheId);
+      if (!target) return;
+      const { updatedFiche, changes } = applySafeHygieneFixesToFiche(target, [anomaly]);
+      if (changes.length === 0) return;
+
+      setHygieneBusy(true);
+      try {
+        const ownerUid = cloudUser?.uid || 'local';
+        const sanitized = sanitizeFichePayload(ownerUid, updatedFiche);
+        const cleanFiche: FicheEntreprise = {
+          ...updatedFiche,
+          effectif: sanitized.effectif,
+          telephone: sanitized.telephone,
+          email: sanitized.email,
+        };
+        setFiches((prev) => prev.map((x) => (x.id === cleanFiche.id ? cleanFiche : x)));
+
+        if (cloudUser) {
+          await Promise.allSettled(
+            changes.map((c) =>
+              logFicheAuditAction(
+                cloudUser.uid,
+                cleanFiche.id,
+                'modification',
+                `Nettoyage Hygiène CRM (${c.field}) : « ${c.oldValue || '—'} » → « ${c.newValue || '—'} ».`,
+                {
+                  action: 'field_updated',
+                  field: c.field,
+                  oldValue: c.oldValue,
+                  newValue: c.newValue,
+                }
+              )
+            )
+          );
+        }
+        notify(`Anomalie corrigée sur « ${cleanFiche.societe} ».`);
+      } finally {
+        setHygieneBusy(false);
+      }
+    },
+    [cloudUser, fiches, logFicheAuditAction]
+  );
+
+  const handleApplyAllSafeHygieneFixes = useCallback(
+    async (safeAnomalies: HygieneAnomaly[]) => {
+      const fixable = safeAnomalies.filter((a) => a.autoFixable);
+      if (fixable.length === 0) return;
+
+      const byFicheId = new Map<string, HygieneAnomaly[]>();
+      for (const a of fixable) {
+        const list = byFicheId.get(a.ficheId) || [];
+        list.push(a);
+        byFicheId.set(a.ficheId, list);
+      }
+
+      const ownerUid = cloudUser?.uid || 'local';
+      const cleanedById = new Map<string, FicheEntreprise>();
+      const auditQueue: Array<{
+        ficheId: string;
+        field: string;
+        oldValue: string;
+        newValue: string;
+      }> = [];
+
+      for (const f of fiches) {
+        const list = byFicheId.get(f.id);
+        if (!list || list.length === 0) continue;
+        const { updatedFiche, changes } = applySafeHygieneFixesToFiche(f, list);
+        if (changes.length === 0) continue;
+        const sanitized = sanitizeFichePayload(ownerUid, updatedFiche);
+        cleanedById.set(f.id, {
+          ...updatedFiche,
+          effectif: sanitized.effectif,
+          telephone: sanitized.telephone,
+          email: sanitized.email,
+        });
+        for (const c of changes) {
+          auditQueue.push({
+            ficheId: f.id,
+            field: c.field,
+            oldValue: c.oldValue,
+            newValue: c.newValue,
+          });
+        }
+      }
+
+      const fixedFichesCount = cleanedById.size;
+      if (fixedFichesCount === 0) return;
+
+      setHygieneBusy(true);
+      try {
+        setFiches((prev) => prev.map((f) => cleanedById.get(f.id) || f));
+
+        if (cloudUser && auditQueue.length > 0) {
+          await Promise.allSettled(
+            auditQueue.map((item) =>
+              logFicheAuditAction(
+                cloudUser.uid,
+                item.ficheId,
+                'modification',
+                `Nettoyage automatique Hygiène CRM (${item.field}) : « ${item.oldValue || '—'} » → « ${item.newValue || '—'} ».`,
+                {
+                  action: 'field_updated',
+                  field: item.field,
+                  oldValue: item.oldValue,
+                  newValue: item.newValue,
+                }
+              )
+            )
+          );
+        }
+
+        if (auditQueue.length > 0) {
+          notify(
+            `Hygiène CRM : ${auditQueue.length} anomalie${auditQueue.length > 1 ? 's' : ''} corrigée${auditQueue.length > 1 ? 's' : ''} sur ${fixedFichesCount} fiche${fixedFichesCount > 1 ? 's' : ''}.`
+          );
+        }
+      } finally {
+        setHygieneBusy(false);
+      }
+    },
+    [cloudUser, fiches, logFicheAuditAction]
+  );
+
+  const handleReclassifyOrphanSignedToNegotiation = useCallback(
+    async (fiche: FicheEntreprise) => {
+      const prevStatut = fiche.statut;
+      const nextStatut: StatutCRM = 'Devis envoyé';
+      if (prevStatut === nextStatut) return;
+
+      setHygieneBusy(true);
+      try {
+        const nowIso = new Date().toISOString();
+        setFiches((prev) =>
+          prev.map((x) =>
+            x.id === fiche.id ? { ...x, statut: nextStatut, statutUpdatedAt: nowIso } : x
+          )
+        );
+        if (cloudUser) {
+          await logFicheAuditAction(
+            cloudUser.uid,
+            fiche.id,
+            'statut',
+            `Hygiène CRM : fiche signée sans contrat reclassée de « ${prevStatut} » vers « ${nextStatut} » (Négociation).`,
+            {
+              action: 'status_changed',
+              field: 'statut',
+              oldValue: prevStatut,
+              newValue: nextStatut,
+            }
+          );
+        }
+        notify(`« ${fiche.societe} » reclassée en « ${nextStatut} ».`);
+      } finally {
+        setHygieneBusy(false);
+      }
+    },
+    [cloudUser, logFicheAuditAction]
+  );
+
   const openFicheDetailModal = useCallback(
     (fiche: FicheEntreprise, ownerUid?: string, ownerName?: string) => {
       if (!cloudUser) return;
@@ -9583,8 +9524,6 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
         onSelectNotification={(n) => void handleSelectNotification(n)}
       />
 
-      <OfflineIndicator />
-
       {/* Shell CRM B2B avec barre verticale persistante + colonne principale */}
       <div className="min-h-screen bg-[#F7F5F0] text-stone-900 flex">
         <CrmSidebar
@@ -9595,6 +9534,7 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
             else navigateCrm(tab);
           }}
           onNewFiche={() => setShowQuickAdd(true)}
+          onOpenSearch={() => setGlobalSearchOpen(true)}
           collapsed={sidebarCollapsed}
           onToggleCollapse={() => setSidebarCollapsed((c) => !c)}
           mobileOpen={mobileMenuOpen}
@@ -9622,25 +9562,28 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
         />
 
         <div className="flex-1 min-w-0 flex flex-col">
-          {/* En-tête compact workspace (fil d'Ariane + actions rapides + notifications + profil) */}
+          {/* Bannière de synchronisation hors-ligne / reconnexion terrain (C3) */}
+          <OfflineSyncBanner />
+
+          {/* En-tête compact workspace (mobile 1 ligne + menu « Plus » / desktop complet) */}
           <header className="bg-white border-b border-stone-200 sticky top-0 z-20 shadow-2xs">
-            <div className="max-w-[1440px] mx-auto px-3 sm:px-5 h-14 flex items-center justify-between gap-2.5">
-              <div className="flex items-center gap-2.5 min-w-0">
+            <div className="max-w-[1440px] mx-auto px-2.5 sm:px-5 h-12 md:h-14 flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2 sm:gap-2.5 min-w-0">
                 <button
                   type="button"
                   onClick={() => setMobileMenuOpen(true)}
                   aria-label="Ouvrir le menu CRM"
                   data-testid="mobile-menu-trigger"
-                  className="lg:hidden p-2 -ml-1 rounded-lg border border-stone-200 bg-stone-50 hover:bg-stone-100 text-stone-800 shrink-0"
+                  className="lg:hidden p-2 -ml-0.5 rounded-lg border border-stone-200 bg-stone-50 hover:bg-stone-100 text-stone-800 shrink-0 min-h-[36px] min-w-[36px] flex items-center justify-center"
                 >
                   <Menu className="w-4 h-4" />
                 </button>
                 <div className="min-w-0">
                   <div className="flex items-center gap-1.5 flex-wrap">
-                    <span className="hidden sm:inline text-[11px] font-bold uppercase tracking-wider text-stone-400">
+                    <span className="hidden md:inline text-[11px] font-bold uppercase tracking-wider text-stone-400">
                       {getRouteBreadcrumb(activeTab, adminSubSection as AdminSubSectionId).sectionLabel}
                     </span>
-                    <span className="hidden sm:inline text-stone-300">/</span>
+                    <span className="hidden md:inline text-stone-300">/</span>
                     <h1 className="text-sm sm:text-base font-bold tracking-tight text-stone-900 truncate">
                       {getRouteBreadcrumb(activeTab, adminSubSection as AdminSubSectionId).tabLabel}
                     </h1>
@@ -9660,90 +9603,121 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
               </div>
 
               <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
+                {/* Déclencheur Recherche Globale Instantanée (Desktop : pilule Ctrl+K / Mobile : Loupe compacte) */}
                 <button
                   type="button"
-                  disabled={gpsBusy}
-                  onClick={() => void handleActivateOrRefreshGps()}
-                  data-testid="header-gps-refresh-btn"
-                  title={
-                    gpsEngineStatus === 'denied'
-                      ? 'Accès GPS refusé par le navigateur — Cliquez pour réessayer et autoriser la géolocalisation'
-                      : detectedGeoState
-                        ? `GPS actif : ${detectedGeoState.collaboratorPublicZoneLabel} — Cliquer pour actualiser`
-                        : 'Activer ou actualiser ma position GPS (Android, Apple, PC)'
-                  }
-                  className={`px-2 sm:px-2.5 py-1.5 rounded-lg border text-xs font-semibold flex items-center gap-1.5 whitespace-nowrap shrink-0 transition-colors disabled:opacity-60 ${
-                    gpsEngineStatus === 'denied'
-                      ? 'border-red-300 bg-red-50 hover:bg-red-100 text-red-800'
-                      : detectedGeoState
-                        ? 'border-emerald-300 bg-emerald-50 hover:bg-emerald-100 text-emerald-800'
-                        : 'border-stone-300 bg-stone-50 hover:bg-stone-100 text-stone-700'
-                  }`}
+                  data-testid="header-global-search-btn"
+                  onClick={() => setGlobalSearchOpen(true)}
+                  aria-label="Recherche globale (Ctrl+K)"
+                  title="Recherche globale instantanée (Ctrl+K / Cmd+K)"
+                  className="hidden md:inline-flex items-center gap-2 px-3 py-1.5 rounded-full border border-stone-200 bg-stone-50 hover:bg-stone-100 hover:border-stone-300 text-xs text-stone-600 transition-colors whitespace-nowrap shrink-0"
                 >
-                  <Navigation
-                    className={`w-3.5 h-3.5 shrink-0 ${
-                      gpsBusy
-                        ? 'animate-spin text-orange-600'
-                        : gpsEngineStatus === 'denied'
-                          ? 'text-red-600'
-                          : detectedGeoState
-                            ? 'text-emerald-600'
-                            : 'text-stone-500'
-                    }`}
-                  />
-                  {gpsEngineStatus === 'denied' ? (
-                    <span data-testid="header-gps-denied-badge" className="font-bold">
-                      GPS refusé — Autoriser
-                    </span>
-                  ) : (
-                    <span className="hidden xl:inline">
-                      {gpsBusy
-                        ? 'GPS...'
+                  <Search className="w-3.5 h-3.5 text-orange-600 shrink-0" />
+                  <span className="font-medium text-stone-500">Rechercher...</span>
+                  <kbd className="px-1.5 py-0.5 rounded bg-white border border-stone-200 font-mono text-[10px] font-semibold text-stone-500">
+                    Ctrl+K
+                  </kbd>
+                </button>
+                <button
+                  type="button"
+                  data-testid="mobile-header-search-btn"
+                  onClick={() => setGlobalSearchOpen(true)}
+                  aria-label="Ouvrir la recherche globale"
+                  title="Recherche globale"
+                  className="md:hidden p-2 min-h-[36px] min-w-[36px] rounded-lg border border-stone-200 bg-stone-50 hover:bg-stone-100 text-stone-700 flex items-center justify-center shrink-0"
+                >
+                  <Search className="w-4 h-4 text-orange-600" />
+                </button>
+
+                {/* Actions secondaires desktop (>= 768px) */}
+                <div className="hidden md:flex items-center gap-1.5 sm:gap-2">
+                  <button
+                    type="button"
+                    disabled={gpsBusy}
+                    onClick={() => void handleActivateOrRefreshGps()}
+                    data-testid="header-gps-refresh-btn"
+                    title={
+                      gpsEngineStatus === 'denied'
+                        ? 'Accès GPS refusé par le navigateur — Cliquez pour réessayer et autoriser la géolocalisation'
                         : detectedGeoState
-                          ? `GPS · ${detectedGeoState.nearestCity}`
-                          : 'Activer GPS'}
-                    </span>
-                  )}
-                </button>
-                <PWAInstallButton variant="header" onInstalledNotify={(msg) => notify(msg)} />
-                <button
-                  type="button"
-                  disabled={isAuditing}
-                  onClick={() => handleBatchAudit('portfolio')}
-                  className="hidden sm:flex px-2.5 py-1.5 rounded-lg border border-stone-300 bg-stone-50 hover:bg-stone-100 disabled:opacity-60 text-xs font-semibold text-stone-800 items-center gap-1.5 whitespace-nowrap shrink-0 transition-colors"
-                >
-                  <ShieldCheck className={`w-3.5 h-3.5 text-emerald-600 ${isAuditing ? 'animate-spin' : ''}`} />
-                  {isAuditing ? 'Vérification...' : 'Vérifier & Corriger'}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setShowApiHub((v) => !v)}
-                  aria-expanded={showApiHub}
-                  className={`hidden sm:flex px-2.5 py-1.5 rounded-lg border text-xs font-semibold items-center gap-1.5 whitespace-nowrap shrink-0 transition-colors ${
-                    showApiHub || activeApiCount > 0
-                      ? 'border-orange-300 bg-orange-50 text-orange-900 hover:bg-orange-100'
-                      : 'border-stone-300 bg-white text-stone-700 hover:bg-stone-50'
-                  }`}
-                >
-                  <KeyRound className="w-3.5 h-3.5 text-orange-600" />
-                  <span className="tabular-nums">Hub API ({activeApiCount})</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setShowAiCopilot(true)}
-                  className="px-2 sm:px-2.5 py-1.5 rounded-lg border border-stone-900 bg-stone-900 hover:bg-stone-800 text-white text-xs font-semibold flex items-center gap-1 sm:gap-1.5 whitespace-nowrap shrink-0 transition-colors"
-                >
-                  <Bot className="w-3.5 h-3.5 text-orange-400" />
-                  <span className="hidden sm:inline">Copilote IA</span>
-                </button>
+                          ? `GPS actif : ${detectedGeoState.collaboratorPublicZoneLabel} — Cliquer pour actualiser`
+                          : 'Activer ou actualiser ma position GPS (Android, Apple, PC)'
+                    }
+                    className={`px-2 sm:px-2.5 py-1.5 rounded-lg border text-xs font-semibold flex items-center gap-1.5 whitespace-nowrap shrink-0 transition-colors disabled:opacity-60 ${
+                      gpsEngineStatus === 'denied'
+                        ? 'border-red-300 bg-red-50 hover:bg-red-100 text-red-800'
+                        : detectedGeoState
+                          ? 'border-emerald-300 bg-emerald-50 hover:bg-emerald-100 text-emerald-800'
+                          : 'border-stone-300 bg-stone-50 hover:bg-stone-100 text-stone-700'
+                    }`}
+                  >
+                    <Navigation
+                      className={`w-3.5 h-3.5 shrink-0 ${
+                        gpsBusy
+                          ? 'animate-spin text-orange-600'
+                          : gpsEngineStatus === 'denied'
+                            ? 'text-red-600'
+                            : detectedGeoState
+                              ? 'text-emerald-600'
+                              : 'text-stone-500'
+                      }`}
+                    />
+                    {gpsEngineStatus === 'denied' ? (
+                      <span data-testid="header-gps-denied-badge" className="font-bold">
+                        GPS refusé — Autoriser
+                      </span>
+                    ) : (
+                      <span className="hidden xl:inline">
+                        {gpsBusy
+                          ? 'GPS...'
+                          : detectedGeoState
+                            ? `GPS · ${detectedGeoState.nearestCity}`
+                            : 'Activer GPS'}
+                      </span>
+                    )}
+                  </button>
+                  <PWAInstallButton variant="header" onInstalledNotify={(msg) => notify(msg)} />
+                  <button
+                    type="button"
+                    disabled={isAuditing}
+                    onClick={() => handleBatchAudit('portfolio')}
+                    className="flex px-2.5 py-1.5 rounded-lg border border-stone-300 bg-stone-50 hover:bg-stone-100 disabled:opacity-60 text-xs font-semibold text-stone-800 items-center gap-1.5 whitespace-nowrap shrink-0 transition-colors"
+                  >
+                    <ShieldCheck className={`w-3.5 h-3.5 text-emerald-600 ${isAuditing ? 'animate-spin' : ''}`} />
+                    {isAuditing ? 'Vérification...' : 'Vérifier & Corriger'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setShowApiHub((v) => !v)}
+                    aria-expanded={showApiHub}
+                    className={`flex px-2.5 py-1.5 rounded-lg border text-xs font-semibold items-center gap-1.5 whitespace-nowrap shrink-0 transition-colors ${
+                      showApiHub || activeApiCount > 0
+                        ? 'border-orange-300 bg-orange-50 text-orange-900 hover:bg-orange-100'
+                        : 'border-stone-300 bg-white text-stone-700 hover:bg-stone-50'
+                    }`}
+                  >
+                    <KeyRound className="w-3.5 h-3.5 text-orange-600" />
+                    <span className="tabular-nums">Hub API ({activeApiCount})</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setShowAiCopilot(true)}
+                    className="px-2.5 py-1.5 rounded-lg border border-stone-900 bg-stone-900 hover:bg-stone-800 text-white text-xs font-semibold flex items-center gap-1.5 whitespace-nowrap shrink-0 transition-colors"
+                  >
+                    <Bot className="w-3.5 h-3.5 text-orange-400" />
+                    <span>Copilote IA</span>
+                  </button>
+                </div>
+
+                {/* Bouton principal + Fiche (visible mobile & desktop) */}
                 <button
                   type="button"
                   onClick={() => setShowQuickAdd(true)}
-                  className="px-2.5 sm:px-3 py-1.5 rounded-lg bg-orange-600 hover:bg-orange-700 text-white text-xs font-semibold flex items-center gap-1 sm:gap-1.5 whitespace-nowrap shrink-0 transition-colors"
+                  className="px-2.5 sm:px-3 py-1.5 min-h-[36px] rounded-lg bg-orange-600 hover:bg-orange-700 text-white text-xs font-semibold flex items-center gap-1 sm:gap-1.5 whitespace-nowrap shrink-0 transition-colors"
                 >
                   <Plus className="w-3.5 h-3.5" />
-                  <span className="sm:hidden">Fiche</span>
-                  <span className="hidden sm:inline">Nouvelle fiche</span>
+                  <span className="md:hidden">Fiche</span>
+                  <span className="hidden md:inline">Nouvelle fiche</span>
                 </button>
 
                 <NotificationBell
@@ -9757,8 +9731,118 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
                   onSelectNotification={(n) => void handleSelectNotification(n)}
                 />
 
-                {/* Menu Profil Utilisateur (Photo, Rôle, Paramètres & Déconnexion) */}
-                <div ref={profileMenuRef} className="relative">
+                {/* Menu compact « Plus » sur mobile (< 768px) pour les actions secondaires */}
+                <div ref={mobileMoreMenuRef} className="relative md:hidden">
+                  <button
+                    type="button"
+                    data-testid="mobile-header-more-btn"
+                    aria-label="Plus d'actions"
+                    aria-expanded={mobileMoreMenuOpen}
+                    onClick={() => setMobileMoreMenuOpen((v) => !v)}
+                    className="relative p-2 min-h-[36px] min-w-[36px] rounded-lg border border-stone-200 bg-stone-50 hover:bg-stone-100 text-stone-800 flex items-center justify-center shrink-0"
+                  >
+                    <MoreVertical className="w-4 h-4" />
+                    {gpsEngineStatus === 'denied' && (
+                      <span
+                        aria-hidden="true"
+                        className="absolute top-1 right-1 w-2 h-2 rounded-full bg-red-600"
+                      />
+                    )}
+                  </button>
+                  {mobileMoreMenuOpen && (
+                    <div
+                      data-testid="mobile-header-more-menu"
+                      className="absolute right-0 mt-1.5 w-60 rounded-xl border border-stone-200 bg-white shadow-xl py-1.5 z-40 text-xs"
+                    >
+                      <button
+                        type="button"
+                        disabled={gpsBusy}
+                        onClick={() => {
+                          setMobileMoreMenuOpen(false);
+                          void handleActivateOrRefreshGps();
+                        }}
+                        className="w-full px-3 py-2.5 text-left hover:bg-stone-50 flex items-center gap-2 text-stone-800 font-semibold disabled:opacity-60"
+                      >
+                        <Navigation
+                          className={`w-4 h-4 shrink-0 ${
+                            gpsEngineStatus === 'denied'
+                              ? 'text-red-600'
+                              : detectedGeoState
+                                ? 'text-emerald-600'
+                                : 'text-stone-500'
+                          }`}
+                        />
+                        <span className="truncate">
+                          {gpsEngineStatus === 'denied'
+                            ? 'GPS refusé — Autoriser'
+                            : detectedGeoState
+                              ? `GPS · ${detectedGeoState.nearestCity}`
+                              : 'Activer / Actualiser GPS'}
+                        </span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setMobileMoreMenuOpen(false);
+                          setShowAiCopilot(true);
+                        }}
+                        className="w-full px-3 py-2.5 text-left hover:bg-stone-50 flex items-center gap-2 text-stone-800 font-semibold"
+                      >
+                        <Bot className="w-4 h-4 text-orange-600 shrink-0" />
+                        <span>Copilote IA Orange Pro</span>
+                      </button>
+                      <button
+                        type="button"
+                        disabled={isAuditing}
+                        onClick={() => {
+                          setMobileMoreMenuOpen(false);
+                          handleBatchAudit('portfolio');
+                        }}
+                        className="w-full px-3 py-2.5 text-left hover:bg-stone-50 flex items-center gap-2 text-stone-800 font-semibold disabled:opacity-60"
+                      >
+                        <ShieldCheck className="w-4 h-4 text-emerald-600 shrink-0" />
+                        <span>{isAuditing ? 'Vérification...' : 'Vérifier & Corriger'}</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setMobileMoreMenuOpen(false);
+                          setShowApiHub((v) => !v);
+                        }}
+                        className="w-full px-3 py-2.5 text-left hover:bg-stone-50 flex items-center gap-2 text-stone-800 font-semibold"
+                      >
+                        <KeyRound className="w-4 h-4 text-orange-600 shrink-0" />
+                        <span>Hub API ({activeApiCount})</span>
+                      </button>
+                      <div className="my-1 border-t border-stone-100" />
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setMobileMoreMenuOpen(false);
+                          navigateCrm('compte');
+                        }}
+                        className="w-full px-3 py-2.5 text-left hover:bg-stone-50 flex items-center gap-2 text-stone-700 font-medium"
+                      >
+                        <Settings className="w-4 h-4 text-stone-500 shrink-0" />
+                        <span>Mon compte &amp; Profil</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setMobileMoreMenuOpen(false);
+                          void handleGoogleSignOut();
+                        }}
+                        className="w-full px-3 py-2.5 text-left hover:bg-red-50 flex items-center gap-2 text-red-700 font-semibold"
+                      >
+                        <LogOut className="w-4 h-4 shrink-0" />
+                        <span>Déconnexion</span>
+                      </button>
+                    </div>
+                  )}
+                </div>
+
+                {/* Menu Profil Utilisateur (Desktop >= 768px) */}
+                <div ref={profileMenuRef} className="relative hidden md:block">
                   <button
                     type="button"
                     onClick={() => setProfileMenuOpen((v) => !v)}
@@ -10954,7 +11038,42 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
                   })}
                 </div>
 
-                <div className="flex items-center gap-3 text-xs tabular-nums">
+                <div className="flex flex-wrap items-center gap-2 sm:gap-3 text-xs tabular-nums">
+                  {crmViewMode === 'table' && (
+                    <div
+                      role="group"
+                      aria-label="Affichage mobile Portefeuille"
+                      data-testid="mobile-portfolio-display-toggle"
+                      className="sm:hidden inline-flex items-center p-0.5 bg-stone-100 rounded-lg border border-stone-200"
+                    >
+                      <button
+                        type="button"
+                        onClick={() => setMobilePortfolioDisplay('cards')}
+                        aria-pressed={mobilePortfolioDisplay === 'cards'}
+                        className={`px-2.5 py-1 rounded-md text-xs font-semibold flex items-center gap-1 transition-colors ${
+                          mobilePortfolioDisplay === 'cards'
+                            ? 'bg-white text-stone-900 shadow-xs'
+                            : 'text-stone-600 hover:text-stone-900'
+                        }`}
+                      >
+                        <LayoutGrid className="w-3.5 h-3.5" />
+                        Cartes
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setMobilePortfolioDisplay('table')}
+                        aria-pressed={mobilePortfolioDisplay === 'table'}
+                        className={`px-2.5 py-1 rounded-md text-xs font-semibold flex items-center gap-1 transition-colors ${
+                          mobilePortfolioDisplay === 'table'
+                            ? 'bg-white text-stone-900 shadow-xs'
+                            : 'text-stone-600 hover:text-stone-900'
+                        }`}
+                      >
+                        <Table2 className="w-3.5 h-3.5" />
+                        Tableau
+                      </button>
+                    </div>
+                  )}
                   <div
                     role="group"
                     aria-label="Mode d'affichage CRM"
@@ -11152,59 +11271,227 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
             </section>
 
             {crmViewMode === 'kanban' ? (
-              <KanbanBoard
-                fiches={filteredFiches}
-                velocityReport={velocityReport}
-                verifyingId={verifyingId}
-                canSuperviseTeam={isTeamSupervisor}
-                targetMaturityPct={advPrefs.targetMaturityPct}
-                preferredContactChannel={advPrefs.preferredContactChannel}
-                onMoveFiche={handleMoveFicheKanban}
-                onOpenEmail={openEmailStudio}
-                onVerifyOne={handleVerifyWeb}
-                onOpenAiBrief={handleOpenAiBrief}
-                onOpenAssist={(f) => {
-                  setAssistModalFiche(f);
-                  setAssistPasteText('');
-                  setAssistAiSummary('');
-                  setLastVerifyDiag('');
-                }}
-                onOpenDetail={(f) => openFicheDetailModal(f)}
-                onOpenQuote={(f) => {
-                  setQuoteModalOwnerUid(cloudUser.uid);
-                  setQuoteModalFiche(f);
-                }}
-                onAssignFiche={
-                  isTeamSupervisor
-                    ? (f) =>
-                        setAssignRestoreTarget({
-                          mode: 'assign',
-                          fiche: f,
-                          ownerUid: cloudUser.uid,
-                          ownerName: currentUserDisplayName,
-                        })
-                    : undefined
-                }
-                onRestoreFiche={
-                  isTeamSupervisor
-                    ? (f) =>
-                        setAssignRestoreTarget({
-                          mode: 'restore',
-                          fiche: f,
-                          ownerUid: cloudUser.uid,
-                          ownerName: currentUserDisplayName,
-                        })
-                    : undefined
-                }
-                onQuickAddInStage={(statut) => {
-                  setQuickAddStatut(statut);
-                  setShowQuickAdd(true);
-                }}
-              />
+              <Suspense fallback={<LazyViewFallback label="Chargement du pipeline Kanban..." />}>
+                <KanbanBoard
+                  fiches={filteredFiches}
+                  velocityReport={velocityReport}
+                  verifyingId={verifyingId}
+                  canSuperviseTeam={isTeamSupervisor}
+                  targetMaturityPct={advPrefs.targetMaturityPct}
+                  preferredContactChannel={advPrefs.preferredContactChannel}
+                  onMoveFiche={handleMoveFicheKanban}
+                  onOpenEmail={openEmailStudio}
+                  onVerifyOne={handleVerifyWeb}
+                  onOpenAiBrief={handleOpenAiBrief}
+                  onOpenAssist={(f) => {
+                    setAssistModalFiche(f);
+                    setAssistPasteText('');
+                    setAssistAiSummary('');
+                    setLastVerifyDiag('');
+                  }}
+                  onOpenDetail={(f) => openFicheDetailModal(f)}
+                  onOpenQuote={(f) => {
+                    setQuoteModalOwnerUid(cloudUser.uid);
+                    setQuoteModalFiche(f);
+                  }}
+                  onAssignFiche={
+                    isTeamSupervisor
+                      ? (f) =>
+                          setAssignRestoreTarget({
+                            mode: 'assign',
+                            fiche: f,
+                            ownerUid: cloudUser.uid,
+                            ownerName: currentUserDisplayName,
+                          })
+                      : undefined
+                  }
+                  onRestoreFiche={
+                    isTeamSupervisor
+                      ? (f) =>
+                          setAssignRestoreTarget({
+                            mode: 'restore',
+                            fiche: f,
+                            ownerUid: cloudUser.uid,
+                            ownerName: currentUserDisplayName,
+                          })
+                      : undefined
+                  }
+                  onQuickAddInStage={(statut) => {
+                    setQuickAddStatut(statut);
+                    setShowQuickAdd(true);
+                  }}
+                />
+              </Suspense>
             ) : (
-            /* Tableau Haute Densité Éditable Inline */
+            /* Tableau Haute Densité Éditable Inline + Vue Cartes Terrain Mobile (< 640px) */
             <section className="bg-white rounded-xl border border-stone-200 overflow-hidden">
-              <div className="overflow-x-auto">
+              {mobilePortfolioDisplay === 'cards' && (
+                <div
+                  data-testid="mobile-portfolio-cards"
+                  className="sm:hidden p-3 space-y-2.5 bg-stone-50/70"
+                >
+                  {filteredFiches.length === 0 ? (
+                    <div className="p-6 text-center bg-white rounded-xl border border-stone-200 space-y-2.5">
+                      {accessibleFiches.length === 0 ? (
+                        <>
+                          <p className="text-sm font-bold text-stone-900">Portefeuille initial vide (0 fiche)</p>
+                          <p className="text-xs text-stone-500">
+                            Ajoutez votre première entreprise prospect ou lancez une extraction.
+                          </p>
+                          <button
+                            type="button"
+                            onClick={() => setShowQuickAdd(true)}
+                            className="px-4 py-2.5 min-h-[44px] rounded-lg bg-orange-600 text-white text-xs font-semibold inline-flex items-center gap-1.5"
+                          >
+                            <Plus className="w-4 h-4" />
+                            Nouvelle fiche
+                          </button>
+                        </>
+                      ) : (
+                        <>
+                          <p className="text-xs text-stone-500">Aucune fiche ne correspond aux filtres actuels.</p>
+                          {hasActiveFilters && (
+                            <button
+                              type="button"
+                              onClick={resetAllFilters}
+                              className="text-xs font-semibold text-orange-700 underline"
+                            >
+                              Réinitialiser les filtres
+                            </button>
+                          )}
+                        </>
+                      )}
+                    </div>
+                  ) : (
+                    paginatedFiches.map((f) => {
+                      const secMeta = SECTEURS_META[f.secteur] || SECTEURS_META.pme;
+                      const seg = SEGMENTS_COULEUR[secMeta.couleur];
+                      const reco = getOrangeProRecommendation(f);
+                      const wa = toWa212(f.telephone);
+                      const waMsg = `Bonjour${
+                        f.contact ? ` ${f.contact.split(' ')[0]}` : ''
+                      }, conseiller Orange Pro sur ${f.ville || 'la région'}. Je souhaite faire un point rapide pour ${
+                        f.societe
+                      } sur ${reco.offre}.`;
+                      const statutBadgeCls =
+                        f.statut === 'Signé Orange Pro'
+                          ? 'bg-emerald-100 text-emerald-900 border-emerald-200'
+                          : f.statut === 'Devis envoyé'
+                            ? 'bg-orange-100 text-orange-900 border-orange-200'
+                            : f.statut === 'RDV pris'
+                              ? 'bg-blue-100 text-blue-900 border-blue-200'
+                              : f.statut === 'Appel en cours'
+                                ? 'bg-amber-100 text-amber-900 border-amber-200'
+                                : f.statut === 'Pas intéressé'
+                                  ? 'bg-stone-200 text-stone-700 border-stone-300'
+                                  : 'bg-stone-100 text-stone-800 border-stone-200';
+                      return (
+                        <article
+                          key={`card-${f.id}`}
+                          className={`rounded-xl bg-white border border-stone-200 p-3.5 shadow-2xs space-y-2.5 ${seg.topBarCls}`}
+                        >
+                          <div className="flex items-start justify-between gap-2">
+                            <div className="min-w-0 flex-1">
+                              <div className="flex items-center gap-1.5 flex-wrap">
+                                {f.numeroFiche && (
+                                  <span className="font-mono text-[10px] font-bold px-1.5 py-0.5 rounded bg-stone-100 text-stone-700">
+                                    {f.numeroFiche}
+                                  </span>
+                                )}
+                                <h3 className="text-sm font-bold text-stone-900 truncate">
+                                  {f.societe}
+                                </h3>
+                              </div>
+                              <p className="mt-0.5 text-xs text-stone-600 flex items-center gap-1 flex-wrap">
+                                <MapPin className="w-3 h-3 text-orange-600 shrink-0" />
+                                <span className="font-medium text-stone-800">{f.ville || 'Ville non renseignée'}</span>
+                                <span>·</span>
+                                <span className="truncate">{secMeta.label}</span>
+                              </p>
+                            </div>
+                            <span
+                              className={`px-2 py-0.5 rounded-full text-[11px] font-bold border shrink-0 ${statutBadgeCls}`}
+                            >
+                              {f.statut}
+                            </span>
+                          </div>
+
+                          <div className="flex items-center justify-between gap-2 text-xs text-stone-700 pt-0.5 border-t border-stone-100">
+                            <div className="min-w-0">
+                              <div className="font-mono font-semibold text-stone-900 tabular-nums">
+                                {f.telephone || <span className="text-stone-400 italic font-sans">Sans téléphone</span>}
+                              </div>
+                              {f.contact && (
+                                <div className="text-[11px] text-stone-500 truncate">
+                                  {f.contact}
+                                  {f.role ? ` · ${f.role}` : ''}
+                                </div>
+                              )}
+                            </div>
+                            <div className="flex items-center gap-1.5 shrink-0">
+                              {isEffectifAberrant(f.effectif) && (
+                                <span
+                                  title={`Effectif aberrant détecté (${f.effectif})`}
+                                  className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-amber-100 text-amber-900 border border-amber-300 text-[10px] font-bold"
+                                >
+                                  <AlertTriangle className="w-3 h-3" />
+                                  Eff. ?
+                                </span>
+                              )}
+                              <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${reco.badgeCls}`}>
+                                {reco.tier}
+                              </span>
+                            </div>
+                          </div>
+
+                          <div className="grid grid-cols-3 gap-2 pt-1">
+                            {f.telephone ? (
+                              <a
+                                href={`tel:${f.telephone}`}
+                                className="min-h-[44px] rounded-lg bg-stone-900 hover:bg-stone-800 text-white text-xs font-semibold flex items-center justify-center gap-1.5"
+                              >
+                                <Phone className="w-3.5 h-3.5" />
+                                Appeler
+                              </a>
+                            ) : (
+                              <span className="min-h-[44px] rounded-lg bg-stone-100 text-stone-400 text-xs font-semibold flex items-center justify-center gap-1.5 cursor-not-allowed">
+                                <Phone className="w-3.5 h-3.5" />
+                                Appeler
+                              </span>
+                            )}
+                            {wa ? (
+                              <a
+                                href={`https://wa.me/${wa}?text=${encodeURIComponent(waMsg)}`}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="min-h-[44px] rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold flex items-center justify-center gap-1.5"
+                              >
+                                <MessageSquare className="w-3.5 h-3.5" />
+                                WhatsApp
+                              </a>
+                            ) : (
+                              <span className="min-h-[44px] rounded-lg bg-stone-100 text-stone-400 text-xs font-semibold flex items-center justify-center gap-1.5 cursor-not-allowed">
+                                <MessageSquare className="w-3.5 h-3.5" />
+                                WhatsApp
+                              </span>
+                            )}
+                            <button
+                              type="button"
+                              onClick={() => openFicheDetailModal(f)}
+                              className="min-h-[44px] rounded-lg bg-orange-600 hover:bg-orange-700 text-white text-xs font-semibold flex items-center justify-center gap-1.5"
+                            >
+                              <Eye className="w-3.5 h-3.5" />
+                              Ouvrir
+                            </button>
+                          </div>
+                        </article>
+                      );
+                    })
+                  )}
+                </div>
+              )}
+
+              <div className={mobilePortfolioDisplay === 'cards' ? 'hidden sm:block overflow-x-auto' : 'overflow-x-auto'}>
                 <table className="w-full text-left border-collapse text-xs">
                   <thead>
                     <tr className="bg-stone-50 border-b border-stone-200 text-stone-600 font-semibold">
@@ -11644,13 +11931,25 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
                             </td>
 
                             <td className="p-3 space-y-1 max-w-[235px]">
-                              <div className="flex items-center gap-1.5">
+                              <div className="flex items-center gap-1.5 flex-wrap">
                                 <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${reco.badgeCls}`}>
                                   {reco.tier}
                                 </span>
-                                <span className="text-[11px] text-stone-600 tabular-nums">
-                                  Eff. : {renderEditable('effectif', f.effectif, '—')}
-                                </span>
+                                {isEffectifAberrant(f.effectif) && !(editingCell?.id === f.id && editingCell.field === 'effectif') ? (
+                                  <button
+                                    type="button"
+                                    onClick={() => startEdit(f, 'effectif')}
+                                    title={`Effectif aberrant détecté (« ${f.effectif} ») — Cliquer pour corriger`}
+                                    className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-amber-100 hover:bg-amber-200 text-amber-900 border border-amber-300 text-[10px] font-bold"
+                                  >
+                                    <AlertTriangle className="w-3 h-3 shrink-0" />
+                                    À vérifier
+                                  </button>
+                                ) : (
+                                  <span className="text-[11px] text-stone-600 tabular-nums">
+                                    Eff. : {renderEditable('effectif', f.effectif, '—')}
+                                  </span>
+                                )}
                               </div>
                               <p className="text-[11px] text-stone-600 leading-snug">{reco.offre}</p>
                             </td>
@@ -12057,53 +12356,55 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
               </div>
             )}
             <KpiTrendChart fiches={filteredFiches} totalUnfilteredCount={fiches.length} />
-            <KanbanBoard
-              fiches={filteredFiches}
-              velocityReport={velocityReport}
-              verifyingId={verifyingId}
-              canSuperviseTeam={isTeamSupervisor}
-              onMoveFiche={handleMoveFicheKanban}
-              onOpenEmail={openEmailStudio}
-              onVerifyOne={handleVerifyWeb}
-              onOpenAiBrief={handleOpenAiBrief}
-              onOpenAssist={(f) => {
-                setAssistModalFiche(f);
-                setAssistPasteText('');
-                setAssistAiSummary('');
-                setLastVerifyDiag('');
-              }}
-              onOpenDetail={(f) => openFicheDetailModal(f)}
-              onOpenQuote={(f) => {
-                setQuoteModalOwnerUid(cloudUser.uid);
-                setQuoteModalFiche(f);
-              }}
-              onAssignFiche={
-                isTeamSupervisor
-                  ? (f) =>
-                      setAssignRestoreTarget({
-                        mode: 'assign',
-                        fiche: f,
-                        ownerUid: cloudUser.uid,
-                        ownerName: currentUserDisplayName,
-                      })
-                  : undefined
-              }
-              onRestoreFiche={
-                isTeamSupervisor
-                  ? (f) =>
-                      setAssignRestoreTarget({
-                        mode: 'restore',
-                        fiche: f,
-                        ownerUid: cloudUser.uid,
-                        ownerName: currentUserDisplayName,
-                      })
-                  : undefined
-              }
-              onQuickAddInStage={(statut) => {
-                setQuickAddStatut(statut);
-                setShowQuickAdd(true);
-              }}
-            />
+            <Suspense fallback={<LazyViewFallback label="Chargement du pipeline Kanban..." />}>
+              <KanbanBoard
+                fiches={filteredFiches}
+                velocityReport={velocityReport}
+                verifyingId={verifyingId}
+                canSuperviseTeam={isTeamSupervisor}
+                onMoveFiche={handleMoveFicheKanban}
+                onOpenEmail={openEmailStudio}
+                onVerifyOne={handleVerifyWeb}
+                onOpenAiBrief={handleOpenAiBrief}
+                onOpenAssist={(f) => {
+                  setAssistModalFiche(f);
+                  setAssistPasteText('');
+                  setAssistAiSummary('');
+                  setLastVerifyDiag('');
+                }}
+                onOpenDetail={(f) => openFicheDetailModal(f)}
+                onOpenQuote={(f) => {
+                  setQuoteModalOwnerUid(cloudUser.uid);
+                  setQuoteModalFiche(f);
+                }}
+                onAssignFiche={
+                  isTeamSupervisor
+                    ? (f) =>
+                        setAssignRestoreTarget({
+                          mode: 'assign',
+                          fiche: f,
+                          ownerUid: cloudUser.uid,
+                          ownerName: currentUserDisplayName,
+                        })
+                    : undefined
+                }
+                onRestoreFiche={
+                  isTeamSupervisor
+                    ? (f) =>
+                        setAssignRestoreTarget({
+                          mode: 'restore',
+                          fiche: f,
+                          ownerUid: cloudUser.uid,
+                          ownerName: currentUserDisplayName,
+                        })
+                    : undefined
+                }
+                onQuickAddInStage={(statut) => {
+                  setQuickAddStatut(statut);
+                  setShowQuickAdd(true);
+                }}
+              />
+            </Suspense>
           </div>
         )}
 
@@ -12552,6 +12853,7 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
         {/* ONGLET 4 : DÉDUPLICATION INTELLIGENTE (PRIORITÉ NOM DE SOCIÉTÉ)    */}
         {/* ================================================================== */}
         {activeTab === 'dedup' && (
+          <div className="space-y-4">
           <section className="bg-white rounded-xl border border-stone-200 p-4 space-y-4">
             <div className="flex flex-wrap items-start justify-between gap-3">
               <div className="space-y-1">
@@ -12761,193 +13063,220 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
               </div>
             )}
           </section>
+
+          <Suspense fallback={<LazyViewFallback label="Chargement du diagnostic hygiène CRM..." />}>
+            <DataHygienePanel
+              fiches={accessibleFiches}
+              signedContracts={signedContracts}
+              busy={hygieneBusy}
+              onApplySingleFix={handleApplySingleHygieneFix}
+              onApplyAllSafeFixes={handleApplyAllSafeHygieneFixes}
+              onRegisterContractForFiche={(f) => openSignContractModal(f)}
+              onReclassifyToNegotiation={handleReclassifyOrphanSignedToNegotiation}
+              onOpenFicheDetail={(f) => openFicheDetailModal(f)}
+            />
+          </Suspense>
+          </div>
         )}
 
         {/* ================================================================== */}
         {/* ONGLET : CLASSEMENT ÉQUIPE, ÉVOLUTION & PAYOUTS                    */}
         {/* ================================================================== */}
         {activeTab === 'team' && (
-          <TeamPerformancePanel
-            currentUserUid={cloudUser.uid}
-            isSuperAdmin={isSuperAdmin}
-            currentUserRole={appUserProfile?.role || (isSuperAdmin ? 'super_admin' : 'commercial')}
-            teamStats={effectiveTeamStats}
-            signedContracts={signedContracts}
-            currentUserFiches={fiches}
-            portfolioRefreshKey={portfolioRefreshKey}
-            onAdminUpdateContract={isTeamSupervisor ? handleAdminUpdateContract : undefined}
-            onJumpToBadges={
-              isTeamSupervisor
-                ? (uid) => {
-                    setBadgesFocusUid(uid);
-                    setActiveTab('badges');
-                  }
-                : undefined
-            }
-            accessibleFicheIds={new Set(accessibleFiches.map((f) => f.id))}
-            onOpenContractFiche={(c) => void handleOpenContractFiche(c)}
-            onAssignContractFiche={
-              isTeamSupervisor ? (c) => void handleContractAssignOrRestore(c, 'assign') : undefined
-            }
-            onRestoreContractFiche={
-              isTeamSupervisor ? (c) => void handleContractAssignOrRestore(c, 'restore') : undefined
-            }
-            onOpenMemberProfileChat={
-              isSuperAdmin ? (uid) => openCollaboratorProfileByUid(uid, 'profile') : undefined
-            }
-            onInspectPortfolioFiche={(item: PortfolioFicheItem) =>
-              openFicheDetailModal(item.fiche, item.ownerUid, item.ownerName)
-            }
-            onOpenPortfolioQuote={(f, ownerUid) => {
-              setQuoteModalOwnerUid(ownerUid);
-              setQuoteModalFiche(f);
-            }}
-            onOpenPortfolioAssign={(item: PortfolioFicheItem) =>
-              setAssignRestoreTarget({
-                mode: 'assign',
-                fiche: item.fiche,
-                ownerUid: item.ownerUid,
-                ownerName: item.ownerName,
-              })
-            }
-            onOpenPortfolioRestore={(item: PortfolioFicheItem) =>
-              setAssignRestoreTarget({
-                mode: 'restore',
-                fiche: item.fiche,
-                ownerUid: item.ownerUid,
-                ownerName: item.ownerName,
-              })
-            }
-          />
+          <Suspense fallback={<LazyViewFallback label="Chargement de la performance équipe..." />}>
+            <TeamPerformancePanel
+              currentUserUid={cloudUser.uid}
+              isSuperAdmin={isSuperAdmin}
+              currentUserRole={appUserProfile?.role || (isSuperAdmin ? 'super_admin' : 'commercial')}
+              teamStats={effectiveTeamStats}
+              signedContracts={signedContracts}
+              currentUserFiches={fiches}
+              portfolioRefreshKey={portfolioRefreshKey}
+              initialSelectedUid={teamFocusUid}
+              workspaceLegal={workspaceLegal}
+              onNotify={(msg, type) =>
+                notify(msg, type === 'err' ? 'err' : type === 'warn' ? 'warn' : 'ok')
+              }
+              onAdminUpdateContract={isTeamSupervisor ? handleAdminUpdateContract : undefined}
+              onJumpToBadges={
+                isTeamSupervisor
+                  ? (uid) => {
+                      setBadgesFocusUid(uid);
+                      setActiveTab('badges');
+                    }
+                  : undefined
+              }
+              accessibleFicheIds={new Set(accessibleFiches.map((f) => f.id))}
+              onOpenContractFiche={(c) => void handleOpenContractFiche(c)}
+              onAssignContractFiche={
+                isTeamSupervisor ? (c) => void handleContractAssignOrRestore(c, 'assign') : undefined
+              }
+              onRestoreContractFiche={
+                isTeamSupervisor ? (c) => void handleContractAssignOrRestore(c, 'restore') : undefined
+              }
+              onOpenMemberProfileChat={
+                isSuperAdmin ? (uid) => openCollaboratorProfileByUid(uid, 'profile') : undefined
+              }
+              onInspectPortfolioFiche={(item: PortfolioFicheItem) =>
+                openFicheDetailModal(item.fiche, item.ownerUid, item.ownerName)
+              }
+              onOpenPortfolioQuote={(f, ownerUid) => {
+                setQuoteModalOwnerUid(ownerUid);
+                setQuoteModalFiche(f);
+              }}
+              onOpenPortfolioAssign={(item: PortfolioFicheItem) =>
+                setAssignRestoreTarget({
+                  mode: 'assign',
+                  fiche: item.fiche,
+                  ownerUid: item.ownerUid,
+                  ownerName: item.ownerName,
+                })
+              }
+              onOpenPortfolioRestore={(item: PortfolioFicheItem) =>
+                setAssignRestoreTarget({
+                  mode: 'restore',
+                  fiche: item.fiche,
+                  ownerUid: item.ownerUid,
+                  ownerName: item.ownerName,
+                })
+              }
+            />
+          </Suspense>
         )}
 
         {/* ================================================================== */}
         {/* ONGLET : SUCCÈS, BADGES & RÉALISATIONS ORANGE PRO                  */}
         {/* ================================================================== */}
         {activeTab === 'badges' && (
-          <AchievementsPanel
-            currentUserUid={cloudUser.uid}
-            currentUserName={currentUserDisplayName}
-            currentUserRole={currentUserRole}
-            isSuperAdmin={isSuperAdmin}
-            myMetrics={myCollaboratorMetrics}
-            teamStats={effectiveTeamStats}
-            signedContracts={signedContracts}
-            initialSelectedUid={badgesFocusUid}
-            onAdminToggleManualBadge={isSuperAdmin ? handleAdminToggleManualBadge : undefined}
-            onAdminResyncMemberStat={
-              isSuperAdmin
-                ? async (targetUid, patch) => {
-                    await adminResyncTeamMemberStats(targetUid, patch);
-                    notify('Statistiques équipe resynchronisées avec succès.');
-                  }
-                : undefined
-            }
-          />
+          <Suspense fallback={<LazyViewFallback label="Chargement des badges & réalisations..." />}>
+            <AchievementsPanel
+              currentUserUid={cloudUser.uid}
+              currentUserName={currentUserDisplayName}
+              currentUserRole={currentUserRole}
+              isSuperAdmin={isSuperAdmin}
+              myMetrics={myCollaboratorMetrics}
+              teamStats={effectiveTeamStats}
+              signedContracts={signedContracts}
+              initialSelectedUid={badgesFocusUid}
+              onAdminToggleManualBadge={isSuperAdmin ? handleAdminToggleManualBadge : undefined}
+              onAdminResyncMemberStat={
+                isSuperAdmin
+                  ? async (targetUid, patch) => {
+                      await adminResyncTeamMemberStats(targetUid, patch);
+                      notify('Statistiques équipe resynchronisées avec succès.');
+                    }
+                  : undefined
+              }
+            />
+          </Suspense>
         )}
 
         {/* ================================================================== */}
         {/* ONGLET : MON COMPTE, PROFIL, PHOTO & PARAMÈTRES                    */}
         {/* ================================================================== */}
         {activeTab === 'compte' && (
-          <AccountSettingsPanel
-            uid={cloudUser.uid}
-            email={cloudUser.email || ''}
-            emailVerified={cloudUser.emailVerified}
-            hasPasswordProvider={cloudUser.providerData.some((p) => p.providerId === 'password')}
-            role={currentUserRole}
-            profile={{
-              ...userProfile,
-              displayName: userProfile.displayName || currentUserDisplayName,
-              zone: userProfile.zone || appUserProfile?.zone || villesState.defaultVille || 'Meknès',
-            }}
-            emailSignature={emailSignature}
-            villesOptions={villesState.all}
-            manualBadges={myTeamStatRecord?.manualBadges || []}
-            achievementSummary={myAchievementSummary}
-            contractsCount={myCollaboratorMetrics.contractsCount}
-            totalPayoutMad={myCollaboratorMetrics.totalPayoutMad}
-            currentMonthContractsCount={myCurrentMonthStats.currentMonthContractsCount}
-            currentMonthPayoutMad={myCurrentMonthStats.currentMonthPayoutMad}
-            prospectsCount={myCollaboratorMetrics.totalProspects}
-            onSaveProfile={handleSaveUserProfile}
-            onExportBackup={handleExportFullBackup}
-            onSignOut={handleGoogleSignOut}
-            onJumpToBadges={() => setActiveTab('badges')}
-            onJumpToAdminSection={
-              isSuperAdmin
-                ? (section) => {
-                    setAdminSubSection(section);
-                    setActiveTab(section === 'vault' ? 'vault' : 'admin');
-                  }
-                : undefined
-            }
-            onTestBadgeAlert={handleTestBadgeAlert}
-            onNotify={notify}
-            myPresenceStatus={{
-              isOnline: myPresenceRecord
-                ? reconcilePresenceOnlineState(
-                    myPresenceRecord.isOnline,
-                    myPresenceRecord.lastSeenAt,
-                    Date.now(),
-                    undefined,
-                    myPresenceRecord.updatedAtIso
-                  ).effectiveOnline
-                : navigator.onLine !== false,
-              lastSeenLabel: myPresenceRecord?.lastSeenAt
-                ? formatDateTimeShort(myPresenceRecord.lastSeenAt)
-                : 'à l’instant',
-              deviceLabel: stripFieldTelemetrySuffix(
-                myPresenceRecord?.currentDevice || activeAttendanceRef.current?.baseDeviceLabel || ''
-              ),
-              isSuperAdmin,
-            }}
-            presenceSyncStatus={presenceSyncStatus}
-            onForcePresenceAndGpsSync={() => {
-              void handleActivateOrRefreshGps();
-            }}
-          />
+          <Suspense fallback={<LazyViewFallback label="Chargement des paramètres du compte..." />}>
+            <AccountSettingsPanel
+              uid={cloudUser.uid}
+              email={cloudUser.email || ''}
+              emailVerified={cloudUser.emailVerified}
+              hasPasswordProvider={cloudUser.providerData.some((p) => p.providerId === 'password')}
+              role={currentUserRole}
+              profile={{
+                ...userProfile,
+                displayName: userProfile.displayName || currentUserDisplayName,
+                zone: userProfile.zone || appUserProfile?.zone || villesState.defaultVille || 'Meknès',
+              }}
+              emailSignature={emailSignature}
+              villesOptions={villesState.all}
+              manualBadges={myTeamStatRecord?.manualBadges || []}
+              achievementSummary={myAchievementSummary}
+              contractsCount={myCollaboratorMetrics.contractsCount}
+              totalPayoutMad={myCollaboratorMetrics.totalPayoutMad}
+              currentMonthContractsCount={myCurrentMonthStats.currentMonthContractsCount}
+              currentMonthPayoutMad={myCurrentMonthStats.currentMonthPayoutMad}
+              prospectsCount={myCollaboratorMetrics.totalProspects}
+              onSaveProfile={handleSaveUserProfile}
+              onExportBackup={handleExportFullBackup}
+              onSignOut={handleGoogleSignOut}
+              onJumpToBadges={() => setActiveTab('badges')}
+              onJumpToAdminSection={
+                isSuperAdmin
+                  ? (section) => {
+                      setAdminSubSection(section);
+                      setActiveTab(section === 'vault' ? 'vault' : 'admin');
+                    }
+                  : undefined
+              }
+              onTestBadgeAlert={handleTestBadgeAlert}
+              onNotify={notify}
+              myPresenceStatus={{
+                isOnline: myPresenceRecord
+                  ? reconcilePresenceOnlineState(
+                      myPresenceRecord.isOnline,
+                      myPresenceRecord.lastSeenAt,
+                      Date.now(),
+                      undefined,
+                      myPresenceRecord.updatedAtIso
+                    ).effectiveOnline
+                  : navigator.onLine !== false,
+                lastSeenLabel: myPresenceRecord?.lastSeenAt
+                  ? formatDateTimeShort(myPresenceRecord.lastSeenAt)
+                  : 'à l’instant',
+                deviceLabel: stripFieldTelemetrySuffix(
+                  myPresenceRecord?.currentDevice || activeAttendanceRef.current?.baseDeviceLabel || ''
+                ),
+                isSuperAdmin,
+              }}
+              presenceSyncStatus={presenceSyncStatus}
+              onForcePresenceAndGpsSync={() => {
+                void handleActivateOrRefreshGps();
+              }}
+            />
+          </Suspense>
         )}
 
         {/* ================================================================== */}
         {/* ONGLET 5 : ADMINISTRATION UTILISATEURS (SUPER-ADMIN EXCLUSIF)      */}
         {/* ================================================================== */}
         {(activeTab === 'admin' || activeTab === 'vault') && isSuperAdmin && (
-          <AdminUsersPanel
-            adminUid={cloudUser.uid}
-            adminEmail={cloudUser.email || ''}
-            adminHasPasswordProvider={cloudUser.providerData.some((p) => p.providerId === 'password')}
-            users={managedUsers}
-            cloudApiKeys={cloudApiKeys}
-            onRefreshCloudApiKeys={refreshCloudApiKeys}
-            teamStats={teamStats}
-            userPresences={userPresences}
-            villesOptions={villesState.all}
-            activeSection={activeTab === 'vault' ? 'vault' : adminSubSection}
-            onSectionChange={(section) => {
-              setAdminSubSection(section);
-              if (section === 'vault') {
-                setActiveTab('vault');
-              } else if (activeTab === 'vault') {
-                setActiveTab('admin');
+          <Suspense fallback={<LazyViewFallback label="Chargement de l'administration..." />}>
+            <AdminUsersPanel
+              adminUid={cloudUser.uid}
+              adminEmail={cloudUser.email || ''}
+              adminHasPasswordProvider={cloudUser.providerData.some((p) => p.providerId === 'password')}
+              users={managedUsers}
+              cloudApiKeys={cloudApiKeys}
+              onRefreshCloudApiKeys={refreshCloudApiKeys}
+              teamStats={teamStats}
+              userPresences={userPresences}
+              villesOptions={villesState.all}
+              activeSection={activeTab === 'vault' ? 'vault' : adminSubSection}
+              onSectionChange={(section) => {
+                setAdminSubSection(section);
+                if (section === 'vault') {
+                  setActiveTab('vault');
+                } else if (activeTab === 'vault') {
+                  setActiveTab('admin');
+                }
+              }}
+              onOpenMemberProfile={(target, initialTab) =>
+                setProfileChatModal({ target, initialTab: initialTab || 'profile' })
               }
-            }}
-            onOpenMemberProfile={(target, initialTab) =>
-              setProfileChatModal({ target, initialTab: initialTab || 'profile' })
-            }
-            unreadChatByUid={unreadChatByUid}
-            coachingReadyUids={coachingReadyUids}
-            onRequestMyGpsRefresh={handleActivateOrRefreshGps}
-            onForceRefreshPresencesFromServer={async () => {
-              const list = await fetchAllUserPresencesFromServer();
-              if (list.length > 0) {
-                setUserPresences(list);
-              }
-              return list.length;
-            }}
-            onOpenLocalApiHub={() => setShowApiHub(true)}
-            onNotify={notify}
-          />
+              unreadChatByUid={unreadChatByUid}
+              coachingReadyUids={coachingReadyUids}
+              onRequestMyGpsRefresh={handleActivateOrRefreshGps}
+              onForceRefreshPresencesFromServer={async () => {
+                const list = await fetchAllUserPresencesFromServer();
+                if (list.length > 0) {
+                  setUserPresences(list);
+                }
+                return list.length;
+              }}
+              onOpenLocalApiHub={() => setShowApiHub(true)}
+              onNotify={notify}
+            />
+          </Suspense>
         )}
       </main>
         </div>
@@ -14018,194 +14347,198 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
       )}
 
       {/* Modal Détails Complets d'une Fiche Entreprise (Profil Clientèle, Suivi d'Audit, Attribution & Devis PDF) */}
-      <FicheDetailModal
-        isOpen={Boolean(detailModalFicheId || detailModalExternalTarget)}
-        fiche={
-          detailModalExternalTarget
-            ? detailModalExternalTarget.fiche
-            : detailModalFicheId
-            ? accessibleFiches.find((f) => f.id === detailModalFicheId) ||
-              fiches.find((f) => f.id === detailModalFicheId) ||
-              null
-            : null
-        }
-        currentUserUid={cloudUser.uid}
-        ficheOwnerUid={detailModalExternalTarget?.ownerUid || cloudUser.uid}
-        ownerDisplayName={detailModalExternalTarget?.ownerName || currentUserDisplayName}
-        isSuperAdmin={isSuperAdmin}
-        canSuperviseTeam={isTeamSupervisor}
-        verifyingId={verifyingId}
-        activityRefreshKey={detailActivityRefreshKey}
-        onClose={() => {
-          setDetailModalFicheId(null);
-          setDetailModalExternalTarget(null);
-        }}
-        onChangeStatut={(targetFiche, nextStatut) => {
-          if (nextStatut === 'Signé Orange Pro') {
-            openSignContractModal(
-              targetFiche,
-              detailModalExternalTarget?.ownerUid || cloudUser.uid,
-              detailModalExternalTarget?.ownerName || currentUserDisplayName
-            );
-            return;
-          }
-          if (detailModalExternalTarget && detailModalExternalTarget.ownerUid !== cloudUser.uid) {
-            const ownerUid = detailModalExternalTarget.ownerUid;
-            const prevStatut = targetFiche.statut;
-            const updated: FicheEntreprise = {
-              ...targetFiche,
-              statut: nextStatut,
-              statutUpdatedAt: new Date().toISOString(),
-            };
-            setDetailModalExternalTarget({
-              ...detailModalExternalTarget,
-              fiche: updated,
-            });
-            void updateTeamMemberFiche(ownerUid, updated)
-              .then(() => {
-                void logFicheAuditAction(
-                  ownerUid,
-                  targetFiche.id,
-                  'statut',
-                  `Statut CRM modifié de « ${prevStatut} » vers « ${nextStatut} » par la supervision.`,
-                  {
-                    action: 'status_changed',
-                    field: 'statut',
-                    oldValue: prevStatut,
-                    newValue: nextStatut,
-                  }
+      {Boolean(detailModalFicheId || detailModalExternalTarget) && (
+        <Suspense fallback={null}>
+          <FicheDetailModal
+            isOpen={Boolean(detailModalFicheId || detailModalExternalTarget)}
+            fiche={
+              detailModalExternalTarget
+                ? detailModalExternalTarget.fiche
+                : detailModalFicheId
+                ? accessibleFiches.find((f) => f.id === detailModalFicheId) ||
+                  fiches.find((f) => f.id === detailModalFicheId) ||
+                  null
+                : null
+            }
+            currentUserUid={cloudUser.uid}
+            ficheOwnerUid={detailModalExternalTarget?.ownerUid || cloudUser.uid}
+            ownerDisplayName={detailModalExternalTarget?.ownerName || currentUserDisplayName}
+            isSuperAdmin={isSuperAdmin}
+            canSuperviseTeam={isTeamSupervisor}
+            verifyingId={verifyingId}
+            activityRefreshKey={detailActivityRefreshKey}
+            onClose={() => {
+              setDetailModalFicheId(null);
+              setDetailModalExternalTarget(null);
+            }}
+            onChangeStatut={(targetFiche, nextStatut) => {
+              if (nextStatut === 'Signé Orange Pro') {
+                openSignContractModal(
+                  targetFiche,
+                  detailModalExternalTarget?.ownerUid || cloudUser.uid,
+                  detailModalExternalTarget?.ownerName || currentUserDisplayName
                 );
-                setPortfolioRefreshKey((k) => k + 1);
-                notify(`Statut mis à jour vers « ${nextStatut} ».`);
-              })
-              .catch(() => notify('Impossible de modifier le statut de cette fiche.', 'err'));
-            return;
-          }
-          handleMoveFicheKanban(targetFiche.id, nextStatut);
-        }}
-        onChangeSecteur={(ficheId, nextSecteur) => {
-          if (detailModalExternalTarget && detailModalExternalTarget.ownerUid !== cloudUser.uid) {
-            const ownerUid = detailModalExternalTarget.ownerUid;
-            const prevSecteur = detailModalExternalTarget.fiche.secteur;
-            const updated: FicheEntreprise = {
-              ...detailModalExternalTarget.fiche,
-              secteur: nextSecteur,
-            };
-            setDetailModalExternalTarget({
-              ...detailModalExternalTarget,
-              fiche: updated,
-            });
-            void updateTeamMemberFiche(ownerUid, updated)
-              .then(() => {
+                return;
+              }
+              if (detailModalExternalTarget && detailModalExternalTarget.ownerUid !== cloudUser.uid) {
+                const ownerUid = detailModalExternalTarget.ownerUid;
+                const prevStatut = targetFiche.statut;
+                const updated: FicheEntreprise = {
+                  ...targetFiche,
+                  statut: nextStatut,
+                  statutUpdatedAt: new Date().toISOString(),
+                };
+                setDetailModalExternalTarget({
+                  ...detailModalExternalTarget,
+                  fiche: updated,
+                });
+                void updateTeamMemberFiche(ownerUid, updated)
+                  .then(() => {
+                    void logFicheAuditAction(
+                      ownerUid,
+                      targetFiche.id,
+                      'statut',
+                      `Statut CRM modifié de « ${prevStatut} » vers « ${nextStatut} » par la supervision.`,
+                      {
+                        action: 'status_changed',
+                        field: 'statut',
+                        oldValue: prevStatut,
+                        newValue: nextStatut,
+                      }
+                    );
+                    setPortfolioRefreshKey((k) => k + 1);
+                    notify(`Statut mis à jour vers « ${nextStatut} ».`);
+                  })
+                  .catch(() => notify('Impossible de modifier le statut de cette fiche.', 'err'));
+                return;
+              }
+              handleMoveFicheKanban(targetFiche.id, nextStatut);
+            }}
+            onChangeSecteur={(ficheId, nextSecteur) => {
+              if (detailModalExternalTarget && detailModalExternalTarget.ownerUid !== cloudUser.uid) {
+                const ownerUid = detailModalExternalTarget.ownerUid;
+                const prevSecteur = detailModalExternalTarget.fiche.secteur;
+                const updated: FicheEntreprise = {
+                  ...detailModalExternalTarget.fiche,
+                  secteur: nextSecteur,
+                };
+                setDetailModalExternalTarget({
+                  ...detailModalExternalTarget,
+                  fiche: updated,
+                });
+                void updateTeamMemberFiche(ownerUid, updated)
+                  .then(() => {
+                    void logFicheAuditAction(
+                      ownerUid,
+                      ficheId,
+                      'modification',
+                      `Secteur modifié de « ${prevSecteur} » vers « ${nextSecteur} ».`,
+                      {
+                        action: 'field_updated',
+                        field: 'secteur',
+                        oldValue: prevSecteur,
+                        newValue: nextSecteur,
+                      }
+                    );
+                    setPortfolioRefreshKey((k) => k + 1);
+                  })
+                  .catch(() => notify('Impossible de modifier le secteur de cette fiche.', 'err'));
+                return;
+              }
+              const prevFiche = fiches.find((x) => x.id === ficheId);
+              setFiches((prev) =>
+                prev.map((x) => (x.id === ficheId ? { ...x, secteur: nextSecteur } : x))
+              );
+              if (prevFiche && prevFiche.secteur !== nextSecteur) {
                 void logFicheAuditAction(
-                  ownerUid,
+                  cloudUser.uid,
                   ficheId,
                   'modification',
-                  `Secteur modifié de « ${prevSecteur} » vers « ${nextSecteur} ».`,
+                  `Secteur modifié de « ${prevFiche.secteur} » vers « ${nextSecteur} ».`,
                   {
                     action: 'field_updated',
                     field: 'secteur',
-                    oldValue: prevSecteur,
+                    oldValue: prevFiche.secteur,
                     newValue: nextSecteur,
                   }
                 );
-                setPortfolioRefreshKey((k) => k + 1);
-              })
-              .catch(() => notify('Impossible de modifier le secteur de cette fiche.', 'err'));
-            return;
-          }
-          const prevFiche = fiches.find((x) => x.id === ficheId);
-          setFiches((prev) =>
-            prev.map((x) => (x.id === ficheId ? { ...x, secteur: nextSecteur } : x))
-          );
-          if (prevFiche && prevFiche.secteur !== nextSecteur) {
-            void logFicheAuditAction(
-              cloudUser.uid,
-              ficheId,
-              'modification',
-              `Secteur modifié de « ${prevFiche.secteur} » vers « ${nextSecteur} ».`,
-              {
-                action: 'field_updated',
-                field: 'secteur',
-                oldValue: prevFiche.secteur,
-                newValue: nextSecteur,
               }
-            );
-          }
-        }}
-        onOpenQuote={(f) => {
-          setQuoteModalOwnerUid(detailModalExternalTarget?.ownerUid || cloudUser.uid);
-          setQuoteModalFiche(f);
-        }}
-        onOpenActivite={(f) => {
-          setActiviteModalOwnerUid(detailModalExternalTarget?.ownerUid || cloudUser.uid);
-          setActiviteModalFiche(f);
-        }}
-        onOpenRdv={(f) => {
-          setRdvModalOwnerUid(detailModalExternalTarget?.ownerUid || cloudUser.uid);
-          setRdvModalFiche(f);
-        }}
-        onOpenEmail={(f) => {
-          setDetailModalFicheId(null);
-          setDetailModalExternalTarget(null);
-          openEmailStudio(f);
-        }}
-        onOpenAiBrief={(f) => {
-          setDetailModalFicheId(null);
-          setDetailModalExternalTarget(null);
-          handleOpenAiBrief(f);
-        }}
-        onVerifyWeb={(f) => void handleVerifyWeb(f)}
-        onOpenAssist={(f) => {
-          setAssistModalFiche(f);
-          setAssistPasteText('');
-          setAssistAiSummary('');
-          setLastVerifyDiag('');
-        }}
-        onOpenSignContract={(f) =>
-          openSignContractModal(
-            f,
-            detailModalExternalTarget?.ownerUid || cloudUser.uid,
-            detailModalExternalTarget?.ownerName || currentUserDisplayName
-          )
-        }
-        onOpenAssign={
-          isTeamSupervisor
-            ? (f, ownerUid) => {
-                const ownerMember = teamStats.find((m) => m.uid === ownerUid);
-                setAssignRestoreTarget({
-                  mode: 'assign',
-                  fiche: f,
-                  ownerUid,
-                  ownerName:
-                    detailModalExternalTarget?.ownerName ||
-                    ownerMember?.displayName ||
-                    currentUserDisplayName,
-                });
-              }
-            : undefined
-        }
-        onOpenRestore={
-          isTeamSupervisor
-            ? (f, ownerUid) => {
-                const ownerMember = teamStats.find((m) => m.uid === ownerUid);
-                setAssignRestoreTarget({
-                  mode: 'restore',
-                  fiche: f,
-                  ownerUid,
-                  ownerName:
-                    detailModalExternalTarget?.ownerName ||
-                    ownerMember?.displayName ||
-                    currentUserDisplayName,
-                });
-              }
-            : undefined
-        }
-        onCopyText={(val, label) => {
-          copyTextSafe(val);
-          notify(`${label} copié.`);
-        }}
-      />
+            }}
+            onOpenQuote={(f) => {
+              setQuoteModalOwnerUid(detailModalExternalTarget?.ownerUid || cloudUser.uid);
+              setQuoteModalFiche(f);
+            }}
+            onOpenActivite={(f) => {
+              setActiviteModalOwnerUid(detailModalExternalTarget?.ownerUid || cloudUser.uid);
+              setActiviteModalFiche(f);
+            }}
+            onOpenRdv={(f) => {
+              setRdvModalOwnerUid(detailModalExternalTarget?.ownerUid || cloudUser.uid);
+              setRdvModalFiche(f);
+            }}
+            onOpenEmail={(f) => {
+              setDetailModalFicheId(null);
+              setDetailModalExternalTarget(null);
+              openEmailStudio(f);
+            }}
+            onOpenAiBrief={(f) => {
+              setDetailModalFicheId(null);
+              setDetailModalExternalTarget(null);
+              handleOpenAiBrief(f);
+            }}
+            onVerifyWeb={(f) => void handleVerifyWeb(f)}
+            onOpenAssist={(f) => {
+              setAssistModalFiche(f);
+              setAssistPasteText('');
+              setAssistAiSummary('');
+              setLastVerifyDiag('');
+            }}
+            onOpenSignContract={(f) =>
+              openSignContractModal(
+                f,
+                detailModalExternalTarget?.ownerUid || cloudUser.uid,
+                detailModalExternalTarget?.ownerName || currentUserDisplayName
+              )
+            }
+            onOpenAssign={
+              isTeamSupervisor
+                ? (f, ownerUid) => {
+                    const ownerMember = teamStats.find((m) => m.uid === ownerUid);
+                    setAssignRestoreTarget({
+                      mode: 'assign',
+                      fiche: f,
+                      ownerUid,
+                      ownerName:
+                        detailModalExternalTarget?.ownerName ||
+                        ownerMember?.displayName ||
+                        currentUserDisplayName,
+                    });
+                  }
+                : undefined
+            }
+            onOpenRestore={
+              isTeamSupervisor
+                ? (f, ownerUid) => {
+                    const ownerMember = teamStats.find((m) => m.uid === ownerUid);
+                    setAssignRestoreTarget({
+                      mode: 'restore',
+                      fiche: f,
+                      ownerUid,
+                      ownerName:
+                        detailModalExternalTarget?.ownerName ||
+                        ownerMember?.displayName ||
+                        currentUserDisplayName,
+                    });
+                  }
+                : undefined
+            }
+            onCopyText={(val, label) => {
+              copyTextSafe(val);
+              notify(`${label} copié.`);
+            }}
+          />
+        </Suspense>
+      )}
 
       {/* Modal Attribution / Réattribution & Restitution de Fiche Signée */}
       <AssignRestoreFicheModal
@@ -14221,38 +14554,42 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
       />
 
       {/* Modal Génération Devis Client PDF (Zéro Commission) */}
-      <QuoteModal
-        isOpen={Boolean(quoteModalFiche)}
-        onClose={() => {
-          setQuoteModalFiche(null);
-          setQuoteModalOwnerUid(null);
-        }}
-        fiche={quoteModalFiche}
-        currentUserName={currentUserDisplayName}
-        currentUserUid={cloudUser.uid}
-        ficheOwnerUid={quoteModalOwnerUid || cloudUser.uid}
-        actorUid={cloudUser.uid}
-        actorRole={currentUserRole}
-        commercialEmail={cloudUser.email || undefined}
-        commercialPhone={userProfile.phonePro || undefined}
-        workspaceLegal={workspaceLegal}
-        onFicheUpdated={(updatedFiche) => {
-          const targetOwner = quoteModalOwnerUid || cloudUser.uid;
-          if (targetOwner === cloudUser.uid) {
-            setFiches((prev) => prev.map((x) => (x.id === updatedFiche.id ? updatedFiche : x)));
-          } else {
-            void updateTeamMemberFiche(targetOwner, updatedFiche);
-            if (detailModalExternalTarget?.fiche.id === updatedFiche.id) {
-              setDetailModalExternalTarget((prev) => (prev ? { ...prev, fiche: updatedFiche } : null));
+      {Boolean(quoteModalFiche) && (
+        <Suspense fallback={null}>
+          <QuoteModal
+            isOpen={Boolean(quoteModalFiche)}
+            onClose={() => {
+              setQuoteModalFiche(null);
+              setQuoteModalOwnerUid(null);
+            }}
+            fiche={quoteModalFiche}
+            currentUserName={currentUserDisplayName}
+            currentUserUid={cloudUser.uid}
+            ficheOwnerUid={quoteModalOwnerUid || cloudUser.uid}
+            actorUid={cloudUser.uid}
+            actorRole={currentUserRole}
+            commercialEmail={cloudUser.email || undefined}
+            commercialPhone={userProfile.phonePro || undefined}
+            workspaceLegal={workspaceLegal}
+            onFicheUpdated={(updatedFiche) => {
+              const targetOwner = quoteModalOwnerUid || cloudUser.uid;
+              if (targetOwner === cloudUser.uid) {
+                setFiches((prev) => prev.map((x) => (x.id === updatedFiche.id ? updatedFiche : x)));
+              } else {
+                void updateTeamMemberFiche(targetOwner, updatedFiche);
+                if (detailModalExternalTarget?.fiche.id === updatedFiche.id) {
+                  setDetailModalExternalTarget((prev) => (prev ? { ...prev, fiche: updatedFiche } : null));
+                }
+                setPortfolioRefreshKey((k) => k + 1);
+              }
+              setDetailActivityRefreshKey((k) => k + 1);
+            }}
+            onNotify={(msg, type) =>
+              notify(msg, type === 'err' ? 'err' : type === 'warn' ? 'warn' : 'ok')
             }
-            setPortfolioRefreshKey((k) => k + 1);
-          }
-          setDetailActivityRefreshKey((k) => k + 1);
-        }}
-        onNotify={(msg, type) =>
-          notify(msg, type === 'err' ? 'err' : type === 'warn' ? 'warn' : 'ok')
-        }
-      />
+          />
+        </Suspense>
+      )}
 
       {/* Modal Journalisation d'Activité CRM */}
       <ActiviteModal
@@ -14317,66 +14654,76 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
       />
 
       {/* Modal Confirmation Signature Orange Pro & Calcul Payout */}
-      <SignContractModal
-        target={signContractTarget}
-        isSuperAdmin={isSuperAdmin}
-        canSetInitialPayout={isTeamSupervisor}
-        submitting={signingContractBusy}
-        onClose={() => setSignContractTarget(null)}
-        onConfirm={handleConfirmSignContract}
-      />
+      {Boolean(signContractTarget) && (
+        <Suspense fallback={null}>
+          <SignContractModal
+            target={signContractTarget}
+            isSuperAdmin={isSuperAdmin}
+            canSetInitialPayout={isTeamSupervisor}
+            submitting={signingContractBusy}
+            onClose={() => setSignContractTarget(null)}
+            onConfirm={handleConfirmSignContract}
+          />
+        </Suspense>
+      )}
 
       {/* Copilote Commercial IA Orange Pro (Gemini intégré + bascule automatique multi-IA) */}
-      <AiCopilotDrawer
-        open={showAiCopilot}
-        onClose={() => setShowAiCopilot(false)}
-        fiches={accessibleFiches}
-        focusedFiche={copilotFiche}
-        onClearFocusedFiche={() => setCopilotFiche(null)}
-        aiAvailable={serverAiStatus.available}
-        aiModel={serverAiStatus.model}
-        hasConfiguredFallbackKeys={
-          activeApiCount > 0 || cloudApiKeys.some((k) => k.active && k.key.trim().length > 0)
-        }
-        onOpenApiHub={() => {
-          setShowAiCopilot(false);
-          setShowApiHub(true);
-        }}
-        onOpenEmailStudio={openEmailStudio}
-        onMoveFiche={handleMoveFicheKanban}
-        onSelectFicheForBrief={(f) => setCopilotFiche(f)}
-        onFallbackLlmPrompt={handleCopilotFallbackPrompt}
-        onRefreshAiStatus={refreshServerAiStatus}
-      />
+      {showAiCopilot && (
+        <Suspense fallback={null}>
+          <AiCopilotDrawer
+            open={showAiCopilot}
+            onClose={() => setShowAiCopilot(false)}
+            fiches={accessibleFiches}
+            focusedFiche={copilotFiche}
+            onClearFocusedFiche={() => setCopilotFiche(null)}
+            aiAvailable={serverAiStatus.available}
+            aiModel={serverAiStatus.model}
+            hasConfiguredFallbackKeys={
+              activeApiCount > 0 || cloudApiKeys.some((k) => k.active && k.key.trim().length > 0)
+            }
+            onOpenApiHub={() => {
+              setShowAiCopilot(false);
+              setShowApiHub(true);
+            }}
+            onOpenEmailStudio={openEmailStudio}
+            onMoveFiche={handleMoveFicheKanban}
+            onSelectFicheForBrief={(f) => setCopilotFiche(f)}
+            onFallbackLlmPrompt={handleCopilotFallbackPrompt}
+            onRefreshAiStatus={refreshServerAiStatus}
+          />
+        </Suspense>
+      )}
 
       {/* Super-Admin : Profil Collaborateur, Discussion Directe (0 API) & Coaching Audio Live Push-to-Talk (WebRTC P2P) */}
-      {isSuperAdmin && (
-        <CollaboratorProfileChatModal
-          isOpen={Boolean(profileChatModal)}
-          initialTab={profileChatModal?.initialTab || 'profile'}
-          target={profileChatModal?.target || null}
-          adminUid={cloudUser.uid}
-          adminName={currentUserDisplayName}
-          presence={
-            profileChatModal?.target
-              ? userPresences.find((p) => p.uid === profileChatModal.target.uid) || null
-              : null
-          }
-          teamStat={
-            profileChatModal?.target
-              ? teamStats.find((s) => s.uid === profileChatModal.target.uid) || null
-              : null
-          }
-          signedContracts={signedContracts}
-          onClose={() => setProfileChatModal(null)}
-          onNotify={(msg, type) =>
-            notify(msg, type === 'err' ? 'err' : type === 'warn' ? 'warn' : 'ok')
-          }
-          onInspectFiche={(fiche, ownerUid, ownerName) => {
-            setProfileChatModal(null);
-            openFicheDetailModal(fiche as unknown as FicheEntreprise, ownerUid, ownerName);
-          }}
-        />
+      {isSuperAdmin && Boolean(profileChatModal) && (
+        <Suspense fallback={null}>
+          <CollaboratorProfileChatModal
+            isOpen={Boolean(profileChatModal)}
+            initialTab={profileChatModal?.initialTab || 'profile'}
+            target={profileChatModal?.target || null}
+            adminUid={cloudUser.uid}
+            adminName={currentUserDisplayName}
+            presence={
+              profileChatModal?.target
+                ? userPresences.find((p) => p.uid === profileChatModal.target.uid) || null
+                : null
+            }
+            teamStat={
+              profileChatModal?.target
+                ? teamStats.find((s) => s.uid === profileChatModal.target.uid) || null
+                : null
+            }
+            signedContracts={signedContracts}
+            onClose={() => setProfileChatModal(null)}
+            onNotify={(msg, type) =>
+              notify(msg, type === 'err' ? 'err' : type === 'warn' ? 'warn' : 'ok')
+            }
+            onInspectFiche={(fiche, ownerUid, ownerName) => {
+              setProfileChatModal(null);
+              openFicheDetailModal(fiche as unknown as FicheEntreprise, ownerUid, ownerName);
+            }}
+          />
+        </Suspense>
       )}
 
       {/* Collaborateurs : Widget Discussion Direction (0 API) & Mode Coaching Terrain Opt-in (Micro Live + Push-to-Talk) */}
@@ -14401,6 +14748,58 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
             notify(msg, type === 'err' ? 'err' : type === 'warn' ? 'warn' : 'ok')
           }
         />
+      )}
+
+      {/* Recherche Globale Instantanée (Ctrl+K / Cmd+K) — RBAC strict */}
+      {globalSearchOpen && (
+        <Suspense fallback={null}>
+          <GlobalSearchPalette
+            isOpen={globalSearchOpen}
+            onClose={() => setGlobalSearchOpen(false)}
+            fiches={accessibleFiches}
+            teamStats={effectiveTeamStats}
+            role={currentUserRole}
+            isSuperAdmin={isSuperAdmin}
+            onSelectFiche={(fiche) => {
+              if (activeTab !== 'portefeuille' && activeTab !== 'kanban') {
+                navigateCrm('portefeuille');
+              }
+              openFicheDetailModal(fiche);
+            }}
+            onSelectCollaborator={(member) => {
+              if (isSuperAdmin) {
+                openCollaboratorProfileByUid(member.uid, 'profile');
+              } else {
+                setTeamFocusUid(member.uid);
+                navigateCrm('team');
+              }
+            }}
+            onSelectAction={(action: GlobalSearchActionHit) => {
+              if (action.superAdminOnly && !isSuperAdmin) return;
+              if (action.actionType === 'new_fiche') {
+                setShowQuickAdd(true);
+              } else if (action.actionType === 'open_copilot') {
+                setShowAiCopilot(true);
+              } else if (action.actionType === 'open_hygiene') {
+                navigateCrm('dedup');
+                window.setTimeout(() => {
+                  const el = document.querySelector('[data-testid="data-hygiene-panel"]');
+                  if (el && typeof el.scrollIntoView === 'function') {
+                    el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                  }
+                }, 150);
+              } else if (action.tab) {
+                if (action.tab === 'admin') {
+                  navigateCrm('admin', action.adminSubSection || 'users');
+                } else if (action.tab === 'vault') {
+                  navigateCrm('vault', 'vault');
+                } else {
+                  navigateCrm(action.tab);
+                }
+              }
+            }}
+          />
+        </Suspense>
       )}
     </div>
   );

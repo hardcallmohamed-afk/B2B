@@ -1,4 +1,12 @@
-import type { FicheEntreprise, SecteurCode, SegmentCouleur, StatutCRM } from '../App';
+import {
+  parseSafeHeadcount,
+  type FicheEntreprise,
+  type SecteurCode,
+  type SegmentCouleur,
+  type StatutCRM,
+} from './crmDomain';
+
+export { parseSafeHeadcount };
 
 export type TrendPeriod = '7d' | '30d' | '90d';
 export type TrendMetricMode = 'pipeline' | 'funnel' | 'cities' | 'maturity' | 'segments';
@@ -120,14 +128,7 @@ export function computeFicheMaturityPure(f: FicheEntreprise): number {
   return Math.min(100, score);
 }
 
-export function parseSafeHeadcount(raw: string | number | undefined | null): number {
-  if (raw === undefined || raw === null) return 0;
-  const cleaned = String(raw).trim();
-  if (!cleaned || !/^\d+$/.test(cleaned)) return 0;
-  const n = Number.parseInt(cleaned, 10);
-  if (!Number.isFinite(n) || n <= 0 || n > 50000) return 0;
-  return n;
-}
+// parseSafeHeadcount est ré-exporté depuis ./crmDomain pour préserver la compatibilité des imports existants.
 
 function getOfferTierPure(f: FicheEntreprise): 'Grand Compte' | 'PME' | 'TPE / Libéral' {
   const eff = parseSafeHeadcount(f.effectif);

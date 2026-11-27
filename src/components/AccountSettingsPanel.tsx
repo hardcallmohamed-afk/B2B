@@ -39,6 +39,7 @@ import {
 import { BadgeChipWithDrawing } from './BadgeArtwork';
 import { RoleBadge } from './RoleBadge';
 import {
+  isFirestoreOfflinePersistenceEnabled,
   requestPasswordReset,
   setOrLinkAccountPassword,
   updateOwnAuthDisplayName,
@@ -556,6 +557,18 @@ export const AccountSettingsPanel: React.FC<AccountSettingsPanelProps> = ({
                       · {new Date(presenceSyncStatus.lastSyncIso).toLocaleTimeString('fr-FR')}
                     </span>
                   )}
+                  <span
+                    data-testid="account-offline-cache-status"
+                    className={`ml-1 inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-bold border ${
+                      isFirestoreOfflinePersistenceEnabled
+                        ? 'bg-white/80 border-emerald-300 text-emerald-800'
+                        : 'bg-amber-50 border-amber-300 text-amber-800'
+                    }`}
+                  >
+                    {isFirestoreOfflinePersistenceEnabled
+                      ? 'Cache hors-ligne : Actif (IndexedDB)'
+                      : 'Cache hors-ligne : Mémoire'}
+                  </span>
                 </div>
                 {onForcePresenceAndGpsSync && (
                   <button

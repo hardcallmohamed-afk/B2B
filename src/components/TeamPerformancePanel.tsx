@@ -1,11 +1,16 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   Award,
+  Calendar,
   CheckCircle2,
   Crown,
+  Download,
+  FileSpreadsheet,
+  FileText,
   Filter,
   Lock,
   Package,
+  RefreshCw,
   TrendingUp,
   Users,
   Wallet,
@@ -44,7 +49,17 @@ import {
 import { BadgeChipWithDrawing } from './BadgeArtwork';
 import { RoleBadge } from './RoleBadge';
 import { TeamPortfoliosPanel, type PortfolioFicheItem } from './TeamPortfoliosPanel';
-import type { FicheEntreprise } from '../App';
+import type { FicheEntreprise } from '../utils/crmDomain';
+import type { WorkspaceLegalInfo } from '../utils/accountPreferences';
+import {
+  buildMonthlyDirectionReport,
+  downloadMonthlyPayrollExcelCsv,
+  formatMonthKeyFr,
+  generateMonthlyDirectionReportPdf,
+  getCurrentMonthKey,
+  getRecentMonthKeys,
+} from '../utils/directionReport';
+import { fetchTeamAttendanceSessionsForMonth } from '../firebase';
 
 interface TeamPerformancePanelProps {
   currentUserUid: string;
@@ -55,6 +70,9 @@ interface TeamPerformancePanelProps {
   currentUserFiches?: FicheEntreprise[];
   portfolioRefreshKey?: number;
   initialSubView?: 'leaderboard' | 'portfolios';
+  initialSelectedUid?: string;
+  workspaceLegal?: WorkspaceLegalInfo;
+  onNotify?: (msg: string, type?: 'ok' | 'err' | 'warn') => void;
   onAdminUpdateContract?: (
     contractId: string,
     updates: {
@@ -94,6 +112,9 @@ export const TeamPerformancePanel: React.FC<TeamPerformancePanelProps> = ({
   currentUserFiches = [],
   portfolioRefreshKey = 0,
   initialSubView = 'leaderboard',
+  initialSelectedUid,
+  workspaceLegal,
+  onNotify,
   onAdminUpdateContract,
   onJumpToBadges,
   onOpenContractFiche,
@@ -112,7 +133,9 @@ export const TeamPerformancePanel: React.FC<TeamPerformancePanelProps> = ({
   const [selectedRole, setSelectedRole] = useState<'all' | TeamRole>('all');
   const [selectedRegion, setSelectedRegion] = useState<string>('all');
   const [selectedCity, setSelectedCity] = useState<string>('all');
-  const [selectedUid, setSelectedUid] = useState<string>('all');
+  const [selectedUid, setSelectedUid] = useState<string>(initialSelectedUid || 'all');
+  const [reportMonthKey, setReportMonthKey] = useState<string>(() => getCurrentMonthKey());
+  const [reportExportBusy, setReportExportBusy] = useState<'pdf' | 'csv' | null>(null);
   const [editingContractId, setEditingContractId] = useState<string | null>(null);
   const [editPayout, setEditPayout] = useState<number>(0);
   const [editStatus, setEditStatus] = useState<PayoutStatus>('En attente');
@@ -120,6 +143,16 @@ export const TeamPerformancePanel: React.FC<TeamPerformancePanelProps> = ({
   const [editRefusMotif, setEditRefusMotif] = useState<string>('');
   const [editError, setEditError] = useState<string | null>(null);
   const [savingContractId, setSavingContractId] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (initialSelectedUid && initialSelectedUid !== 'all') {
+      setSelectedRole('all');
+      setSelectedRegion('all');
+      setSelectedCity('all');
+      setSelectedUid(initialSelectedUid);
+      setSubView('leaderboard');
+    }
+  }, [initialSelectedUid]);
 
   const roleFilteredStats = useMemo(() => {
     return teamStats.filter((m) => {
@@ -301,6 +334,97 @@ export const TeamPerformancePanel: React.FC<TeamPerformancePanelProps> = ({
     [selectedRegion]
   );
 
+  const recentMonths = useMemo(() => getRecentMonthKeys(12), []);
+
+  const scopedReportStats = useMemo(
+    () =>
+      effectiveSelectedUid === 'all'
+        ? roleFilteredStats
+        : roleFilteredStats.filter((m) => m.uid === effectiveSelectedUid),
+    [roleFilteredStats, effectiveSelectedUid]
+  );
+
+  const reportFiltersLabel = useMemo(() => {
+    const parts: string[] = [];
+    if (selectedRole !== 'all') {
+      parts.push(`Rôle : ${ROLE_BADGE_META[selectedRole]?.shortLabel || selectedRole}`);
+    }
+    if (selectedRegion !== 'all') {
+      const reg = MOROCCO_REGIONS.find((r) => r.id === selectedRegion);
+      parts.push(`Région : ${reg?.label || selectedRegion}`);
+    }
+    if (selectedCity !== 'all') {
+      parts.push(`Ville : ${selectedCity}`);
+    }
+    if (selectedMember) {
+      parts.push(`Collaborateur : ${selectedMember.displayName}`);
+    }
+    return parts.length > 0 ? parts.join(' · ') : 'Toute l’équipe · Toutes régions';
+  }, [selectedRole, selectedRegion, selectedCity, selectedMember]);
+
+  const monthReportPreview = useMemo(
+    () =>
+      buildMonthlyDirectionReport({
+        monthKey: reportMonthKey,
+        teamStats: scopedReportStats,
+        signedContracts: visibleContracts,
+        filtersLabel: reportFiltersLabel,
+        workspaceLegal,
+      }),
+    [reportMonthKey, scopedReportStats, visibleContracts, reportFiltersLabel, workspaceLegal]
+  );
+
+  const handleExportDirectionReport = async (format: 'pdf' | 'csv') => {
+    if (!canManageContracts || reportExportBusy) return;
+    setReportExportBusy(format);
+    try {
+      let attendanceSessions: Array<{
+        ownerId: string;
+        dateKey?: string;
+        loginAt?: string;
+        workedSeconds: number;
+      }> = [];
+
+      // On-demand Super-Admin attendance enrichment (graceful fallback if offline)
+      if (isSuperAdmin && scopedReportStats.length > 0) {
+        try {
+          attendanceSessions = await fetchTeamAttendanceSessionsForMonth(
+            scopedReportStats.map((m) => m.uid),
+            reportMonthKey
+          );
+        } catch {
+          attendanceSessions = [];
+        }
+      }
+
+      const fullReport = buildMonthlyDirectionReport({
+        monthKey: reportMonthKey,
+        teamStats: scopedReportStats,
+        signedContracts: visibleContracts,
+        attendanceSessions,
+        filtersLabel: reportFiltersLabel,
+        workspaceLegal,
+      });
+
+      if (format === 'pdf') {
+        const filename = await generateMonthlyDirectionReportPdf(fullReport);
+        onNotify?.(`Rapport Direction PDF généré (${filename}).`, 'ok');
+      } else {
+        const filename = downloadMonthlyPayrollExcelCsv(fullReport);
+        onNotify?.(`Bordereau Excel (.csv) téléchargé (${filename}).`, 'ok');
+      }
+    } catch {
+      onNotify?.(
+        format === 'pdf'
+          ? 'Impossible de générer le Rapport Direction PDF.'
+          : 'Impossible d’exporter le Bordereau Excel (.csv).',
+        'err'
+      );
+    } finally {
+      setReportExportBusy(null);
+    }
+  };
+
   return (
     <div className="space-y-5">
       {canManageContracts && (
@@ -353,6 +477,101 @@ export const TeamPerformancePanel: React.FC<TeamPerformancePanelProps> = ({
         />
       ) : (
       <>
+      {/* Encart Rapport Direction & Bordereau de Commissions Mensuel (PDF + Excel CSV) — RBAC strict canManageContracts */}
+      {canManageContracts && (
+        <section
+          data-testid="direction-report-export-bar"
+          className="rounded-2xl border border-stone-200 bg-white p-4 shadow-xs space-y-3"
+        >
+          <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+            <div className="space-y-1 min-w-0">
+              <div className="flex flex-wrap items-center gap-2">
+                <FileSpreadsheet className="h-4 w-4 text-orange-600 shrink-0" />
+                <h3 className="text-sm font-bold text-stone-900">
+                  Rapport Direction &amp; Bordereau de Commissions Mensuel
+                </h3>
+                <span className="px-2 py-0.5 rounded-md bg-stone-100 text-stone-700 text-[10px] font-semibold">
+                  {formatMonthKeyFr(reportMonthKey)}
+                </span>
+              </div>
+              <p
+                data-testid="direction-report-preview-line"
+                className="text-xs text-stone-600 tabular-nums"
+              >
+                <strong>{monthReportPreview.summary.monthContractsCount}</strong> contrat
+                {monthReportPreview.summary.monthContractsCount > 1 ? 's' : ''} ·{' '}
+                <strong className="text-sky-700">
+                  {formatMad(monthReportPreview.summary.valideMad)}
+                </strong>{' '}
+                validés ·{' '}
+                <strong className="text-emerald-700">
+                  {formatMad(monthReportPreview.summary.verseMad)}
+                </strong>{' '}
+                versés · Net à régler :{' '}
+                <strong className="text-orange-700">
+                  {formatMad(monthReportPreview.summary.netAPayerMad)}
+                </strong>
+                {isSuperAdmin ? ' · Heures pointées incluses au clic' : ''}
+              </p>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2 shrink-0">
+              <div className="inline-flex items-center gap-1.5 rounded-xl border border-stone-300 bg-stone-50 px-2.5 py-1.5">
+                <Calendar className="h-3.5 w-3.5 text-orange-600 shrink-0" />
+                <select
+                  aria-label="Sélectionner le mois du rapport Direction"
+                  data-testid="direction-report-month-select"
+                  value={reportMonthKey}
+                  onChange={(e) => setReportMonthKey(e.target.value)}
+                  className="bg-transparent text-xs font-semibold text-stone-800 focus:outline-none"
+                >
+                  {recentMonths.map((m) => (
+                    <option key={m.key} value={m.key}>
+                      {m.label} ({m.key})
+                    </option>
+                  ))}
+                  {!recentMonths.some((m) => m.key === reportMonthKey) && (
+                    <option value={reportMonthKey}>
+                      {formatMonthKeyFr(reportMonthKey)} ({reportMonthKey})
+                    </option>
+                  )}
+                </select>
+              </div>
+
+              <button
+                type="button"
+                disabled={reportExportBusy !== null}
+                data-testid="export-direction-pdf-btn"
+                onClick={() => void handleExportDirectionReport('pdf')}
+                className="inline-flex items-center gap-1.5 rounded-xl bg-stone-900 hover:bg-stone-800 disabled:opacity-60 px-3.5 py-2 text-xs font-semibold text-white transition-colors whitespace-nowrap"
+              >
+                {reportExportBusy === 'pdf' ? (
+                  <RefreshCw className="h-3.5 w-3.5 animate-spin text-orange-400" />
+                ) : (
+                  <FileText className="h-3.5 w-3.5 text-orange-400" />
+                )}
+                {reportExportBusy === 'pdf' ? 'Génération PDF...' : 'Exporter Rapport PDF'}
+              </button>
+
+              <button
+                type="button"
+                disabled={reportExportBusy !== null}
+                data-testid="export-payroll-csv-btn"
+                onClick={() => void handleExportDirectionReport('csv')}
+                className="inline-flex items-center gap-1.5 rounded-xl border border-emerald-300 bg-emerald-50 hover:bg-emerald-100 disabled:opacity-60 px-3.5 py-2 text-xs font-semibold text-emerald-900 transition-colors whitespace-nowrap"
+              >
+                {reportExportBusy === 'csv' ? (
+                  <RefreshCw className="h-3.5 w-3.5 animate-spin text-emerald-700" />
+                ) : (
+                  <Download className="h-3.5 w-3.5 text-emerald-700" />
+                )}
+                {reportExportBusy === 'csv' ? 'Export Excel...' : 'Exporter Bordereau Excel (.csv)'}
+              </button>
+            </div>
+          </div>
+        </section>
+      )}
+
       {/* Header & Collaborator Scope Filter */}
       <div className="flex flex-col gap-3 rounded-2xl border border-stone-200 bg-white p-4 shadow-xs sm:flex-row sm:items-center sm:justify-between">
         <div>

@@ -1,4 +1,4 @@
-import type { FicheEntreprise, SecteurCode } from '../App';
+import type { FicheEntreprise, SecteurCode } from './crmDomain';
 import {
   buildMonthlyHistoryStrings,
   isConfirmedPayoutStatus,

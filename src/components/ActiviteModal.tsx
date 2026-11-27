@@ -13,7 +13,7 @@ import {
   Mail,
   FileSpreadsheet,
 } from 'lucide-react';
-import type { FicheEntreprise } from '../App';
+import type { FicheEntreprise } from '../utils/crmDomain';
 import {
   ACTIVITE_TYPE_META,
   ACTIVITE_RESULTAT_META,

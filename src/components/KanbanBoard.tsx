@@ -25,7 +25,8 @@ import {
   getOrangeProRecommendation,
   type FicheEntreprise,
   type StatutCRM,
-} from '../App';
+} from '../utils/crmDomain';
+import { isEffectifAberrant } from '../utils/dataHygiene';
 import {
   KANBAN_STAGES,
   computePortfolioVelocity,
@@ -397,11 +398,21 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
                               <span className="text-stone-700 font-medium truncate">
                                 {f.contact || 'Décideur à identifier'}
                               </span>
-                              {f.effectif && (
-                                <span className="text-stone-500 tabular-nums shrink-0">
-                                  {f.effectif} sal.
-                                </span>
-                              )}
+                              {f.effectif &&
+                                (isEffectifAberrant(f.effectif) ? (
+                                  <span
+                                    data-testid={`kanban-aberrant-eff-${f.id}`}
+                                    title={`Effectif aberrant (« ${f.effectif} ») — à nettoyer dans Déduplication / Hygiène`}
+                                    className="inline-flex items-center gap-0.5 rounded bg-amber-100 border border-amber-300 px-1.5 py-0.5 text-[10px] font-bold text-amber-900 shrink-0"
+                                  >
+                                    <AlertTriangle className="w-2.5 h-2.5" />
+                                    Eff. à vérifier
+                                  </span>
+                                ) : (
+                                  <span className="text-stone-500 tabular-nums shrink-0">
+                                    {f.effectif} sal.
+                                  </span>
+                                ))}
                             </div>
                             <div className="flex items-center justify-between gap-1.5 text-stone-600 font-mono tabular-nums">
                               <span className="truncate">

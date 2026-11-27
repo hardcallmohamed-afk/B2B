@@ -9,9 +9,12 @@ import {
   DollarSign,
   Calendar,
 } from 'lucide-react';
-import type { FicheEntreprise, StatutCRM } from '../App';
+import {
+  getOrangeProRecommendation,
+  type FicheEntreprise,
+  type StatutCRM,
+} from '../utils/crmDomain';
 import { ORANGE_PRO_PRODUCTS, type OrangeProTier } from '../utils/gamification';
-import { getOrangeProRecommendation } from '../App';
 import { generateClientQuotePdf } from '../utils/pdfGenerator';
 import { saveFicheActivite, saveFicheAuditLog } from '../firebase';
 

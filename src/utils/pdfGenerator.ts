@@ -2,7 +2,7 @@
 // Zero commission printed. Uses workspace legal info or blank placeholders.
 
 import { jsPDF } from 'jspdf';
-import type { FicheEntreprise } from '../App';
+import type { FicheEntreprise } from './crmDomain';
 
 export interface QuoteConfig {
   fiche: FicheEntreprise;

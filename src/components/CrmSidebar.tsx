@@ -11,6 +11,7 @@ import {
   PanelLeftClose,
   PanelLeftOpen,
   Plus,
+  Search,
   Settings,
   Trophy,
   User as UserIcon,
@@ -100,6 +101,7 @@ interface CrmSidebarProps {
   activeTab: CrmTabId;
   onSelectTab: (tab: CrmTabId) => void;
   onNewFiche: () => void;
+  onOpenSearch?: () => void;
   collapsed: boolean;
   onToggleCollapse: () => void;
   mobileOpen: boolean;
@@ -138,6 +140,7 @@ export const CrmSidebar: React.FC<CrmSidebarProps> = ({
   activeTab,
   onSelectTab,
   onNewFiche,
+  onOpenSearch,
   collapsed,
   onToggleCollapse,
   mobileOpen,
@@ -302,8 +305,8 @@ export const CrmSidebar: React.FC<CrmSidebarProps> = ({
           </div>
         )}
 
-        {/* Primary Quick Create CTA */}
-        <div className={compact ? 'px-2.5 py-2' : 'px-3 py-2'}>
+        {/* Primary Quick Create CTA & Global Search Trigger */}
+        <div className={compact ? 'px-2.5 py-2 space-y-1.5' : 'px-3 py-2 space-y-1.5'}>
           <button
             type="button"
             onClick={() => {
@@ -318,6 +321,31 @@ export const CrmSidebar: React.FC<CrmSidebarProps> = ({
             <Plus className="w-4 h-4 shrink-0" />
             {!compact && <span>Nouvelle fiche</span>}
           </button>
+          {onOpenSearch && (
+            <button
+              type="button"
+              data-testid="sidebar-global-search-btn"
+              onClick={() => {
+                onCloseMobile();
+                onOpenSearch();
+              }}
+              title="Recherche globale rapide (Ctrl+K)"
+              aria-label="Ouvrir la recherche globale (Ctrl+K)"
+              className={`w-full rounded-xl border border-stone-800 bg-stone-900/90 hover:bg-stone-800 text-stone-300 hover:text-white text-xs flex items-center transition-colors whitespace-nowrap ${
+                compact ? 'h-8 justify-center px-0' : 'h-8 justify-between px-2.5 gap-2'
+              }`}
+            >
+              <span className="inline-flex items-center gap-2 min-w-0">
+                <Search className="w-3.5 h-3.5 text-orange-400 shrink-0" />
+                {!compact && <span className="truncate text-stone-300">Rechercher...</span>}
+              </span>
+              {!compact && (
+                <kbd className="px-1.5 py-0.5 rounded bg-stone-950 border border-stone-700 font-mono text-[10px] text-stone-400 shrink-0">
+                  Ctrl+K
+                </kbd>
+              )}
+            </button>
+          )}
         </div>
 
         {/* Vertical Navigation Groups */}

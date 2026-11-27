@@ -17,6 +17,10 @@ import {
 import {
   getFirestore,
   initializeFirestore,
+  persistentLocalCache,
+  persistentMultipleTabManager,
+  memoryLocalCache,
+  onSnapshotsInSync,
   doc,
   collection,
   query,
@@ -32,7 +36,11 @@ import {
   writeBatch,
   serverTimestamp,
   type DocumentData,
+  type DocumentReference,
+  type DocumentSnapshot,
   type Firestore,
+  type Query,
+  type QuerySnapshot,
 } from 'firebase/firestore';
 import firebaseConfig from '../firebase-applet-config.json';
 import {
@@ -100,22 +108,110 @@ import {
 const app = getApps().find((a) => a.name === '[DEFAULT]') || initializeApp(firebaseConfig);
 
 // CRITICAL: Pass the provisioned named firestoreDatabaseId from firebase-applet-config.json
-// Enable auto-detect long polling so mobile Chrome / GitHub Pages / restrictive proxies never hang on WebChannel.
-function createResilientFirestore(): Firestore {
+// Enable persistent multi-tab IndexedDB cache (offline field mode) + auto-detect long polling
+// so mobile Chrome / GitHub Pages / weak 4G never hang or lose field edits.
+function createResilientFirestore(): { firestore: Firestore; offlinePersistenceEnabled: boolean } {
+  const canUseIndexedDb =
+    typeof window !== 'undefined' && typeof window.indexedDB !== 'undefined';
+
+  if (canUseIndexedDb) {
+    try {
+      const firestore = initializeFirestore(
+        app,
+        {
+          localCache: persistentLocalCache({
+            tabManager: persistentMultipleTabManager(),
+          }),
+          experimentalAutoDetectLongPolling: true,
+        },
+        firebaseConfig.firestoreDatabaseId
+      );
+      return { firestore, offlinePersistenceEnabled: true };
+    } catch {
+      // Fallback to memory cache (e.g. private browsing / restricted IndexedDB) or existing HMR instance
+    }
+  }
+
   try {
-    return initializeFirestore(
+    const firestore = initializeFirestore(
       app,
       {
+        localCache: memoryLocalCache(),
         experimentalAutoDetectLongPolling: true,
       },
       firebaseConfig.firestoreDatabaseId
     );
+    return { firestore, offlinePersistenceEnabled: false };
   } catch {
-    return getFirestore(app, firebaseConfig.firestoreDatabaseId);
+    return {
+      firestore: getFirestore(app, firebaseConfig.firestoreDatabaseId),
+      offlinePersistenceEnabled: canUseIndexedDb,
+    };
   }
 }
 
-export const db = createResilientFirestore();
+const firestoreInitResult = createResilientFirestore();
+export const db = firestoreInitResult.firestore;
+export const isFirestoreOfflinePersistenceEnabled: boolean =
+  firestoreInitResult.offlinePersistenceEnabled;
+
+function isNavigatorOffline(): boolean {
+  return typeof navigator !== 'undefined' && navigator.onLine === false;
+}
+
+function isOfflineOrUnavailableError(err: unknown): boolean {
+  if (!err || typeof err !== 'object') return false;
+  const code = String((err as { code?: unknown }).code || '').toLowerCase();
+  const msg = String((err as { message?: unknown }).message || '').toLowerCase();
+  return (
+    code === 'unavailable' ||
+    code === 'failed-precondition' ||
+    msg.includes('offline') ||
+    msg.includes('unavailable') ||
+    msg.includes('network')
+  );
+}
+
+async function getDocWithOfflineFallback<T = DocumentData>(
+  ref: DocumentReference<T>
+): Promise<DocumentSnapshot<T>> {
+  if (isNavigatorOffline()) {
+    return getDoc(ref);
+  }
+  try {
+    return await getDocFromServer(ref);
+  } catch (err) {
+    if (isOfflineOrUnavailableError(err) || isNavigatorOffline()) {
+      return getDoc(ref);
+    }
+    return getDoc(ref);
+  }
+}
+
+async function getDocsWithOfflineFallback<T = DocumentData>(
+  q: Query<T>
+): Promise<QuerySnapshot<T>> {
+  if (isNavigatorOffline()) {
+    return getDocs(q);
+  }
+  try {
+    return await getDocsFromServer(q);
+  } catch (err) {
+    if (isOfflineOrUnavailableError(err) || isNavigatorOffline()) {
+      return getDocs(q);
+    }
+    return getDocs(q);
+  }
+}
+
+export function subscribeFirestoreSnapshotsInSync(onSynced: () => void): () => void {
+  try {
+    return onSnapshotsInSync(db, onSynced);
+  } catch {
+    return () => {};
+  }
+}
+
 export const auth = getAuth(app);
 export const googleProvider = new GoogleAuthProvider();
 googleProvider.setCustomParameters({ prompt: 'select_account' });
@@ -642,11 +738,11 @@ export async function syncMyTeamStat(
     let diagExtraCount = 0;
 
     try {
-      const snap = await getDocFromServer(ref).catch(() => getDoc(ref));
+      const snap = await getDocWithOfflineFallback(ref);
 
       const selfHealFromServer = async (fallbackPrev: DocumentData = {}) => {
         diagStep = 'selfHeal_get';
-        const freshSnap = await getDocFromServer(ref).catch(() => snap);
+        const freshSnap = await getDocWithOfflineFallback(ref).catch(() => snap);
         if (!freshSnap.exists()) {
           diagStep = 'selfHeal_create';
           diagExisted = false;
@@ -1664,11 +1760,11 @@ export async function syncMyUserPresenceProfile(params: {
     let diagMissingCount = 0;
     let diagPayloadSummary = summarizePresenceDiag(params.uid, cleanProfile);
     try {
-      const snap = await getDocFromServer(ref).catch(() => getDoc(ref));
+      const snap = await getDocWithOfflineFallback(ref);
 
       const selfHealFromServer = async (fallbackPrev: DocumentData = {}) => {
         diagStep = 'selfHeal_get';
-        const freshSnap = await getDocFromServer(ref).catch(() => snap);
+        const freshSnap = await getDocWithOfflineFallback(ref).catch(() => snap);
         if (!freshSnap.exists()) {
           diagStep = 'selfHeal_create';
           diagExisted = false;
@@ -1836,7 +1932,7 @@ export async function startAttendanceSession(params: {
     let diagPayloadSummary = '';
 
     try {
-      const snap = await getDocFromServer(presRef).catch(() => getDoc(presRef));
+      const snap = await getDocWithOfflineFallback(presRef);
 
       const computePayloadFromBase = (base: DocumentData | null) => {
         if (base) {
@@ -1922,7 +2018,7 @@ export async function startAttendanceSession(params: {
 
       const selfHealFromServer = async () => {
         diagStep = 'selfHeal_get';
-        const freshSnap = await getDocFromServer(presRef);
+        const freshSnap = await getDocWithOfflineFallback(presRef);
         if (!freshSnap.exists()) {
           diagStep = 'selfHeal_create';
           diagExisted = false;
@@ -2183,7 +2279,7 @@ export async function fetchAllUserPresencesFromServer(): Promise<UserPresenceRec
   const path = 'user_presence';
   try {
     const q = getUserPresenceListQuery();
-    const snap = await getDocsFromServer(q).catch(() => getDocs(q));
+    const snap = await getDocsWithOfflineFallback(q);
     const list: UserPresenceRecord[] = [];
     snap.forEach((docSnap) => {
       const d = docSnap.data();
@@ -2318,7 +2414,7 @@ export async function heartbeatAttendanceSession(params: {
         }
       }
 
-      const snap = await getDocFromServer(presRef).catch(() => getDoc(presRef));
+      const snap = await getDocWithOfflineFallback(presRef);
       if (snap.exists()) {
         const prev = snap.data();
         const sameDay = prev.activeDateKey === safeDateKey;
@@ -2482,7 +2578,7 @@ export async function closeAttendanceSession(params: {
 
   try {
     await ensureFreshAuthUser(params.uid);
-    const snap = await getDocFromServer(presRef).catch(() => getDoc(presRef));
+    const snap = await getDocWithOfflineFallback(presRef);
     if (snap.exists()) {
       const prev = snap.data();
       const activeServerSessionId =
@@ -2620,6 +2716,56 @@ export async function fetchUserAttendanceSessions(
   } catch (error) {
     handleFirestoreError(error, OperationType.LIST, path);
   }
+}
+
+/**
+ * Fetches attendance sessions on-demand for a list of collaborator UIDs filtered to a target YYYY-MM month.
+ * Designed strictly for Super-Admin Direction Reports; gracefully falls back to [] if offline or denied.
+ */
+export async function fetchTeamAttendanceSessionsForMonth(
+  uids: string[],
+  monthKey: string
+): Promise<AttendanceSessionRecord[]> {
+  const uniqueUids = Array.from(new Set(uids.filter((u) => typeof u === 'string' && u.trim().length > 0)));
+  if (uniqueUids.length === 0) return [];
+  const normalizedMonth = /^\d{4}-\d{2}$/.test((monthKey || '').trim()) ? monthKey.trim() : '';
+
+  const results = await Promise.allSettled(
+    uniqueUids.map(async (uid) => {
+      const snap = await getDocsWithOfflineFallback(getUserSessionsQuery(uid));
+      const rows: AttendanceSessionRecord[] = [];
+      snap.forEach((docSnap) => {
+        const d = docSnap.data();
+        const item = sanitizeAttendanceSessionPayload({
+          id: docSnap.id,
+          ownerId: typeof d.ownerId === 'string' ? d.ownerId : uid,
+          dateKey: typeof d.dateKey === 'string' ? d.dateKey : '',
+          loginAt: typeof d.loginAt === 'string' ? d.loginAt : '',
+          lastSeenAt: typeof d.lastSeenAt === 'string' ? d.lastSeenAt : '',
+          logoutAt: typeof d.logoutAt === 'string' ? d.logoutAt : '',
+          workedSeconds: Number(d.workedSeconds) || 0,
+          deviceLabel: typeof d.deviceLabel === 'string' ? d.deviceLabel : 'Navigateur',
+          deviceType: typeof d.deviceType === 'string' ? d.deviceType : 'desktop',
+          status: typeof d.status === 'string' ? d.status : 'closed',
+          disconnectReason: typeof d.disconnectReason === 'string' ? d.disconnectReason : '',
+          disconnectedDuringWorkHours: Boolean(d.disconnectedDuringWorkHours),
+        });
+        const keyRef = item.dateKey || item.loginAt || '';
+        if (!normalizedMonth || keyRef.startsWith(normalizedMonth)) {
+          rows.push(item);
+        }
+      });
+      return rows;
+    })
+  );
+
+  const combined: AttendanceSessionRecord[] = [];
+  for (const res of results) {
+    if (res.status === 'fulfilled') {
+      combined.push(...res.value);
+    }
+  }
+  return combined;
 }
 
 /**
@@ -3265,7 +3411,7 @@ async function updateOrUpsertSignedContract(
 
   try {
     const docRef = doc(db, 'signed_contracts', contractId);
-    const snap = await getDocFromServer(docRef).catch(() => getDoc(docRef));
+    const snap = await getDocWithOfflineFallback(docRef);
     if (!snap.exists()) {
       throw new Error(`Le contrat « ${contractId} » est introuvable sur le serveur.`);
     }
@@ -3339,7 +3485,7 @@ export async function sendDirectChatMessage(params: {
   const safeSenderName = clampUtf8Bytes(params.senderName.trim(), 120) || 'Utilisateur';
 
   const executeChannelAttempt = async () => {
-    const snap = await getDocFromServer(channelRef).catch(() => getDoc(channelRef));
+    const snap = await getDocWithOfflineFallback(channelRef);
 
     const buildChannelDoc = (base: DocumentData | null) => {
       const prevUnreadAdmin = base
@@ -3369,7 +3515,7 @@ export async function sendDirectChatMessage(params: {
     };
 
     const selfHealFromServer = async () => {
-      const freshSnap = await getDocFromServer(channelRef);
+      const freshSnap = await getDocWithOfflineFallback(channelRef);
       if (!freshSnap.exists()) {
         const freshDoc = buildChannelDoc(null);
         await setDoc(channelRef, {
@@ -3558,7 +3704,7 @@ export async function setCollaboratorCoachingState(
   const ref = doc(db, 'coaching_sessions', collabUid);
   try {
     await ensureFreshAuthUser(collabUid);
-    const snap = await getDocFromServer(ref).catch(() => getDoc(ref));
+    const snap = await getDocWithOfflineFallback(ref);
     if (snap.exists()) {
       await updateDoc(ref, {
         collabName: clean.collabName,
@@ -3655,7 +3801,7 @@ export async function fetchCloudRtcIceConfig(): Promise<CloudRtcIceConfigRecord 
   if (!auth.currentUser) return null;
   const ref = doc(db, 'app_config', 'rtc_ice');
   try {
-    const snap = await getDocFromServer(ref).catch(() => getDoc(ref));
+    const snap = await getDocWithOfflineFallback(ref);
     if (!snap.exists()) return null;
     const d = snap.data();
     let updatedAtIso: string | undefined;
@@ -3694,7 +3840,7 @@ export async function adminSaveCloudRtcIceConfig(params: {
     if (updatedBy) {
       await ensureFreshAuthUser(updatedBy);
     }
-    const snap = await getDocFromServer(ref).catch(() => getDoc(ref));
+    const snap = await getDocWithOfflineFallback(ref);
     const payload: DocumentData = {
       iceServersJson: safeJson,
       turnEnabled: Boolean(params.turnEnabled),

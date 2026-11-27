@@ -1,6 +1,6 @@
 import React, { useMemo, useState } from 'react';
 import { TrendingUp, ChevronDown, ChevronUp, MapPin, Phone, Mail, Users } from 'lucide-react';
-import type { FicheEntreprise, SegmentCouleur } from '../App';
+import type { FicheEntreprise, SegmentCouleur } from '../utils/crmDomain';
 import {
   buildCityAndOfferBreakdown,
   buildKpiTrendSeries,

@@ -8,7 +8,7 @@ import {
   AlertCircle,
   Building2,
 } from 'lucide-react';
-import type { FicheEntreprise } from '../App';
+import type { FicheEntreprise } from '../utils/crmDomain';
 import { validateRdvRequirements } from '../utils/activiteHelpers';
 import { saveFicheActivite, saveFicheAuditLog } from '../firebase';
 

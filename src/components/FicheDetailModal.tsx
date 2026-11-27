@@ -27,6 +27,8 @@ import {
   Lock,
   UserPlus,
   RotateCcw,
+  Navigation,
+  AlertTriangle,
 } from 'lucide-react';
 import {
   SECTEURS_META,
@@ -37,7 +39,8 @@ import {
   type FicheEntreprise,
   type SecteurCode,
   type StatutCRM,
-} from '../App';
+} from '../utils/crmDomain';
+import { isEffectifAberrant } from '../utils/dataHygiene';
 import {
   ROLE_BADGE_META,
   computeDefaultPayoutMad,
@@ -184,6 +187,10 @@ export const FicheDetailModal: React.FC<FicheDetailModalProps> = ({
   const estimatedCommissionMad = computeDefaultPayoutMad(reco.tier, fiche.effectif, reco.offre);
   const locationInfo = resolveCityAndRegionFromZoneString(fiche.ville || 'Maroc');
   const waNumber = buildWhatsAppNumber(fiche.telephone);
+  const mapsDirectionsUrl = `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(
+    `${fiche.societe} ${fiche.ville || ''} Maroc`.trim()
+  )}`;
+  const hasAberrantEffectif = isEffectifAberrant(fiche.effectif);
   const isLockedSigned = fiche.statut === 'Signé Orange Pro' && !hasSupervision;
 
   const extraPhones = fiche.telephonesSupplementaires || [];
@@ -238,6 +245,17 @@ export const FicheDetailModal: React.FC<FicheDetailModalProps> = ({
                   <MapPin className="w-3.5 h-3.5 text-orange-600" />
                   {locationInfo.formattedZone}
                 </span>
+                <a
+                  href={mapsDirectionsUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  data-testid="fiche-detail-maps-link"
+                  className="hidden md:inline-flex items-center gap-1 text-[11px] font-semibold text-orange-700 hover:text-orange-900 hover:underline"
+                  title="Ouvrir l’itinéraire dans Google Maps"
+                >
+                  <Navigation className="w-3 h-3" />
+                  Itinéraire Google Maps
+                </a>
                 {fiche.dateAjout && (
                   <>
                     <span>·</span>
@@ -615,7 +633,19 @@ export const FicheDetailModal: React.FC<FicheDetailModalProps> = ({
                   <div>
                     <div className="text-[11px] text-stone-500">Effectif estimé</div>
                     <div className="font-semibold text-stone-900">
-                      {fiche.effectif ? `${fiche.effectif} collaborateurs` : 'Non renseigné'}
+                      {hasAberrantEffectif ? (
+                        <span
+                          title={`Valeur enregistrée : ${fiche.effectif}`}
+                          className="inline-flex items-center gap-1 rounded bg-amber-100 border border-amber-300 px-1.5 py-0.5 text-[11px] font-bold text-amber-900"
+                        >
+                          <AlertTriangle className="w-3 h-3" />
+                          Effectif à vérifier (Hygiène CRM)
+                        </span>
+                      ) : fiche.effectif ? (
+                        `${fiche.effectif} collaborateurs`
+                      ) : (
+                        'Non renseigné'
+                      )}
                     </div>
                   </div>
                 </div>
@@ -1005,6 +1035,69 @@ export const FicheDetailModal: React.FC<FicheDetailModalProps> = ({
               })()}
             </div>
           </section>
+        </div>
+
+        {/* Barre d'actions terrain collante sur mobile (< 768px) */}
+        <div
+          data-testid="fiche-detail-mobile-action-bar"
+          className="md:hidden shrink-0 border-t border-stone-200 bg-white/95 backdrop-blur-xs px-3 pt-2 pb-[max(0.75rem,env(safe-area-inset-bottom))] shadow-[0_-4px_14px_rgba(0,0,0,0.06)]"
+        >
+          <div className="grid grid-cols-4 gap-2">
+            {fiche.telephone ? (
+              <a
+                href={`tel:${fiche.telephone}`}
+                data-testid="fiche-detail-mobile-call"
+                className="min-h-[44px] rounded-xl bg-stone-900 hover:bg-stone-800 text-white flex flex-col items-center justify-center gap-0.5 text-[11px] font-bold transition-colors"
+              >
+                <Phone className="w-4 h-4 text-orange-400" />
+                <span>Appeler</span>
+              </a>
+            ) : (
+              <span className="min-h-[44px] rounded-xl bg-stone-100 text-stone-400 flex flex-col items-center justify-center gap-0.5 text-[11px] font-semibold">
+                <Phone className="w-4 h-4" />
+                <span>Appeler</span>
+              </span>
+            )}
+
+            {waNumber ? (
+              <a
+                href={`https://wa.me/${waNumber}`}
+                target="_blank"
+                rel="noopener noreferrer"
+                data-testid="fiche-detail-mobile-whatsapp"
+                className="min-h-[44px] rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white flex flex-col items-center justify-center gap-0.5 text-[11px] font-bold transition-colors"
+              >
+                <MessageSquare className="w-4 h-4" />
+                <span>WhatsApp</span>
+              </a>
+            ) : (
+              <span className="min-h-[44px] rounded-xl bg-stone-100 text-stone-400 flex flex-col items-center justify-center gap-0.5 text-[11px] font-semibold">
+                <MessageSquare className="w-4 h-4" />
+                <span>WhatsApp</span>
+              </span>
+            )}
+
+            <a
+              href={mapsDirectionsUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              data-testid="fiche-detail-mobile-maps"
+              className="min-h-[44px] rounded-xl border border-orange-300 bg-orange-50 hover:bg-orange-100 text-orange-900 flex flex-col items-center justify-center gap-0.5 text-[11px] font-bold transition-colors"
+            >
+              <Navigation className="w-4 h-4 text-orange-600" />
+              <span>Itinéraire</span>
+            </a>
+
+            <button
+              type="button"
+              data-testid="fiche-detail-mobile-activite"
+              onClick={() => onOpenActivite(fiche)}
+              className="min-h-[44px] rounded-xl bg-orange-600 hover:bg-orange-700 text-white flex flex-col items-center justify-center gap-0.5 text-[11px] font-bold transition-colors"
+            >
+              <PhoneCall className="w-4 h-4" />
+              <span>Activité</span>
+            </button>
+          </div>
         </div>
       </div>
     </div>

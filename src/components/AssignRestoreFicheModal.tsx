@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { X, UserPlus, RotateCcw, Lock, AlertCircle, CheckCircle2, ShieldAlert } from 'lucide-react';
-import type { FicheEntreprise, StatutCRM } from '../App';
+import type { FicheEntreprise, StatutCRM } from '../utils/crmDomain';
 import { ROLE_BADGE_META, type TeamStatRecord } from '../utils/gamification';
 
 export type AssignRestoreMode = 'assign' | 'restore';
