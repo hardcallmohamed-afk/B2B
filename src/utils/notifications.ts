@@ -19,7 +19,8 @@ export type NotificationKind =
   | 'fiche_restored'
   | 'fiche_updated'
   | 'direct_message'
-  | 'coaching_invite';
+  | 'coaching_invite'
+  | 'security_dlp_alert';
 
 export interface ContractNotificationMeta {
   contractId: string;
@@ -54,7 +55,7 @@ export interface AppNotification {
   xpBoost: number;
   createdAt: string;
   read: boolean;
-  targetTab?: 'badges' | 'team' | 'crm';
+  targetTab?: 'badges' | 'team' | 'crm' | 'admin';
   cloudDocId?: string;
   contractMeta?: ContractNotificationMeta;
   ficheMeta?: FicheNotificationMeta;
@@ -310,6 +311,7 @@ export function mapCloudNotificationDocToAppNotification(
             : 'rare',
     direct_message: 'rare',
     coaching_invite: 'legendaire',
+    security_dlp_alert: 'legendaire',
   };
 
   const isContractKind = doc.kind === 'contract_signed' || doc.kind === 'contract_status_changed';
@@ -536,6 +538,16 @@ export function getNotificationSoundProfile(
         stepSec: 0.085,
         noteDurationSec: 0.28,
         gainPeak: 0.075,
+      };
+    case 'security_dlp_alert':
+      return {
+        profileKey: 'security_dlp_alert',
+        label: 'Alerte Sécurité DLP',
+        waveform: 'sawtooth',
+        notesHz: [880.0, 659.25, 880.0], // A5 -> E5 -> A5 urgent security ping
+        stepSec: 0.09,
+        noteDurationSec: 0.22,
+        gainPeak: 0.055,
       };
     case 'distinction_awarded':
       return {

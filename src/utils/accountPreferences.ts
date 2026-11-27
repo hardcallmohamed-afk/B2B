@@ -32,6 +32,7 @@ export interface AdvancedAccountPreferences {
   csvDelimiter: ';' | ',';
   workHoursSchedule: 'standard_maroc' | 'continu_08_20' | 'terrain_etendu';
   autoSaveIntervalSec: 15 | 30 | 60;
+  idleLockMinutes: 0 | 15 | 30 | 60;
 }
 
 export const DEFAULT_ADVANCED_PREFS: AdvancedAccountPreferences = {
@@ -47,6 +48,7 @@ export const DEFAULT_ADVANCED_PREFS: AdvancedAccountPreferences = {
   csvDelimiter: ';',
   workHoursSchedule: 'standard_maroc',
   autoSaveIntervalSec: 30,
+  idleLockMinutes: 30,
 };
 
 export function sanitizeAdvancedAccountPrefs(
@@ -66,6 +68,7 @@ export function sanitizeAdvancedAccountPrefs(
   const delim = raw.csvDelimiter;
   const schedule = raw.workHoursSchedule;
   const interval = Number(raw.autoSaveIntervalSec);
+  const idleLock = Number(raw.idleLockMinutes);
 
   return {
     monthlyGoalPayoutMad:
@@ -124,7 +127,31 @@ export function sanitizeAdvancedAccountPrefs(
       interval === 15 || interval === 30 || interval === 60
         ? (interval as 15 | 30 | 60)
         : DEFAULT_ADVANCED_PREFS.autoSaveIntervalSec,
+    idleLockMinutes:
+      idleLock === 0 || idleLock === 15 || idleLock === 30 || idleLock === 60
+        ? (idleLock as 0 | 15 | 30 | 60)
+        : DEFAULT_ADVANCED_PREFS.idleLockMinutes,
   };
+}
+
+export function serializeAdvancedAccountPrefsJson(
+  prefs: Partial<AdvancedAccountPreferences> | null | undefined
+): string {
+  const clean = sanitizeAdvancedAccountPrefs(prefs);
+  return JSON.stringify(clean).slice(0, 2000);
+}
+
+export function parseAdvancedAccountPrefsJson(
+  rawJson?: string | null
+): AdvancedAccountPreferences | null {
+  if (typeof rawJson !== 'string' || !rawJson.trim() || rawJson.length > 2000) return null;
+  try {
+    const parsed = JSON.parse(rawJson);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+    return sanitizeAdvancedAccountPrefs(parsed as Partial<AdvancedAccountPreferences>);
+  } catch {
+    return null;
+  }
 }
 
 export function loadAdvancedAccountPrefs(uid?: string | null): AdvancedAccountPreferences {
@@ -224,10 +251,13 @@ export interface PersistedFicheExtraFields {
   restoredByName?: string;
   restoredAt?: string;
   restoredReason?: string;
+  optOut?: boolean;
+  optOutAt?: string;
+  optOutReason?: string;
 }
 
 /**
- * Restores the 9 scheduling, assignment, and restoration fields when hydrating a FicheEntreprise
+ * Restores scheduling, assignment, restoration, and CNDP optOut fields when hydrating a FicheEntreprise
  * from a Firestore snapshot so reload never drops user data.
  */
 export function extractPersistedFicheFields(d: Record<string, unknown>): PersistedFicheExtraFields {
@@ -264,6 +294,12 @@ export function extractPersistedFicheFields(d: Record<string, unknown>): Persist
 
   const restoredReason = cleanOptStr(d.restoredReason, 400);
   if (restoredReason) result.restoredReason = restoredReason;
+
+  if (typeof d.optOut === 'boolean') result.optOut = d.optOut;
+  const optOutAt = cleanOptStr(d.optOutAt, 64);
+  if (optOutAt) result.optOutAt = optOutAt;
+  const optOutReason = cleanOptStr(d.optOutReason, 240);
+  if (optOutReason) result.optOutReason = optOutReason;
 
   return result;
 }

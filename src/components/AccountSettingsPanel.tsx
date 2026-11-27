@@ -55,6 +55,22 @@ import {
   resolveCityAndRegionFromZoneString,
 } from '../utils/moroccoCities';
 
+import {
+  DEFAULT_ADVANCED_PREFS,
+  loadAdvancedAccountPrefs,
+  parseAdvancedAccountPrefsJson,
+  saveAdvancedAccountPrefs,
+  serializeAdvancedAccountPrefsJson,
+  type AdvancedAccountPreferences,
+} from '../utils/accountPreferences';
+import {
+  IDLE_LOCK_OPTIONS,
+  evaluatePasswordStrength,
+  type IdleLockMinutes,
+} from '../utils/securityHardening';
+
+export type { AdvancedAccountPreferences };
+
 export interface UserProfileSettings {
   displayName: string;
   avatarDataUrl: string;
@@ -69,59 +85,7 @@ export interface UserProfileSettings {
   legalIce?: string;
   legalAdresse?: string;
   legalTelephone?: string;
-}
-
-export interface AdvancedAccountPreferences {
-  monthlyGoalPayoutMad: number;
-  preferredContactChannel: 'whatsapp' | 'phone' | 'email';
-  ficheNumberPrefix: 'OP-' | 'DIV-' | 'B2B-';
-  followUpAlertDelay: '24h' | '48h' | '72h' | '7d';
-  targetMaturityPct: 75 | 85 | 95;
-  defaultEmailTone: 'terrain' | 'executif' | 'court';
-  defaultEmailCycle:
-    | 'auto'
-    | 'premier_contact'
-    | 'suite_passage'
-    | 'diagnostic'
-    | 'relance_devis'
-    | 'fin_contrat'
-    | 'renouvellement'
-    | 'reactivation';
-  preferredAiProvider: 'auto' | 'mistral' | 'groq' | 'gemini' | 'openrouter';
-  autoAppendPhoneInEmail: boolean;
-  csvDelimiter: ';' | ',';
-  workHoursSchedule: 'standard_maroc' | 'continu_08_20' | 'terrain_etendu';
-  autoSaveIntervalSec: 15 | 30 | 60;
-}
-
-const DEFAULT_ADVANCED_PREFS: AdvancedAccountPreferences = {
-  monthlyGoalPayoutMad: 15000,
-  preferredContactChannel: 'whatsapp',
-  ficheNumberPrefix: 'DIV-',
-  followUpAlertDelay: '48h',
-  targetMaturityPct: 85,
-  defaultEmailTone: 'terrain',
-  defaultEmailCycle: 'premier_contact',
-  preferredAiProvider: 'auto',
-  autoAppendPhoneInEmail: true,
-  csvDelimiter: ';',
-  workHoursSchedule: 'standard_maroc',
-  autoSaveIntervalSec: 30,
-};
-
-function loadAdvancedAccountPrefs(uid: string): AdvancedAccountPreferences {
-  if (typeof window === 'undefined') return DEFAULT_ADVANCED_PREFS;
-  try {
-    const raw = window.localStorage.getItem(`op_advanced_account_prefs_${uid}`);
-    if (!raw) return DEFAULT_ADVANCED_PREFS;
-    const parsed = JSON.parse(raw);
-    return {
-      ...DEFAULT_ADVANCED_PREFS,
-      ...(parsed && typeof parsed === 'object' ? parsed : {}),
-    };
-  } catch {
-    return DEFAULT_ADVANCED_PREFS;
-  }
+  advancedPrefsJson?: string;
 }
 
 interface AccountSettingsPanelProps {
@@ -144,7 +108,7 @@ interface AccountSettingsPanelProps {
   onExportBackup: () => void;
   onSignOut: () => void;
   onJumpToBadges: () => void;
-  onJumpToAdminSection?: (section: 'all' | 'users' | 'attendance' | 'vault') => void;
+  onJumpToAdminSection?: (section: 'all' | 'users' | 'attendance' | 'vault' | 'security') => void;
   onTestBadgeAlert?: () => void;
   onNotify: (msg: string, type?: 'ok' | 'warn' | 'err') => void;
   myPresenceStatus?: {
@@ -206,8 +170,9 @@ export const AccountSettingsPanel: React.FC<AccountSettingsPanelProps> = ({
   const [legalIce, setLegalIce] = useState(profile.legalIce || '');
   const [legalAdresse, setLegalAdresse] = useState(profile.legalAdresse || '');
   const [legalTelephone, setLegalTelephone] = useState(profile.legalTelephone || '');
-  const [advPrefs, setAdvPrefs] = useState<AdvancedAccountPreferences>(() =>
-    loadAdvancedAccountPrefs(uid)
+  const [advPrefs, setAdvPrefs] = useState<AdvancedAccountPreferences>(
+    () =>
+      parseAdvancedAccountPrefsJson(profile.advancedPrefsJson) ?? loadAdvancedAccountPrefs(uid)
   );
 
   const [uploadingPhoto, setUploadingPhoto] = useState(false);
@@ -242,7 +207,9 @@ export const AccountSettingsPanel: React.FC<AccountSettingsPanelProps> = ({
     setLegalIce(profile.legalIce || '');
     setLegalAdresse(profile.legalAdresse || '');
     setLegalTelephone(profile.legalTelephone || '');
-    setAdvPrefs(loadAdvancedAccountPrefs(uid));
+    const hydratedPrefs =
+      parseAdvancedAccountPrefsJson(profile.advancedPrefsJson) ?? loadAdvancedAccountPrefs(uid);
+    setAdvPrefs(hydratedPrefs);
   }, [
     uid,
     profile.displayName,
@@ -258,6 +225,7 @@ export const AccountSettingsPanel: React.FC<AccountSettingsPanelProps> = ({
     profile.legalIce,
     profile.legalAdresse,
     profile.legalTelephone,
+    profile.advancedPrefsJson,
     emailSignature,
     savingProfile,
     uploadingPhoto,
@@ -303,6 +271,7 @@ export const AccountSettingsPanel: React.FC<AccountSettingsPanelProps> = ({
           legalIce: legalIce.trim(),
           legalAdresse: legalAdresse.trim(),
           legalTelephone: legalTelephone.trim(),
+          advancedPrefsJson: serializeAdvancedAccountPrefsJson(advPrefs),
         },
         signature
       );
@@ -335,6 +304,7 @@ export const AccountSettingsPanel: React.FC<AccountSettingsPanelProps> = ({
         legalIce: legalIce.trim(),
         legalAdresse: legalAdresse.trim(),
         legalTelephone: legalTelephone.trim(),
+        advancedPrefsJson: serializeAdvancedAccountPrefsJson(advPrefs),
       },
       signature
     );
@@ -343,15 +313,15 @@ export const AccountSettingsPanel: React.FC<AccountSettingsPanelProps> = ({
 
   const persistAdvancedPrefs = (nextPrefs: AdvancedAccountPreferences) => {
     setAdvPrefs(nextPrefs);
+    saveAdvancedAccountPrefs(uid, nextPrefs);
     try {
-      window.localStorage.setItem(`op_advanced_account_prefs_${uid}`, JSON.stringify(nextPrefs));
       window.dispatchEvent(
         new CustomEvent('op-advanced-prefs-changed', {
           detail: { uid, prefs: nextPrefs },
         })
       );
     } catch {
-      // Ignore quota
+      // Ignore
     }
   };
 
@@ -389,19 +359,26 @@ export const AccountSettingsPanel: React.FC<AccountSettingsPanelProps> = ({
           legalIce: legalIce.trim(),
           legalAdresse: legalAdresse.trim(),
           legalTelephone: legalTelephone.trim(),
+          advancedPrefsJson: serializeAdvancedAccountPrefsJson(advPrefs),
         },
         signature
       );
       setHasUnsavedChanges(false);
       setSavingProfile(false);
-      onNotify('Tous les paramètres du compte et préférences avancées ont été enregistrés.');
+      onNotify('Tous les paramètres du compte et préférences avancées ont été synchronisés dans le Cloud.');
     }
   };
 
+  const pwdStrength = evaluatePasswordStrength(newPassword);
+
   const handleChangePassword = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (newPassword.length < 8) {
-      onNotify('Le mot de passe doit contenir au moins 8 caractères.', 'warn');
+    if (!pwdStrength.valid) {
+      onNotify(
+        pwdStrength.feedback[0] ||
+          'Mot de passe trop faible : minimum 10 caractères avec au moins 3 catégories (majuscule, minuscule, chiffre, symbole).',
+        'warn'
+      );
       return;
     }
     if (newPassword !== confirmPassword) {
@@ -413,7 +390,7 @@ export const AccountSettingsPanel: React.FC<AccountSettingsPanelProps> = ({
       await setOrLinkAccountPassword(newPassword);
       setNewPassword('');
       setConfirmPassword('');
-      onNotify('Mot de passe mis à jour avec succès.');
+      onNotify('Mot de passe mis à jour avec succès (politique renforcée validée).');
     } catch (err) {
       const formatted = formatFirebaseAuthError(err);
       onNotify(formatted.message, 'err');
@@ -1348,6 +1325,30 @@ export const AccountSettingsPanel: React.FC<AccountSettingsPanelProps> = ({
                   <option value={60}>Économie bande passante (60 sec)</option>
                 </select>
               </div>
+
+              <div className="space-y-1 sm:col-span-2">
+                <label htmlFor="adv-idle-lock" className="block text-[11px] font-semibold text-stone-700">
+                  Verrouillage automatique après inactivité (Sécurité écran)
+                </label>
+                <select
+                  id="adv-idle-lock"
+                  data-testid="adv-idle-lock-select"
+                  value={advPrefs.idleLockMinutes}
+                  onChange={(e) =>
+                    persistAdvancedPrefs({
+                      ...advPrefs,
+                      idleLockMinutes: Number(e.target.value) as IdleLockMinutes,
+                    })
+                  }
+                  className="w-full px-2.5 py-1.5 rounded-lg border border-stone-300 bg-white text-xs font-medium text-stone-800"
+                >
+                  {IDLE_LOCK_OPTIONS.map((opt) => (
+                    <option key={opt.value} value={opt.value}>
+                      {opt.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
             </div>
 
             <label className="flex items-center justify-between gap-3 cursor-pointer text-xs text-stone-700 pt-1">
@@ -1458,6 +1459,15 @@ export const AccountSettingsPanel: React.FC<AccountSettingsPanelProps> = ({
                   <span>Coffre Clés API Cloud (/api_keys)</span>
                   <span className="text-stone-500">Configurer →</span>
                 </button>
+                <button
+                  type="button"
+                  data-testid="jump-org-security-btn"
+                  onClick={() => onJumpToAdminSection('security')}
+                  className="w-full py-2 px-3 rounded-xl border border-emerald-300 bg-emerald-50/80 hover:bg-emerald-100/70 text-emerald-950 text-xs font-bold flex items-center justify-between"
+                >
+                  <span>Gouvernance Entreprise &amp; Centre Sécurité / DLP</span>
+                  <span className="text-emerald-700">Ouvrir →</span>
+                </button>
               </div>
             </div>
           )}
@@ -1469,18 +1479,60 @@ export const AccountSettingsPanel: React.FC<AccountSettingsPanelProps> = ({
             </h3>
             <p className="text-xs text-stone-500 leading-relaxed">
               {hasPasswordProvider
-                ? 'Modifiez votre mot de passe de connexion ou demandez un lien de réinitialisation sécurisé par email.'
-                : 'Définissez un mot de passe lié à votre email pour vous connecter sur n’importe quel appareil sans pop-up Google.'}
+                ? 'Modifiez votre mot de passe de connexion (min. 10 caractères, 3 types de caractères) ou demandez un lien de réinitialisation sécurisé.'
+                : 'Définissez un mot de passe robuste lié à votre email pour vous connecter sur n’importe quel appareil sans pop-up Google.'}
             </p>
 
             <form onSubmit={handleChangePassword} className="space-y-2.5">
               <input
                 type="password"
+                data-testid="account-new-password-input"
                 value={newPassword}
                 onChange={(e) => setNewPassword(e.target.value)}
-                placeholder="Nouveau mot de passe (min. 8 caractères)"
+                placeholder="Nouveau mot de passe (min. 10 caractères)"
                 className="w-full px-3 py-2 rounded-lg border border-stone-300 text-xs focus:outline-none focus:border-orange-600"
               />
+              {newPassword.length > 0 && (
+                <div data-testid="password-strength-meter" className="space-y-1.5">
+                  <div className="flex items-center justify-between text-[11px]">
+                    <span className="text-stone-500">Robustesse du mot de passe</span>
+                    <span
+                      className={`font-bold ${
+                        pwdStrength.score >= 3
+                          ? 'text-emerald-700'
+                          : pwdStrength.score === 2
+                            ? 'text-amber-700'
+                            : 'text-red-700'
+                      }`}
+                    >
+                      {pwdStrength.label}
+                    </span>
+                  </div>
+                  <div className="grid grid-cols-4 gap-1">
+                    {[1, 2, 3, 4].map((step) => (
+                      <div
+                        key={step}
+                        className={`h-1.5 rounded-full transition-colors ${
+                          pwdStrength.score >= step
+                            ? pwdStrength.score >= 3
+                              ? 'bg-emerald-500'
+                              : pwdStrength.score === 2
+                                ? 'bg-amber-500'
+                                : 'bg-red-500'
+                            : 'bg-stone-200'
+                        }`}
+                      />
+                    ))}
+                  </div>
+                  {pwdStrength.feedback.length > 0 && (
+                    <ul className="text-[10px] text-amber-800 space-y-0.5 list-disc pl-4">
+                      {pwdStrength.feedback.map((tip) => (
+                        <li key={tip}>{tip}</li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              )}
               <input
                 type="password"
                 value={confirmPassword}
@@ -1490,7 +1542,7 @@ export const AccountSettingsPanel: React.FC<AccountSettingsPanelProps> = ({
               />
               <button
                 type="submit"
-                disabled={pwdBusy || newPassword.length < 8}
+                disabled={pwdBusy || !pwdStrength.valid || newPassword !== confirmPassword}
                 className="w-full py-2 px-4 rounded-xl bg-stone-900 hover:bg-stone-800 disabled:opacity-50 text-white text-xs font-bold inline-flex items-center justify-center gap-1.5"
               >
                 <KeyRound className="w-3.5 h-3.5" />

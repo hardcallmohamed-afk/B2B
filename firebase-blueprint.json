@@ -95,6 +95,11 @@
           "maxLength": 30,
           "description": "Numéro de téléphone officiel du siège pour les devis."
         },
+        "advancedPrefsJson": {
+          "type": "string",
+          "maxLength": 2000,
+          "description": "Préférences avancées utilisateur synchronisées dans le Cloud (JSON sanitisé)."
+        },
         "createdAt": {
           "type": "string",
           "format": "date-time"
@@ -273,6 +278,20 @@
           "type": "string",
           "maxLength": 300,
           "description": "Motif de restitution ou réouverture de la fiche."
+        },
+        "optOut": {
+          "type": "boolean",
+          "description": "Conformité Loi 09-08 CNDP : prospect inscrit sur Liste Rouge (Ne plus contacter)."
+        },
+        "optOutAt": {
+          "type": "string",
+          "maxLength": 64,
+          "description": "Horodatage ISO de la mise sur Liste Rouge CNDP."
+        },
+        "optOutReason": {
+          "type": "string",
+          "maxLength": 240,
+          "description": "Motif tracé de mise sur Liste Rouge ou levée CNDP."
         },
         "createdAt": {
           "type": "string",
@@ -1212,6 +1231,64 @@
         "updatedAt": { "type": "string", "format": "date-time" }
       },
       "required": ["iceServersJson", "turnEnabled", "providerLabel", "updatedAt"]
+    },
+    "OrgSettingsConfig": {
+      "title": "OrgSettingsConfig",
+      "description": "Paramètres globaux d'organisation (mentions légales devis, paliers commissions MAD, SLA affaires dormantes, auto-verrouillage et seuils DLP/CNDP).",
+      "type": "object",
+      "properties": {
+        "companyName": { "type": "string", "minLength": 1, "maxLength": 140 },
+        "companyIce": { "type": "string", "maxLength": 40 },
+        "companyAddress": { "type": "string", "maxLength": 220 },
+        "companyPhone": { "type": "string", "maxLength": 40 },
+        "defaultPayoutGrandCompteMad": { "type": "integer", "minimum": 0, "maximum": 200000 },
+        "defaultPayoutPmeMad": { "type": "integer", "minimum": 0, "maximum": 200000 },
+        "defaultPayoutTpeMad": { "type": "integer", "minimum": 0, "maximum": 200000 },
+        "defaultSlaRottingHours": { "type": "integer", "minimum": 12, "maximum": 720 },
+        "defaultIdleLockMinutes": { "type": "integer", "enum": [0, 15, 30, 60] },
+        "dlpExportAlertThreshold": { "type": "integer", "minimum": 5, "maximum": 5000 },
+        "enforceCndpOptOutLock": { "type": "boolean" },
+        "updatedBy": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "companyName",
+        "companyIce",
+        "companyAddress",
+        "companyPhone",
+        "defaultPayoutGrandCompteMad",
+        "defaultPayoutPmeMad",
+        "defaultPayoutTpeMad",
+        "defaultSlaRottingHours",
+        "defaultIdleLockMinutes",
+        "dlpExportAlertThreshold",
+        "enforceCndpOptOutLock",
+        "updatedBy",
+        "updatedAt"
+      ]
+    },
+    "SecurityAuditLog": {
+      "title": "SecurityAuditLog",
+      "description": "Journal d'audit cybersécurité, DLP et conformité CNDP immuable (append-only), consultable exclusivement par le Super-Admin.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "orgScope": { "type": "string", "enum": ["orange_pro_team"] },
+        "severity": { "type": "string", "enum": ["info", "warn", "critical"] },
+        "category": { "type": "string", "enum": ["export_dlp", "access_control", "vault_config", "org_settings", "data_privacy", "session"] },
+        "action": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "summary": { "type": "string", "minLength": 1, "maxLength": 400 },
+        "actorUid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "actorName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "actorRole": { "type": "string", "minLength": 1, "maxLength": 40 },
+        "targetUid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "targetLabel": { "type": "string", "maxLength": 160 },
+        "recordCount": { "type": "integer", "minimum": 0, "maximum": 1000000 },
+        "createdAtIso": { "type": "string", "maxLength": 64 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "orgScope", "severity", "category", "action", "summary", "actorUid", "actorName", "actorRole", "createdAtIso", "createdAt"]
     }
   },
   "firestore": {
@@ -1225,7 +1302,13 @@
       "schema": {
         "$ref": "#/entities/RtcIceConfig"
       },
-      "description": "Configuration ICE/TURN WebRTC partagée aux membres approuvés pour le coaching audio 4G/5G Maroc."
+      "description": "Configurations globales partagées aux membres approuvés (rtc_ice WebRTC ICE/TURN et org_settings Gouvernance Organisation)."
+    },
+    "/security_audit_logs/{logId}": {
+      "schema": {
+        "$ref": "#/entities/SecurityAuditLog"
+      },
+      "description": "Journal d'audit cybersécurité, DLP et conformité CNDP immuable (création par membre vérifié, lecture exclusive Super-Admin)."
     },
     "/app_users/{userId}": {
       "schema": {

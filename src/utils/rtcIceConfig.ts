@@ -1,4 +1,4 @@
-import { fetchCloudRtcIceConfig } from '../firebase';
+import { auth, fetchCloudRtcIceConfig } from '../firebase';
 import { isStaticHostingEnvironment } from './aiCopilotClient';
 
 export const DEFAULT_STUN_ICE_SERVERS: RTCIceServer[] = [
@@ -111,27 +111,33 @@ export function extractIceCandidateType(
 }
 
 export async function resolveRtcIceConfiguration(): Promise<ResolvedRtcIceConfig> {
-  // 1. Mode serveur Node/Express : interroger /api/rtc/ice-servers
+  // 1. Mode serveur Node/Express : interroger /api/rtc/ice-servers avec jeton Firebase Bearer
   if (!isStaticHostingEnvironment()) {
     try {
-      const res = await fetch('/api/rtc/ice-servers', {
-        signal: AbortSignal.timeout(3500),
-      });
-      if (res.ok) {
-        const data = (await res.json()) as {
-          iceServers?: RTCIceServer[];
-          turnConfigured?: boolean;
-        };
-        if (Array.isArray(data.iceServers) && data.iceServers.length > 0) {
-          const merged = ensureDefaultStunIncluded(data.iceServers);
-          const hasTurn = Boolean(data.turnConfigured) || hasTurnServerInList(merged);
-          if (hasTurn) {
-            return {
-              iceServers: merged,
-              turnConfigured: true,
-              source: 'server',
-              providerLabel: 'Serveur Node/Express (/api/rtc/ice-servers)',
-            };
+      const idToken = auth.currentUser ? await auth.currentUser.getIdToken() : '';
+      if (idToken) {
+        const res = await fetch('/api/rtc/ice-servers', {
+          headers: {
+            Authorization: `Bearer ${idToken}`,
+          },
+          signal: AbortSignal.timeout(3500),
+        });
+        if (res.ok) {
+          const data = (await res.json()) as {
+            iceServers?: RTCIceServer[];
+            turnConfigured?: boolean;
+          };
+          if (Array.isArray(data.iceServers) && data.iceServers.length > 0) {
+            const merged = ensureDefaultStunIncluded(data.iceServers);
+            const hasTurn = Boolean(data.turnConfigured) || hasTurnServerInList(merged);
+            if (hasTurn) {
+              return {
+                iceServers: merged,
+                turnConfigured: true,
+                source: 'server',
+                providerLabel: 'Serveur Node/Express (/api/rtc/ice-servers)',
+              };
+            }
           }
         }
       }

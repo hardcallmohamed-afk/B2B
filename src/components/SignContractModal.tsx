@@ -10,6 +10,7 @@ import {
   formatMad,
   type OrangeProTier,
 } from '../utils/gamification';
+import type { OrgSettingsConfig } from '../utils/securityHardening';
 
 export interface SignContractTarget {
   id: string;
@@ -28,6 +29,7 @@ interface SignContractModalProps {
   target: SignContractTarget | null;
   isSuperAdmin: boolean;
   canSetInitialPayout?: boolean;
+  orgSettings?: OrgSettingsConfig | null;
   submitting: boolean;
   onClose: () => void;
   onConfirm: (payload: {
@@ -43,6 +45,7 @@ export const SignContractModal: React.FC<SignContractModalProps> = ({
   target,
   isSuperAdmin,
   canSetInitialPayout,
+  orgSettings,
   submitting,
   onClose,
   onConfirm,
@@ -101,11 +104,23 @@ export const SignContractModal: React.FC<SignContractModalProps> = ({
     [calcSecteur, calcEffectif, calcEffectifEstimated, fixeLineId, fixeQty, mobileForfaitId, mobileQty]
   );
 
+  const resolveOrgTierPayout = (targetTier: OrangeProTier): number | null => {
+    if (!orgSettings) return null;
+    if (targetTier === 'Grand Compte') return orgSettings.defaultPayoutGrandCompteMad;
+    if (targetTier === 'PME') return orgSettings.defaultPayoutPmeMad;
+    return orgSettings.defaultPayoutTpeMad;
+  };
+
   useEffect(() => {
     if (!target || !autoSyncPayout) return;
-    setPayoutMad(forecast.totalCommissionMad);
+    const orgPreset = resolveOrgTierPayout(forecast.recommendedTier);
+    setPayoutMad(
+      orgPreset && forecast.totalCommissionMad <= 0
+        ? orgPreset
+        : forecast.totalCommissionMad
+    );
     setTier(forecast.recommendedTier);
-  }, [target, autoSyncPayout, forecast.totalCommissionMad, forecast.recommendedTier]);
+  }, [target, autoSyncPayout, forecast.totalCommissionMad, forecast.recommendedTier, orgSettings]);
 
   if (!target) return null;
 
@@ -195,14 +210,32 @@ export const SignContractModal: React.FC<SignContractModalProps> = ({
                   </p>
                 </div>
               </div>
-              <button
-                type="button"
-                onClick={() => applyRecommendedFromSectorEffectif(calcSecteur, calcEffectif)}
-                className="inline-flex items-center gap-1 rounded-lg border border-orange-300 bg-white px-2.5 py-1 text-[11px] font-semibold text-orange-800 hover:bg-orange-50 whitespace-nowrap shrink-0"
-              >
-                <RefreshCw className="h-3 w-3" />
-                Recalculer auto
-              </button>
+              <div className="flex flex-wrap items-center gap-1.5">
+                {allowsInitialPayout && orgSettings && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const preset = resolveOrgTierPayout(tier);
+                      if (preset !== null) {
+                        setAutoSyncPayout(false);
+                        setPayoutMad(preset);
+                      }
+                    }}
+                    className="inline-flex items-center gap-1 rounded-lg border border-stone-300 bg-white px-2.5 py-1 text-[11px] font-semibold text-stone-700 hover:bg-stone-50 whitespace-nowrap shrink-0"
+                    title="Appliquer le barème organisation configuré par le Super-Admin"
+                  >
+                    Barème Société ({formatMad(resolveOrgTierPayout(tier) || 0)})
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => applyRecommendedFromSectorEffectif(calcSecteur, calcEffectif)}
+                  className="inline-flex items-center gap-1 rounded-lg border border-orange-300 bg-white px-2.5 py-1 text-[11px] font-semibold text-orange-800 hover:bg-orange-50 whitespace-nowrap shrink-0"
+                >
+                  <RefreshCw className="h-3 w-3" />
+                  Recalculer auto
+                </button>
+              </div>
             </div>
 
             <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">

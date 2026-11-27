@@ -55,6 +55,9 @@ export interface FicheEntreprise {
   restoredByName?: string;
   restoredAt?: string;
   restoredReason?: string;
+  optOut?: boolean;
+  optOutAt?: string;
+  optOutReason?: string;
 }
 
 export interface CrawlLog {

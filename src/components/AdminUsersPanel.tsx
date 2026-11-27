@@ -53,12 +53,15 @@ import {
   fetchCloudRtcIceConfig,
   fetchUserAttendanceSessions,
   getCurrentUserIdToken,
+  recordSecurityAuditLog,
   requestPasswordReset,
   setOrLinkAccountPassword,
   type AttendanceSessionRecord,
   type CloudApiKeyRecord,
   type UserPresenceRecord,
 } from '../firebase';
+import { OrgGovernanceSecurityPanel } from './OrgGovernanceSecurityPanel';
+import { DEFAULT_ORG_SETTINGS, type OrgSettingsConfig } from '../utils/securityHardening';
 import {
   FIREBASE_PROJECT_ID,
   MANAGED_ROLE_OPTIONS,
@@ -133,11 +136,12 @@ function maskApiKey(raw: string): string {
   return `${s.slice(0, 5)}••••••${s.slice(-4)}`;
 }
 
-export type AdminPanelSection = 'all' | 'users' | 'attendance' | 'vault';
+export type AdminPanelSection = 'all' | 'users' | 'attendance' | 'vault' | 'security';
 
 interface AdminUsersPanelProps {
   adminUid: string;
   adminEmail: string;
+  adminDisplayName?: string;
   adminHasPasswordProvider: boolean;
   users: ManagedAppUser[];
   teamStats?: TeamStatRecord[];
@@ -156,12 +160,15 @@ interface AdminUsersPanelProps {
   onRequestMyGpsRefresh?: () => Promise<void> | void;
   onForceRefreshPresencesFromServer?: () => Promise<number>;
   onOpenLocalApiHub?: () => void;
+  orgSettings?: OrgSettingsConfig;
+  onOrgSettingsSaved?: (next: OrgSettingsConfig) => void;
   onNotify: (msg: string, type?: 'ok' | 'warn' | 'err') => void;
 }
 
 export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
   adminUid,
   adminEmail,
+  adminDisplayName,
   adminHasPasswordProvider,
   users,
   teamStats = [],
@@ -177,6 +184,8 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
   onRequestMyGpsRefresh,
   onForceRefreshPresencesFromServer,
   onOpenLocalApiHub,
+  orgSettings = DEFAULT_ORG_SETTINGS,
+  onOrgSettingsSaved,
   onNotify,
 }) => {
   const [internalSection, setInternalSection] = useState<AdminPanelSection>('all');
@@ -188,6 +197,7 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
   const showUsersSection = currentSection === 'all' || currentSection === 'users';
   const showAttendanceSection = currentSection === 'all' || currentSection === 'attendance';
   const showVaultSection = currentSection === 'all' || currentSection === 'vault';
+  const showSecuritySection = currentSection === 'all' || currentSection === 'security';
   const [showVaultRulesPreview, setShowVaultRulesPreview] = useState(false);
   // Formulaire de création d'utilisateur
   const [displayName, setDisplayName] = useState('');
@@ -411,6 +421,19 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
         providerLabel: turnProviderLabel.trim() || 'Relais TURN 4G/5G Maroc',
       });
       setTurnUpdatedAtIso(saved.updatedAtIso);
+      const resolvedProviderLabel = turnProviderLabel.trim() || 'Relais TURN 4G/5G Maroc';
+      const resolvedTurnEnabled = Boolean(turnEnabled && cleanUrls);
+      void recordSecurityAuditLog({
+        actorUid: adminUid,
+        actorName: adminDisplayName || 'Super-Admin',
+        actorRole: 'super_admin',
+        category: 'vault_config',
+        action: 'rtc_turn_config_saved',
+        severity: 'warn',
+        targetUid: 'rtc_ice',
+        targetLabel: resolvedProviderLabel,
+        summary: `Relais TURN ${resolvedTurnEnabled ? 'activé' : 'désactivé'} (/app_config/rtc_ice)`,
+      });
       onNotify('Configuration Serveur TURN WebRTC enregistrée dans Firestore (/app_config/rtc_ice).');
     } catch (err) {
       onNotify(
@@ -809,6 +832,17 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
       setPhonePro('');
       setSelectedInitialRoleBadges([]);
       setPassword(generateStrongTempPassword(12));
+      void recordSecurityAuditLog({
+        actorUid: adminUid,
+        actorName: adminDisplayName || 'Super-Admin',
+        actorRole: 'super_admin',
+        category: 'access_control',
+        action: 'user_created',
+        severity: 'warn',
+        targetUid: created.uid,
+        targetLabel: `${created.displayName} (${created.email})`,
+        summary: `Création utilisateur · rôle=${created.role} · zone=${zone}`,
+      });
       onNotify(
         `Utilisateur ${created.displayName} (${created.email}) créé avec un portefeuille initial vide. Email de vérification envoyé.`
       );
@@ -842,6 +876,17 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
         zone: u.zone,
         active: !u.active,
       });
+      void recordSecurityAuditLog({
+        actorUid: adminUid,
+        actorName: adminDisplayName || 'Super-Admin',
+        actorRole: 'super_admin',
+        category: 'access_control',
+        action: !u.active ? 'user_reactivated' : 'user_suspended',
+        severity: 'warn',
+        targetUid: u.uid,
+        targetLabel: `${u.displayName} (${u.email})`,
+        summary: !u.active ? 'Compte réactivé' : 'Compte suspendu immédiatement',
+      });
       onNotify(
         !u.active
           ? `Accès réactivé pour ${u.displayName}.`
@@ -863,6 +908,17 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
         role: nextRole,
         zone: u.zone,
         active: u.active,
+      });
+      void recordSecurityAuditLog({
+        actorUid: adminUid,
+        actorName: adminDisplayName || 'Super-Admin',
+        actorRole: 'super_admin',
+        category: 'access_control',
+        action: 'user_role_changed',
+        severity: 'warn',
+        targetUid: u.uid,
+        targetLabel: `${u.displayName} (${u.email})`,
+        summary: `Changement de rôle : ${u.role} → ${nextRole}`,
       });
       onNotify(`Rôle mis à jour pour ${u.displayName}.`);
     } catch {
@@ -897,6 +953,17 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
         role: 'manager',
         zone: u.zone,
         active: true,
+      });
+      void recordSecurityAuditLog({
+        actorUid: adminUid,
+        actorName: adminDisplayName || 'Super-Admin',
+        actorRole: 'super_admin',
+        category: 'access_control',
+        action: 'user_supervisor_granted',
+        severity: 'critical',
+        targetUid: u.uid,
+        targetLabel: `${u.displayName} (${u.email})`,
+        summary: 'Attribution privilèges Superviseur Élite / Manager',
       });
       onNotify(
         `Privilèges Superviseur Élite / Direction attribués à ${u.displayName} (rôle Manager + badges officiels de supervision).`
@@ -981,6 +1048,17 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
     try {
       await adminDeleteManagedUser(u.uid);
       setConfirmDeleteUid(null);
+      void recordSecurityAuditLog({
+        actorUid: adminUid,
+        actorName: adminDisplayName || 'Super-Admin',
+        actorRole: 'super_admin',
+        category: 'access_control',
+        action: 'user_deleted',
+        severity: 'critical',
+        targetUid: u.uid,
+        targetLabel: `${u.displayName} (${u.email})`,
+        summary: 'Suppression définitive de l’accès collaborateur',
+      });
       onNotify(`Accès retiré pour ${u.displayName} (${u.email}).`);
     } catch {
       onNotify('Impossible de retirer cet utilisateur.', 'err');
@@ -1091,6 +1169,17 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
       setApiProvider(resolvedProvider);
       setApiKeyInput('');
       setVaultDetectedInfo(null);
+      void recordSecurityAuditLog({
+        actorUid: adminUid,
+        actorName: adminDisplayName || 'Super-Admin',
+        actorRole: 'super_admin',
+        category: 'vault_config',
+        action: 'vault_key_saved',
+        severity: 'warn',
+        targetUid: resolvedProvider,
+        targetLabel: providerMeta?.label || resolvedProvider,
+        summary: `Clé API enregistrée dans le Coffre Cloud (/api_keys/${resolvedProvider})`,
+      });
       onNotify(
         `Clé "${providerMeta?.label || resolvedProvider}" détectée et sauvegardée dans le Coffre Cloud sécurisé.`
       );
@@ -1121,6 +1210,17 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
         throw new Error(delData?.error || `Erreur serveur (HTTP ${delRes.status}).`);
       }
       await onRefreshCloudApiKeys?.();
+      void recordSecurityAuditLog({
+        actorUid: adminUid,
+        actorName: adminDisplayName || 'Super-Admin',
+        actorRole: 'super_admin',
+        category: 'vault_config',
+        action: 'vault_key_deleted',
+        severity: 'critical',
+        targetUid: provider,
+        targetLabel: provider,
+        summary: `Clé API supprimée du Coffre Cloud (/api_keys/${provider})`,
+      });
       onNotify(`Clé API "${provider}" supprimée du Coffre Cloud.`);
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Impossible de supprimer cette clé API.';
@@ -1457,6 +1557,7 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
               { id: 'users', label: `Comptes & Rôles (${stats.total})` },
               { id: 'attendance', label: `Suivi & Pointage (${attendanceSummary.totalMembers})` },
               { id: 'vault', label: `Coffre /api_keys/{provider} (${cloudApiKeys.length})` },
+              { id: 'security', label: 'Gouvernance & Sécurité / DLP' },
             ] as Array<{ id: AdminPanelSection; label: string }>
           ).map((tab) => {
             const active = currentSection === tab.id;
@@ -4132,6 +4233,17 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
           )}
         </div>
       </div>
+      )}
+
+      {showSecuritySection && (
+        <OrgGovernanceSecurityPanel
+          adminUid={adminUid}
+          adminName={adminDisplayName || 'Super-Admin'}
+          orgSettings={orgSettings}
+          turnConfiguredCloud={Boolean(turnEnabled && turnUrlsInput.trim())}
+          onOrgSettingsSaved={onOrgSettingsSaved}
+          onNotify={onNotify}
+        />
       )}
     </section>
   );

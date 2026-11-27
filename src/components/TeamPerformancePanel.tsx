@@ -60,6 +60,8 @@ import {
   getRecentMonthKeys,
 } from '../utils/directionReport';
 import { fetchTeamAttendanceSessionsForMonth } from '../firebase';
+import type { OrgSettingsConfig } from '../utils/securityHardening';
+import { PipelineForecastBar } from './PipelineForecastBar';
 
 interface TeamPerformancePanelProps {
   currentUserUid: string;
@@ -72,6 +74,8 @@ interface TeamPerformancePanelProps {
   initialSubView?: 'leaderboard' | 'portfolios';
   initialSelectedUid?: string;
   workspaceLegal?: WorkspaceLegalInfo;
+  orgSettings?: OrgSettingsConfig | null;
+  monthlyGoalPayoutMad?: number;
   onNotify?: (msg: string, type?: 'ok' | 'err' | 'warn') => void;
   onAdminUpdateContract?: (
     contractId: string,
@@ -114,6 +118,8 @@ export const TeamPerformancePanel: React.FC<TeamPerformancePanelProps> = ({
   initialSubView = 'leaderboard',
   initialSelectedUid,
   workspaceLegal,
+  orgSettings,
+  monthlyGoalPayoutMad = 15000,
   onNotify,
   onAdminUpdateContract,
   onJumpToBadges,
@@ -477,6 +483,13 @@ export const TeamPerformancePanel: React.FC<TeamPerformancePanelProps> = ({
         />
       ) : (
       <>
+      {currentUserFiches.length > 0 && (
+        <PipelineForecastBar
+          fiches={currentUserFiches}
+          monthlyGoalPayoutMad={monthlyGoalPayoutMad}
+          orgSettings={orgSettings}
+        />
+      )}
       {/* Encart Rapport Direction & Bordereau de Commissions Mensuel (PDF + Excel CSV) — RBAC strict canManageContracts */}
       {canManageContracts && (
         <section

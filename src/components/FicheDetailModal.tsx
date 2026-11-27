@@ -29,6 +29,9 @@ import {
   RotateCcw,
   Navigation,
   AlertTriangle,
+  Ban,
+  Flame,
+  ShieldAlert,
 } from 'lucide-react';
 import {
   SECTEURS_META,
@@ -61,6 +64,9 @@ import type {
   SanitizedFicheAuditLogDoc,
 } from '../utils/firestoreSanitize';
 import { fetchFicheActivites, fetchFicheAuditLogs } from '../firebase';
+import { toSafeExternalHttpUrl } from '../utils/securityHardening';
+import { computeDealRotting, computeLeadScore } from '../utils/salesIntelligence';
+import type { AdvancedAccountPreferences } from '../utils/accountPreferences';
 
 const AUDIT_ACTION_META: Record<
   FicheAuditAction,
@@ -104,6 +110,9 @@ interface FicheDetailModalProps {
   onOpenAssign?: (fiche: FicheEntreprise, ownerUid: string) => void;
   onOpenRestore?: (fiche: FicheEntreprise, ownerUid: string) => void;
   onCopyText: (value: string, label: string) => void;
+  enforceCndpOptOutLock?: boolean;
+  rottingThreshold?: AdvancedAccountPreferences['followUpAlertDelay'] | number;
+  onToggleOptOut?: (fiche: FicheEntreprise, nextOptOut: boolean, reason: string) => void;
 }
 
 function buildWhatsAppNumber(rawPhone?: string): string {
@@ -139,11 +148,16 @@ export const FicheDetailModal: React.FC<FicheDetailModalProps> = ({
   onOpenAssign,
   onOpenRestore,
   onCopyText,
+  enforceCndpOptOutLock = true,
+  rottingThreshold = '48h',
+  onToggleOptOut,
 }) => {
   const [activites, setActivites] = useState<SanitizedActiviteDoc[]>([]);
   const [auditLogs, setAuditLogs] = useState<SanitizedFicheAuditLogDoc[]>([]);
   const [loadingActivites, setLoadingActivites] = useState(false);
   const [historyFilter, setHistoryFilter] = useState<'all' | 'audit' | 'activites'>('all');
+  const [optOutPromptMode, setOptOutPromptMode] = useState<null | 'enable' | 'disable'>(null);
+  const [optOutReasonInput, setOptOutReasonInput] = useState('');
   const resolvedOwnerUid = ficheOwnerUid || currentUserUid;
   const hasSupervision = isSuperAdmin || canSuperviseTeam;
 
@@ -192,6 +206,10 @@ export const FicheDetailModal: React.FC<FicheDetailModalProps> = ({
   )}`;
   const hasAberrantEffectif = isEffectifAberrant(fiche.effectif);
   const isLockedSigned = fiche.statut === 'Signé Orange Pro' && !hasSupervision;
+  const leadScore = computeLeadScore(fiche);
+  const rotting = computeDealRotting(fiche, rottingThreshold);
+  const safeSiteUrl = toSafeExternalHttpUrl(fiche.siteWeb);
+  const isOptOutLocked = Boolean(fiche.optOut && enforceCndpOptOutLock);
 
   const extraPhones = fiche.telephonesSupplementaires || [];
   const extraEmails = fiche.emailsSupplementaires || [];
@@ -323,6 +341,31 @@ export const FicheDetailModal: React.FC<FicheDetailModalProps> = ({
                     Dossier signé verrouillé
                   </span>
                 )}
+
+                <span
+                  data-testid="fiche-detail-lead-score"
+                  title={leadScore.reasons.join(' · ')}
+                  className={`inline-flex items-center gap-1 rounded-md border px-2 py-0.5 text-[11px] font-bold tabular-nums ${
+                    leadScore.grade === 'A'
+                      ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+                      : leadScore.grade === 'B'
+                        ? 'bg-amber-50 border-amber-200 text-amber-800'
+                        : 'bg-stone-100 border-stone-200 text-stone-700'
+                  }`}
+                >
+                  Score {leadScore.grade} · {leadScore.score}/100
+                </span>
+
+                {rotting.isRotting && (
+                  <span
+                    data-testid="fiche-detail-rotting-badge"
+                    className="inline-flex items-center gap-1 rounded-md border border-red-200 bg-red-50 px-2 py-0.5 text-[11px] font-bold text-red-700"
+                    title={`Affaire sans action depuis ${rotting.elapsedHours}h (seuil SLA : ${rotting.thresholdHours}h)`}
+                  >
+                    <Flame className="w-3 h-3" />
+                    {rotting.label}
+                  </span>
+                )}
               </div>
             </div>
 
@@ -335,6 +378,95 @@ export const FicheDetailModal: React.FC<FicheDetailModalProps> = ({
               <X className="w-4 h-4" />
             </button>
           </div>
+
+          {/* Bandeau Conformité Loi 09-08 CNDP — Liste Rouge */}
+          {fiche.optOut && (
+            <div
+              data-testid="fiche-cndp-optout-banner"
+              className="mt-3 rounded-xl border border-red-300 bg-red-50 px-3.5 py-2.5 flex flex-wrap items-center justify-between gap-2 text-xs text-red-900"
+            >
+              <div className="flex items-start gap-2 min-w-0">
+                <ShieldAlert className="w-4 h-4 text-red-600 shrink-0 mt-0.5" />
+                <div>
+                  <div className="font-bold">
+                    Prospect sur Liste Rouge — Ne plus contacter (Loi 09-08 CNDP)
+                  </div>
+                  <div className="text-[11px] text-red-800/90 mt-0.5">
+                    {fiche.optOutReason ? `Motif : ${fiche.optOutReason}` : 'Opposition enregistrée.'}
+                    {fiche.optOutAt ? ` · Le ${formatAuditDateTimeFr(fiche.optOutAt)}` : ''}
+                    {isOptOutLocked ? ' · Raccourcis Email & WhatsApp verrouillés.' : ''}
+                  </div>
+                </div>
+              </div>
+              {onToggleOptOut && (
+                <button
+                  type="button"
+                  data-testid="fiche-cndp-lift-btn"
+                  onClick={() => {
+                    setOptOutPromptMode('disable');
+                    setOptOutReasonInput('');
+                  }}
+                  className="px-2.5 py-1 rounded-lg border border-red-300 bg-white hover:bg-red-100 text-[11px] font-bold text-red-800 shrink-0"
+                >
+                  Lever la Liste Rouge (motif tracé)
+                </button>
+              )}
+            </div>
+          )}
+
+          {optOutPromptMode && onToggleOptOut && (
+            <form
+              onSubmit={(e) => {
+                e.preventDefault();
+                const cleanReason = optOutReasonInput.trim();
+                if (!cleanReason) return;
+                onToggleOptOut(fiche, optOutPromptMode === 'enable', cleanReason);
+                setOptOutPromptMode(null);
+                setOptOutReasonInput('');
+              }}
+              className="mt-3 rounded-xl border border-stone-300 bg-stone-50 p-3 space-y-2"
+            >
+              <div className="text-xs font-bold text-stone-900">
+                {optOutPromptMode === 'enable'
+                  ? 'Placer ce prospect sur Liste Rouge (CNDP Loi 09-08)'
+                  : 'Lever la Liste Rouge (action tracée dans le journal sécurité)'}
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <input
+                  type="text"
+                  required
+                  value={optOutReasonInput}
+                  onChange={(e) => setOptOutReasonInput(e.target.value)}
+                  placeholder={
+                    optOutPromptMode === 'enable'
+                      ? 'Ex : Demande expresse du dirigeant lors de l’appel'
+                      : 'Ex : Nouvel accord écrit reçu par email du décideur'
+                  }
+                  className="flex-1 min-w-[200px] px-2.5 py-1.5 rounded-lg border border-stone-300 bg-white text-xs text-stone-900 focus:outline-none focus:border-orange-600"
+                />
+                <button
+                  type="submit"
+                  className={`px-3 py-1.5 rounded-lg text-xs font-bold text-white ${
+                    optOutPromptMode === 'enable'
+                      ? 'bg-red-600 hover:bg-red-700'
+                      : 'bg-emerald-700 hover:bg-emerald-800'
+                  }`}
+                >
+                  Confirmer
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setOptOutPromptMode(null);
+                    setOptOutReasonInput('');
+                  }}
+                  className="px-2.5 py-1.5 rounded-lg border border-stone-300 bg-white text-xs font-semibold text-stone-700 hover:bg-stone-100"
+                >
+                  Annuler
+                </button>
+              </div>
+            </form>
+          )}
 
           {/* Action Bar — PDF Generation & Key Commercial Workflows */}
           <div className="mt-4 pt-3 border-t border-stone-100 flex flex-wrap items-center gap-2">
@@ -368,8 +500,10 @@ export const FicheDetailModal: React.FC<FicheDetailModalProps> = ({
 
             <button
               type="button"
+              disabled={isOptOutLocked}
               onClick={() => onOpenEmail(fiche)}
-              className="inline-flex items-center gap-1.5 rounded-lg border border-stone-300 bg-white hover:bg-stone-50 px-2.5 py-1.5 text-xs font-semibold text-stone-800 transition-colors"
+              title={isOptOutLocked ? 'Verrouillé : prospect sur Liste Rouge CNDP' : 'Ouvrir Studio Email IA'}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-stone-300 bg-white hover:bg-stone-50 disabled:opacity-45 disabled:cursor-not-allowed px-2.5 py-1.5 text-xs font-semibold text-stone-800 transition-colors"
             >
               <Mail className="w-3.5 h-3.5 text-blue-600" />
               Studio Email IA
@@ -402,6 +536,21 @@ export const FicheDetailModal: React.FC<FicheDetailModalProps> = ({
               <Globe className="w-3.5 h-3.5" />
               Enrichir
             </button>
+
+            {onToggleOptOut && !fiche.optOut && (
+              <button
+                type="button"
+                data-testid="fiche-cndp-optout-btn"
+                onClick={() => {
+                  setOptOutPromptMode('enable');
+                  setOptOutReasonInput('');
+                }}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-red-200 bg-red-50 hover:bg-red-100 px-2.5 py-1.5 text-xs font-semibold text-red-800 transition-colors"
+              >
+                <Ban className="w-3.5 h-3.5" />
+                Liste Rouge (CNDP)
+              </button>
+            )}
 
             {hasSupervision && onOpenAssign && (
               <button
@@ -655,14 +804,20 @@ export const FicheDetailModal: React.FC<FicheDetailModalProps> = ({
                   <div className="min-w-0">
                     <div className="text-[11px] text-stone-500">Site Web</div>
                     {fiche.siteWeb ? (
-                      <a
-                        href={fiche.siteWeb.startsWith('http') ? fiche.siteWeb : `https://${fiche.siteWeb}`}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="font-semibold text-orange-700 hover:underline break-all"
-                      >
-                        {fiche.siteWeb}
-                      </a>
+                      safeSiteUrl ? (
+                        <a
+                          href={safeSiteUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="font-semibold text-orange-700 hover:underline break-all"
+                        >
+                          {fiche.siteWeb}
+                        </a>
+                      ) : (
+                        <span className="font-mono text-xs text-stone-500 break-all" title="URL bloquée (protocole non sécurisé)">
+                          {fiche.siteWeb}
+                        </span>
+                      )
                     ) : (
                       <span className="text-stone-400 italic">Non renseigné</span>
                     )}
@@ -684,7 +839,7 @@ export const FicheDetailModal: React.FC<FicheDetailModalProps> = ({
                         >
                           Appeler
                         </a>
-                        {waNumber && (
+                        {waNumber && !isOptOutLocked && (
                           <a
                             href={`https://wa.me/${waNumber}`}
                             target="_blank"
@@ -694,6 +849,12 @@ export const FicheDetailModal: React.FC<FicheDetailModalProps> = ({
                             <MessageSquare className="w-3 h-3" />
                             WhatsApp
                           </a>
+                        )}
+                        {waNumber && isOptOutLocked && (
+                          <span className="inline-flex items-center gap-0.5 text-[11px] font-semibold text-red-600">
+                            <Ban className="w-3 h-3" />
+                            WhatsApp bloqué (CNDP)
+                          </span>
                         )}
                         <button
                           type="button"
@@ -1059,7 +1220,7 @@ export const FicheDetailModal: React.FC<FicheDetailModalProps> = ({
               </span>
             )}
 
-            {waNumber ? (
+            {waNumber && !isOptOutLocked ? (
               <a
                 href={`https://wa.me/${waNumber}`}
                 target="_blank"
@@ -1071,9 +1232,12 @@ export const FicheDetailModal: React.FC<FicheDetailModalProps> = ({
                 <span>WhatsApp</span>
               </a>
             ) : (
-              <span className="min-h-[44px] rounded-xl bg-stone-100 text-stone-400 flex flex-col items-center justify-center gap-0.5 text-[11px] font-semibold">
+              <span
+                title={isOptOutLocked ? 'Bloqué : Liste Rouge CNDP' : 'WhatsApp indisponible'}
+                className="min-h-[44px] rounded-xl bg-stone-100 text-stone-400 flex flex-col items-center justify-center gap-0.5 text-[11px] font-semibold"
+              >
                 <MessageSquare className="w-4 h-4" />
-                <span>WhatsApp</span>
+                <span>{isOptOutLocked ? 'Bloqué' : 'WhatsApp'}</span>
               </span>
             )}
 

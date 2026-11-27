@@ -32,6 +32,9 @@ import {
   extractVisibleTextFromHtml,
   parseJsonObjectFromLlmText,
   detectHtmlCharset,
+  checkAndIncrementApiIpRateLimit,
+  GLOBAL_API_IP_PER_MINUTE_LIMIT,
+  isAllowedSameOriginRequest,
 } from './src/utils/aiRateLimiter.ts';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -372,24 +375,146 @@ async function authenticateAndRateLimitCrawlCaller(
 
 async function startServer() {
   const app = express();
+  const isProduction = process.env.NODE_ENV === 'production';
+  app.disable('x-powered-by');
   app.use(express.json({ limit: '2mb' }));
 
-  // 0. Healthcheck & WebRTC ICE/TURN Servers Configuration
-  app.get('/api/health', (_req, res) => {
-    const aiAvailable = isValidConfiguredKey(process.env.GEMINI_API_KEY);
-    const smtpRequired = ['SMTP_HOST', 'SMTP_PORT', 'SMTP_USER', 'SMTP_PASS', 'SMTP_FROM'] as const;
-    const emailAvailable = smtpRequired.every((k) => Boolean(process.env[k]?.trim()));
-    res.json({
-      ok: true,
-      status: 'healthy',
-      aiAvailable,
-      aiModel: AI_MODEL,
-      emailAvailable,
-      timestamp: new Date().toISOString(),
-    });
+  // OWASP Security Headers & CSP Middleware (compatible Firebase, Google Fonts, OSM/ArcGIS, TURN & Vite dev)
+  app.use((req, res, next) => {
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+    res.setHeader(
+      'Permissions-Policy',
+      'camera=(), payment=(), usb=(), geolocation=(self), microphone=(self)'
+    );
+    res.setHeader('Cross-Origin-Opener-Policy', 'same-origin-allow-popups');
+    if (isProduction || req.path.startsWith('/api/')) {
+      res.setHeader('X-Frame-Options', 'DENY');
+    }
+    if (isProduction || req.secure || req.headers['x-forwarded-proto'] === 'https') {
+      res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+    }
+    const scriptSrc = isProduction
+      ? "'self' 'unsafe-inline' https://apis.google.com https://www.gstatic.com"
+      : "'self' 'unsafe-inline' 'unsafe-eval' https://apis.google.com https://www.gstatic.com";
+    const connectSrc = [
+      "'self'",
+      'https://*.googleapis.com',
+      'https://*.firebaseio.com',
+      'https://*.firebaseapp.com',
+      'https://identitytoolkit.googleapis.com',
+      'https://securetoken.googleapis.com',
+      'https://firestore.googleapis.com',
+      'https://fonts.googleapis.com',
+      'https://fonts.gstatic.com',
+      'https://*.tile.openstreetmap.org',
+      'https://server.arcgisonline.com',
+      'https://*.metered.live',
+      'https://api.groq.com',
+      'https://api.mistral.ai',
+      'https://openrouter.ai',
+      'https://api.openai.com',
+      'https://api.deepseek.com',
+      'https://api.anthropic.com',
+      'https://api.tavily.com',
+      'https://generativelanguage.googleapis.com',
+      'wss://*.firebaseio.com',
+      ...(isProduction ? [] : ['ws:', 'wss:']),
+    ].join(' ');
+    const cspDirectives = [
+      "default-src 'self'",
+      `script-src ${scriptSrc}`,
+      "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+      "font-src 'self' data: https://fonts.gstatic.com",
+      "img-src 'self' data: blob: https://*.tile.openstreetmap.org https://server.arcgisonline.com https://*.googleusercontent.com https://lh3.googleusercontent.com",
+      `connect-src ${connectSrc}`,
+      "frame-src 'self' https://*.firebaseapp.com https://accounts.google.com",
+      "media-src 'self' blob:",
+      "object-src 'none'",
+      "base-uri 'self'",
+      ...(isProduction ? ["frame-ancestors 'none'"] : []),
+    ];
+    res.setHeader('Content-Security-Policy', cspDirectives.join('; '));
+    next();
   });
 
-  app.get('/api/rtc/ice-servers', async (_req, res) => {
+  // Global IP Rate-Limiter (120 req/min/IP) + Lightweight Anti-CSRF Check on /api/*
+  app.use('/api', (req, res, next) => {
+    const forwardedFor = req.headers['x-forwarded-for'];
+    const clientIp =
+      (Array.isArray(forwardedFor)
+        ? forwardedFor[0]
+        : typeof forwardedFor === 'string'
+          ? forwardedFor.split(',')[0]
+          : req.ip || req.socket.remoteAddress || 'unknown'
+      ).trim();
+
+    const ipRate = checkAndIncrementApiIpRateLimit(clientIp, GLOBAL_API_IP_PER_MINUTE_LIMIT);
+    if (!ipRate.allowed) {
+      res.setHeader('Retry-After', String(ipRate.retryAfterSeconds));
+      res.status(429).json({
+        error: `Trop de requêtes API depuis cette adresse IP (${GLOBAL_API_IP_PER_MINUTE_LIMIT} req/min max). Veuillez patienter ${ipRate.retryAfterSeconds}s.`,
+        limit: ipRate.limit,
+        remaining: 0,
+      });
+      return;
+    }
+
+    if (req.method === 'POST' || req.method === 'DELETE') {
+      const origin = typeof req.headers.origin === 'string' ? req.headers.origin : undefined;
+      const referer = typeof req.headers.referer === 'string' ? req.headers.referer : undefined;
+      const host = typeof req.headers.host === 'string' ? req.headers.host : undefined;
+      if (!isAllowedSameOriginRequest(origin, referer, host)) {
+        res.status(403).json({
+          error: 'Requête inter-origines refusée (contrôle anti-CSRF Origin/Referer).',
+        });
+        return;
+      }
+    }
+
+    next();
+  });
+
+  // 0. Healthcheck & Authenticated WebRTC ICE/TURN Servers Configuration
+  app.get('/api/health', async (req, res) => {
+    const basePayload = {
+      ok: true,
+      status: 'healthy',
+      timestamp: new Date().toISOString(),
+    };
+
+    const authHeader = req.headers.authorization || '';
+    const match = /^Bearer\s+(.+)$/i.exec(authHeader.trim());
+    if (match?.[1]) {
+      try {
+        const services = getFirebaseAdminServices();
+        if (services) {
+          const decoded = await services.adminAuth.verifyIdToken(match[1].trim());
+          if (decoded?.uid) {
+            const aiAvailable = isValidConfiguredKey(process.env.GEMINI_API_KEY);
+            const smtpRequired = ['SMTP_HOST', 'SMTP_PORT', 'SMTP_USER', 'SMTP_PASS', 'SMTP_FROM'] as const;
+            const emailAvailable = smtpRequired.every((k) => Boolean(process.env[k]?.trim()));
+            res.json({
+              ...basePayload,
+              aiAvailable,
+              aiModel: AI_MODEL,
+              emailAvailable,
+            });
+            return;
+          }
+        }
+      } catch {
+        // Invalid/expired token on healthcheck: return minimal public payload only
+      }
+    }
+
+    res.json(basePayload);
+  });
+
+  app.get('/api/rtc/ice-servers', async (req, res) => {
+    const caller = await authenticateVerifiedCaller(req, res, 'le relais audio WebRTC');
+    if (!caller) return;
+
     const iceServers: Array<{
       urls: string | string[];
       username?: string;
@@ -1302,8 +1427,11 @@ Produis un audit structuré, actionnable immédiatement sur le terrain (Meknès 
     });
   });
 
-  // 10. LOT 3: Statut de la configuration SMTP serveur (sans exposer de secrets)
-  app.get('/api/email/status', (_req, res) => {
+  // 10. LOT 3: Statut de la configuration SMTP serveur (protégé par jeton vérifié, sans exposer de secrets)
+  app.get('/api/email/status', async (req, res) => {
+    const caller = await authenticateVerifiedCaller(req, res, 'le statut SMTP');
+    if (!caller) return;
+
     const required = ['SMTP_HOST', 'SMTP_PORT', 'SMTP_USER', 'SMTP_PASS', 'SMTP_FROM'] as const;
     const missing = required.filter((key) => !process.env[key] || !process.env[key]!.trim());
     const available = missing.length === 0;

@@ -16,7 +16,7 @@ export type CrmTabId =
   | 'admin'
   | 'vault';
 
-export type AdminSubSectionId = 'all' | 'users' | 'attendance' | 'vault';
+export type AdminSubSectionId = 'all' | 'users' | 'attendance' | 'vault' | 'security';
 
 export interface CrmRouteState {
   tab: CrmTabId;
@@ -117,6 +117,12 @@ const ADMIN_SUBSECTION_ALIASES: Record<string, AdminSubSectionId> = {
   overview: 'all',
   global: 'all',
   'vue-globale': 'all',
+
+  security: 'security',
+  securite: 'security',
+  gouvernance: 'security',
+  dlp: 'security',
+  audit: 'security',
 };
 
 /**
@@ -179,6 +185,7 @@ export function buildHashFromRoute(
     if (adminSubSection === 'users') return '#/admin/utilisateurs';
     if (adminSubSection === 'attendance') return '#/admin/radar';
     if (adminSubSection === 'vault') return '#/vault';
+    if (adminSubSection === 'security') return '#/admin/securite';
     if (adminSubSection === 'all') return '#/admin';
     return '#/admin';
   }
@@ -316,6 +323,13 @@ export function getRouteBreadcrumb(
           sectionLabel: 'Administration',
           tabLabel: 'Console Super-Admin',
           subLabel: 'Radar GPS & Présence Terrain',
+        };
+      }
+      if (adminSubSection === 'security') {
+        return {
+          sectionLabel: 'Administration',
+          tabLabel: 'Console Super-Admin',
+          subLabel: 'Gouvernance & Centre Sécurité / DLP',
         };
       }
       return {

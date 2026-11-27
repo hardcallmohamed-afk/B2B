@@ -53,6 +53,9 @@ import {
   RotateCcw,
   MoreVertical,
   LayoutGrid,
+  Ban,
+  Flame,
+  ShieldAlert,
 } from 'lucide-react';
 import { onAuthStateChanged, type User } from 'firebase/auth';
 import { doc, onSnapshot, query, where } from 'firebase/firestore';
@@ -78,6 +81,7 @@ import type {
 import { CollaboratorChatWidget } from './components/CollaboratorChatWidget';
 import { PWAInstallButton } from './components/PWAInstallButton';
 import { OfflineSyncBanner } from './components/OfflineSyncBanner';
+import { IdleLockOverlay } from './components/IdleLockOverlay';
 import type { PortfolioFicheItem } from './components/TeamPortfoliosPanel';
 import {
   applySafeHygieneFixesToFiche,
@@ -197,6 +201,9 @@ import { isVaultOrMaskedApiKey } from './utils/aiRateLimiter';
 import {
   extractPersistedFicheFields,
   loadAdvancedAccountPrefs,
+  saveAdvancedAccountPrefs,
+  parseAdvancedAccountPrefsJson,
+  serializeAdvancedAccountPrefsJson,
   formatFicheNumeroWithPrefix,
   getFollowUpAlertDelayMs,
   formatEmailBodyWithOptionalPhone,
@@ -204,6 +211,12 @@ import {
   type AdvancedAccountPreferences,
   type WorkspaceLegalInfo,
 } from './utils/accountPreferences';
+import {
+  DEFAULT_ORG_SETTINGS,
+  sanitizeCsvCell,
+  type OrgSettingsConfig,
+} from './utils/securityHardening';
+import { computeDealRotting, computeLeadScore } from './utils/salesIntelligence';
 import { buildMemberContractSyncSummary } from './utils/clientProfiles';
 import {
   moveFicheToStatut,
@@ -323,6 +336,8 @@ import {
   getDirectChatChannelsQuery,
   getCoachingSessionsQuery,
   getCurrentUserIdToken,
+  recordSecurityAuditLog,
+  subscribeCloudOrgSettings,
   handleFirestoreError,
   OperationType,
   type CloudApiKeyRecord,
@@ -1313,7 +1328,12 @@ export function buildStrictCsv(fiches: FicheEntreprise[], delimiter: ';' | ',' =
   const altSep = delimiter === ';' ? ',' : ';';
   const rows = fiches.map((f) =>
     [f.societe, f.secteur, f.ville, f.telephone, f.email, f.contact, f.role, f.source, f.effectif]
-      .map((v) => String(v ?? '').split(delimiter).join(altSep).replace(/\r?\n/g, ' ').trim())
+      .map((v) =>
+        sanitizeCsvCell(
+          String(v ?? '').split(delimiter).join(altSep).replace(/\r?\n/g, ' ').trim(),
+          { delimiter }
+        )
+      )
       .join(delimiter)
   );
   return '\uFEFF' + [header, ...rows].join('\n');
@@ -2757,6 +2777,7 @@ export default function App() {
   const [userProfile, setUserProfile] = useState<UserProfileSettings>(DEFAULT_USER_PROFILE);
   const [advPrefs, setAdvPrefs] = useState<AdvancedAccountPreferences>(() => loadAdvancedAccountPrefs());
   currentPreferredAiProvider = advPrefs.preferredAiProvider;
+  const [orgSettings, setOrgSettings] = useState<OrgSettingsConfig>(DEFAULT_ORG_SETTINGS);
   const [smtpStatus, setSmtpStatus] = useState<{ configured: boolean; fromEmail: string }>({
     configured: false,
     fromEmail: '',
@@ -2765,10 +2786,18 @@ export default function App() {
 
   useEffect(() => {
     const onAdvPrefsChanged = (ev: Event) => {
-      const detail = (ev as CustomEvent<AdvancedAccountPreferences>).detail;
-      if (detail) {
-        setAdvPrefs(detail);
-        currentPreferredAiProvider = detail.preferredAiProvider;
+      const detail = (
+        ev as CustomEvent<
+          AdvancedAccountPreferences | { uid?: string; prefs?: AdvancedAccountPreferences }
+        >
+      ).detail;
+      const nextPrefs =
+        detail && typeof detail === 'object' && 'prefs' in detail && detail.prefs
+          ? detail.prefs
+          : (detail as AdvancedAccountPreferences | undefined);
+      if (nextPrefs && typeof nextPrefs === 'object') {
+        setAdvPrefs(nextPrefs);
+        currentPreferredAiProvider = nextPrefs.preferredAiProvider;
       } else {
         const next = loadAdvancedAccountPrefs();
         setAdvPrefs(next);
@@ -2777,30 +2806,6 @@ export default function App() {
     };
     window.addEventListener('op-advanced-prefs-changed', onAdvPrefsChanged);
     return () => window.removeEventListener('op-advanced-prefs-changed', onAdvPrefsChanged);
-  }, []);
-
-  useEffect(() => {
-    if (isStaticHostingEnvironment()) return;
-    fetch('/api/email/status')
-      .then((r) => (r.ok ? r.json() : null))
-      .then(
-        (
-          d: {
-            available?: boolean;
-            configured?: boolean;
-            fromAddress?: string | null;
-            fromEmail?: string | null;
-          } | null
-        ) => {
-          if (d && (typeof d.available === 'boolean' || typeof d.configured === 'boolean')) {
-            setSmtpStatus({
-              configured: Boolean(d.available ?? d.configured),
-              fromEmail: String(d.fromAddress || d.fromEmail || ''),
-            });
-          }
-        }
-      )
-      .catch(() => {});
   }, []);
 
   const [profileMenuOpen, setProfileMenuOpen] = useState(false);
@@ -2947,13 +2952,23 @@ export default function App() {
   const defaultVille = villesState.defaultVille;
   const [newVilleInput, setNewVilleInput] = useState('');
 
-  // 3. Hub API Multi-Fournisseurs persistant (orange_pro_api_hub_v1, strictement local, jamais dans le backup JSON)
+  // 3. Hub API Multi-Fournisseurs éphémère (sessionStorage uniquement — purge automatique à la fermeture de l'onglet et jamais dans le backup JSON)
   const [apiKeys, setApiKeys] = useState<ApiKeyEntry[]>(() => {
     try {
-      const raw = window.localStorage.getItem(STORAGE_KEY_API_HUB);
-      if (raw) {
-        const parsed = JSON.parse(raw);
+      const sessionRaw = window.sessionStorage.getItem(STORAGE_KEY_API_HUB);
+      if (sessionRaw) {
+        const parsed = JSON.parse(sessionRaw);
         if (Array.isArray(parsed)) return parsed;
+      }
+      // Migration sécurisée unique depuis l'ancien localStorage puis purge immédiate
+      const legacyRaw = window.localStorage.getItem(STORAGE_KEY_API_HUB);
+      if (legacyRaw) {
+        window.localStorage.removeItem(STORAGE_KEY_API_HUB);
+        const parsed = JSON.parse(legacyRaw);
+        if (Array.isArray(parsed)) {
+          window.sessionStorage.setItem(STORAGE_KEY_API_HUB, JSON.stringify(parsed));
+          return parsed;
+        }
       }
     } catch {
       // Fallback
@@ -2963,7 +2978,12 @@ export default function App() {
 
   useEffect(() => {
     try {
-      window.localStorage.setItem(STORAGE_KEY_API_HUB, JSON.stringify(apiKeys));
+      if (apiKeys.length === 0) {
+        window.sessionStorage.removeItem(STORAGE_KEY_API_HUB);
+      } else {
+        window.sessionStorage.setItem(STORAGE_KEY_API_HUB, JSON.stringify(apiKeys));
+      }
+      window.localStorage.removeItem(STORAGE_KEY_API_HUB);
     } catch {
       // Ignore quota
     }
@@ -3098,7 +3118,10 @@ export default function App() {
   const [statutFilter, setStatutFilter] = useState<StatutCRM | ''>('');
   const [onlyReadyToCall, setOnlyReadyToCall] = useState(false);
   const [onlyBottlenecks, setOnlyBottlenecks] = useState(false);
-  const [sortField, setSortField] = useState<'societe' | 'ville' | 'effectif' | 'maturite' | 'velocite' | 'dateAjout'>('maturite');
+  const [onlyRotting, setOnlyRotting] = useState(false);
+  const [sortField, setSortField] = useState<
+    'societe' | 'ville' | 'effectif' | 'maturite' | 'leadScore' | 'velocite' | 'dateAjout'
+  >('maturite');
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
 
   // 5. Refs & Modales
@@ -3627,6 +3650,51 @@ export default function App() {
     () => getRoleCapabilities(currentUserRole, isSuperAdmin),
     [currentUserRole, isSuperAdmin]
   );
+
+  // Vérification authentifiée du statut SMTP serveur (/api/email/status)
+  useEffect(() => {
+    if (isStaticHostingEnvironment() || !cloudUser || !canAccessWorkspace) return;
+    let cancelled = false;
+    cloudUser
+      .getIdToken()
+      .then((idToken) =>
+        fetch('/api/email/status', {
+          headers: { Authorization: `Bearer ${idToken}` },
+        })
+      )
+      .then((r) => (r.ok ? r.json() : null))
+      .then(
+        (
+          d: {
+            available?: boolean;
+            configured?: boolean;
+            fromAddress?: string | null;
+            fromEmail?: string | null;
+          } | null
+        ) => {
+          if (cancelled || !d) return;
+          if (typeof d.available === 'boolean' || typeof d.configured === 'boolean') {
+            setSmtpStatus({
+              configured: Boolean(d.available ?? d.configured),
+              fromEmail: String(d.fromAddress || d.fromEmail || ''),
+            });
+          }
+        }
+      )
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [cloudUser, canAccessWorkspace]);
+
+  // Synchronisation temps réel de la Gouvernance Organisation (/app_config/org_settings)
+  useEffect(() => {
+    if (!cloudUser || !canAccessWorkspace) return;
+    const unsub = subscribeCloudOrgSettings((nextOrg) => {
+      setOrgSettings(nextOrg ?? DEFAULT_ORG_SETTINGS);
+    });
+    return () => unsub();
+  }, [cloudUser, canAccessWorkspace]);
 
   const extractShortCloudError = (err: unknown): string => {
     return parseFriendlyCloudError(err).shortTag;
@@ -5052,6 +5120,8 @@ export default function App() {
           : undefined,
         includePhoneOnlyDedup:
           typeof data.includePhoneOnlyDedup === 'boolean' ? data.includePhoneOnlyDedup : undefined,
+        advancedPrefsJson:
+          typeof data.advancedPrefsJson === 'string' ? data.advancedPrefsJson : undefined,
       });
       const nextHash = serializeDocCanonical(cleanWs as unknown as Record<string, unknown>);
       if (nextHash !== knownCloudWorkspaceHashRef.current) {
@@ -5077,7 +5147,20 @@ export default function App() {
           legalIce: cleanWs.legalIce ?? '',
           legalAdresse: cleanWs.legalAdresse ?? '',
           legalTelephone: cleanWs.legalTelephone ?? '',
+          advancedPrefsJson: cleanWs.advancedPrefsJson,
         });
+        if (cleanWs.advancedPrefsJson) {
+          const parsedCloudPrefs =
+            parseAdvancedAccountPrefsJson(cleanWs.advancedPrefsJson) ??
+            loadAdvancedAccountPrefs(uid);
+          setAdvPrefs(parsedCloudPrefs);
+          currentPreferredAiProvider = parsedCloudPrefs.preferredAiProvider;
+          saveAdvancedAccountPrefs(uid, parsedCloudPrefs);
+        } else {
+          const localPrefs = loadAdvancedAccountPrefs(uid);
+          setAdvPrefs(localPrefs);
+          currentPreferredAiProvider = localPrefs.preferredAiProvider;
+        }
         setDismissedDedupKeys(cleanWs.dismissedDedupKeys ?? []);
         setIncludePhoneOnlyDedup(cleanWs.includePhoneOnlyDedup ?? false);
       }
@@ -5524,6 +5607,7 @@ export default function App() {
       legalTelephone: userProfile.legalTelephone,
       dismissedDedupKeys,
       includePhoneOnlyDedup,
+      advancedPrefsJson: serializeAdvancedAccountPrefsJson(advPrefs),
     });
     const nextHash = serializeDocCanonical(payload as unknown as Record<string, unknown>);
     if (nextHash === knownCloudWorkspaceHashRef.current) return;
@@ -5540,6 +5624,7 @@ export default function App() {
     villesState,
     emailSignature,
     userProfile,
+    advPrefs,
     dismissedDedupKeys,
     includePhoneOnlyDedup,
     cloudUser,
@@ -5559,16 +5644,20 @@ export default function App() {
 
   const workspaceLegal = useMemo<WorkspaceLegalInfo>(
     () => ({
-      raisonSociale: userProfile.legalRaisonSociale,
-      ice: userProfile.legalIce,
-      adresse: userProfile.legalAdresse,
-      telephone: userProfile.legalTelephone,
+      raisonSociale: userProfile.legalRaisonSociale?.trim() || orgSettings.companyName,
+      ice: userProfile.legalIce?.trim() || orgSettings.companyIce,
+      adresse: userProfile.legalAdresse?.trim() || orgSettings.companyAddress,
+      telephone: userProfile.legalTelephone?.trim() || orgSettings.companyPhone,
     }),
     [
       userProfile.legalRaisonSociale,
       userProfile.legalIce,
       userProfile.legalAdresse,
       userProfile.legalTelephone,
+      orgSettings.companyName,
+      orgSettings.companyIce,
+      orgSettings.companyAddress,
+      orgSettings.companyPhone,
     ]
   );
 
@@ -6259,11 +6348,12 @@ export default function App() {
     setApiKeys([]);
     setConfirmClearHub(false);
     try {
+      window.sessionStorage.removeItem(STORAGE_KEY_API_HUB);
       window.localStorage.removeItem(STORAGE_KEY_API_HUB);
     } catch {
       // ignore
     }
-    notify('Toutes les clés du Hub API ont été effacées de ce navigateur.');
+    notify('Toutes les clés locales du Hub API ont été effacées de cette session navigateur.');
   };
 
   const handleTestApiKey = async (entry: ApiKeyEntry) => {
@@ -6478,6 +6568,8 @@ export default function App() {
     [accessibleFiches]
   );
 
+  const effectiveRottingThreshold = orgSettings.defaultSlaRottingHours || advPrefs.followUpAlertDelay;
+
   const hasActiveFilters = Boolean(
     search.trim() ||
       couleurFilter ||
@@ -6490,7 +6582,8 @@ export default function App() {
       sourceFilter ||
       statutFilter ||
       onlyReadyToCall ||
-      onlyBottlenecks
+      onlyBottlenecks ||
+      onlyRotting
   );
 
   const resetAllFilters = () => {
@@ -6506,7 +6599,17 @@ export default function App() {
     setStatutFilter('');
     setOnlyReadyToCall(false);
     setOnlyBottlenecks(false);
+    setOnlyRotting(false);
   };
+
+  const rottingCountInPortfolio = useMemo(
+    () =>
+      accessibleFiches.reduce(
+        (acc, f) => acc + (computeDealRotting(f, effectiveRottingThreshold).isRotting ? 1 : 0),
+        0
+      ),
+    [accessibleFiches, effectiveRottingThreshold]
+  );
 
   const filteredFiches = useMemo(() => {
     const q = stripAccents(search);
@@ -6542,6 +6645,7 @@ export default function App() {
       if (sourceFilter && !stripAccents(f.source).includes(stripAccents(sourceFilter))) return false;
       if (onlyReadyToCall && !isReadyToCall(f)) return false;
       if (onlyBottlenecks && !velocityReport.byFicheId.get(f.id)?.isBottleneck) return false;
+      if (onlyRotting && !computeDealRotting(f, effectiveRottingThreshold).isRotting) return false;
 
       if (q) {
         const hay = stripAccents(
@@ -6557,7 +6661,10 @@ export default function App() {
       if (sortField === 'societe') cmp = a.societe.localeCompare(b.societe);
       else if (sortField === 'ville') cmp = a.ville.localeCompare(b.ville);
       else if (sortField === 'effectif') cmp = parseSafeHeadcount(a.effectif) - parseSafeHeadcount(b.effectif);
-      else if (sortField === 'dateAjout') {
+      else if (sortField === 'leadScore') {
+        cmp = computeLeadScore(a).score - computeLeadScore(b).score;
+        if (cmp === 0) cmp = computeMaturityScore(a) - computeMaturityScore(b);
+      } else if (sortField === 'dateAjout') {
         cmp = parseDateAjoutTimestamp(a.dateAjout) - parseDateAjoutTimestamp(b.dateAjout);
         if (cmp === 0) cmp = a.societe.localeCompare(b.societe);
       } else if (sortField === 'velocite') {
@@ -6577,7 +6684,7 @@ export default function App() {
   }, [
     accessibleFiches, search, couleurFilter, secteurFilter, regionFilter, villeFilter, tierFilter,
     effectifFilter, completudeFilter, sourceFilter, statutFilter, onlyReadyToCall,
-    onlyBottlenecks, velocityReport, sortField, sortDir,
+    onlyBottlenecks, onlyRotting, effectiveRottingThreshold, velocityReport, sortField, sortDir,
   ]);
 
   const [portfolioPageSize, setPortfolioPageSize] = useState<25 | 50 | 100 | 'all'>(50);
@@ -6598,6 +6705,7 @@ export default function App() {
     statutFilter,
     onlyReadyToCall,
     onlyBottlenecks,
+    onlyRotting,
     sortField,
     sortDir,
     portfolioPageSize,
@@ -7930,6 +8038,110 @@ ${assistPasteText.slice(0, 6000)}`;
     }
   };
 
+  // Traçabilité DLP immuable sur tout export CSV / JSON + Alerte Super-Admin au-delà du seuil configuré
+  const logExportDlpEvent = (action: string, targetLabel: string, recordCount: number) => {
+    if (!cloudUser) return;
+    const threshold = Math.max(10, orgSettings.dlpExportAlertThreshold || 50);
+    const isCritical = recordCount >= threshold;
+    void recordSecurityAuditLog({
+      actorUid: cloudUser.uid,
+      actorName: currentUserDisplayName,
+      actorRole: currentUserRole,
+      category: 'export_dlp',
+      action,
+      severity: isCritical ? 'critical' : 'info',
+      targetLabel,
+      recordCount,
+      summary: `Export ${targetLabel} (${recordCount} fiche(s)) · Seuil alerte DLP : ${threshold}`,
+    });
+
+    if (isCritical && !isSuperAdmin) {
+      const superAdminUid =
+        teamStats.find((s) => s.role === 'super_admin')?.uid ||
+        userPresences.find((p) => p.role === 'super_admin')?.uid;
+      if (superAdminUid) {
+        void createCloudNotification({
+          recipientUid: superAdminUid,
+          senderUid: cloudUser.uid,
+          senderName: currentUserDisplayName,
+          senderRole: currentUserRole,
+          kind: 'security_dlp_alert',
+          title: `Alerte DLP : Export massif (${recordCount} fiches)`,
+          message: `${currentUserDisplayName} (${cloudUser.email || currentUserRole}) a exporté ${recordCount} fiches via « ${targetLabel} » (seuil configuré : ${threshold}).`,
+          targetTab: 'admin',
+        }).catch(() => {});
+      }
+    }
+  };
+
+  // Conformité Loi 09-08 CNDP : placer / lever la Liste Rouge (Ne plus contacter) avec motif tracé
+  const handleToggleFicheOptOut = (
+    targetFiche: FicheEntreprise,
+    nextOptOut: boolean,
+    reason: string,
+    ownerUidOverride?: string
+  ) => {
+    const cleanReason = reason.trim();
+    if (!cleanReason) return;
+    const nowIso = new Date().toISOString();
+    const targetOwnerUid = ownerUidOverride || cloudUser?.uid || '';
+    const updated: FicheEntreprise = {
+      ...targetFiche,
+      optOut: nextOptOut,
+      optOutAt: nowIso,
+      optOutReason: cleanReason,
+    };
+
+    if (cloudUser && targetOwnerUid && targetOwnerUid !== cloudUser.uid) {
+      if (detailModalExternalTarget && detailModalExternalTarget.fiche.id === targetFiche.id) {
+        setDetailModalExternalTarget({
+          ...detailModalExternalTarget,
+          fiche: updated,
+        });
+      }
+      void updateTeamMemberFiche(targetOwnerUid, updated)
+        .then(() => setPortfolioRefreshKey((k) => k + 1))
+        .catch(() => notify('Impossible de mettre à jour le statut Liste Rouge CNDP.', 'err'));
+    } else {
+      setFiches((prev) => prev.map((x) => (x.id === targetFiche.id ? updated : x)));
+    }
+
+    if (cloudUser) {
+      void logFicheAuditAction(
+        targetOwnerUid || cloudUser.uid,
+        targetFiche.id,
+        'modification',
+        nextOptOut
+          ? `Prospect placé sur Liste Rouge CNDP (Ne plus contacter) — Motif : ${cleanReason}`
+          : `Liste Rouge CNDP levée — Motif tracé : ${cleanReason}`,
+        {
+          action: 'field_updated',
+          field: 'optOut',
+          oldValue: String(Boolean(targetFiche.optOut)),
+          newValue: String(nextOptOut),
+        }
+      );
+      void recordSecurityAuditLog({
+        actorUid: cloudUser.uid,
+        actorName: currentUserDisplayName,
+        actorRole: currentUserRole,
+        category: 'data_privacy',
+        action: nextOptOut ? 'cndp_opt_out_enabled' : 'cndp_opt_out_lifted',
+        severity: nextOptOut ? 'info' : 'warn',
+        targetUid: targetFiche.id,
+        targetLabel: targetFiche.societe,
+        summary: `${nextOptOut ? 'Inscription' : 'Levée'} Liste Rouge CNDP · Motif : ${cleanReason}`,
+      });
+    }
+
+    notify(
+      nextOptOut
+        ? `${targetFiche.societe} placé sur Liste Rouge CNDP (raccourcis Email/WhatsApp verrouillés).`
+        : `Liste Rouge CNDP levée pour ${targetFiche.societe} (motif tracé).`,
+      nextOptOut ? 'warn' : 'ok'
+    );
+  };
+
   // Exports CSV (3 modes + Copier CSV) & Backup JSON (SANS les clés API)
   const handleExportCsv = (mode: 'filtre' | 'propre' | 'complet') => {
     let target = accessibleFiches;
@@ -7949,6 +8161,7 @@ ${assistPasteText.slice(0, 6000)}`;
     }
     const delim = advPrefs.csvDelimiter === ',' ? ',' : ';';
     const csv = buildStrictCsv(target, delim);
+    logExportDlpEvent(`export_csv_${suffix}`, `CSV ${suffix}`, target.length);
     try {
       const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
       const url = URL.createObjectURL(blob);
@@ -7969,6 +8182,7 @@ ${assistPasteText.slice(0, 6000)}`;
   const handleCopyCsvForBalise = async () => {
     const delim = advPrefs.csvDelimiter === ',' ? ',' : ';';
     const csv = buildStrictCsv(filteredFiches, delim).replace(/^\uFEFF/, '');
+    logExportDlpEvent('copy_csv_balise', 'Copie CSV Balise', filteredFiches.length);
     await copyTextSafe(csv);
     notify(`${filteredFiches.length} fiche(s) copiées au format CSV 9 colonnes pour Balise.`);
   };
@@ -7977,6 +8191,7 @@ ${assistPasteText.slice(0, 6000)}`;
     if (items.length === 0) return;
     const delim = advPrefs.csvDelimiter === ',' ? ',' : ';';
     const csv = buildStrictCsv(items, delim);
+    logExportDlpEvent('export_preview_csv', `CSV ${label}`, items.length);
     try {
       const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
       const url = URL.createObjectURL(blob);
@@ -8007,6 +8222,7 @@ ${assistPasteText.slice(0, 6000)}`;
       emailSkills,
       emailSignature,
     };
+    logExportDlpEvent('export_full_backup_json', 'Backup JSON complet', fiches.length);
     const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json;charset=utf-8' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -8693,6 +8909,12 @@ ${assistPasteText.slice(0, 6000)}`;
         }
       }
     }
+    if (n.kind === 'security_dlp_alert' || n.targetTab === 'admin') {
+      if (isSuperAdmin) {
+        navigateCrm('admin', 'security');
+        return;
+      }
+    }
     if (n.targetTab === 'crm') navigateCrm('portefeuille');
     else if (n.targetTab === 'team') navigateCrm('team');
     else navigateCrm('badges');
@@ -8753,6 +8975,13 @@ ${assistPasteText.slice(0, 6000)}`;
 
   // Studio Email IA & Skills
   const openEmailStudio = (f: FicheEntreprise) => {
+    if (f.optOut && orgSettings.enforceCndpOptOutLock) {
+      notify(
+        `${f.societe} est sur Liste Rouge CNDP (Ne plus contacter). Ouvrez la fiche pour lever l'opposition avec un motif tracé.`,
+        'warn'
+      );
+      return;
+    }
     const inferredCycle: CycleContrat =
       f.statut === 'Devis envoyé'
         ? 'relance_devis'
@@ -10084,7 +10313,7 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
                     Hub API Multi-Fournisseurs &amp; Routage Automatique par Tâche
                   </h2>
                   <p className="text-xs text-stone-500 mt-0.5 leading-relaxed">
-                    Clés conservées uniquement dans ce navigateur (jamais exportées dans le Backup JSON). À priorité égale : Recherche (Tavily → Gemini) · Extraction/Audit (Groq → OpenRouter → Mistral → Gemini) · Email (Mistral → OpenRouter → Gemini → Groq). Rotation auto sur quota 429.
+                    <strong>Mode session sécurisé (<code className="font-mono text-[11px]">sessionStorage</code>)</strong> : vos clés locales ne sont plus stockées durablement dans le navigateur, sont automatiquement effacées à la fermeture de l&apos;onglet et ne figurent jamais dans le Backup JSON. Pour un usage d&apos;équipe chiffré côté serveur, privilégiez le <strong>Coffre Cloud /api_keys</strong> (Super-Admin).
                   </p>
                 </div>
                 <div className="flex flex-wrap items-center gap-2 shrink-0">
@@ -10116,7 +10345,7 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
                       onClick={() => setConfirmClearHub(true)}
                       className="px-2.5 py-1.5 rounded-lg border border-red-200 bg-red-50 hover:bg-red-100 text-xs font-semibold text-red-700"
                     >
-                      Effacer tout
+                      Effacer toutes les clés locales
                     </button>
                   )}
                   {confirmClearHub && (
@@ -10610,6 +10839,18 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
                 >
                   <KeyRound className="w-3.5 h-3.5 text-amber-600" />
                   <span>Coffre Clés API ({cloudApiKeys.length})</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => navigateCrm('admin', 'security')}
+                  className={`px-3 py-1.5 rounded-md transition-all flex items-center gap-1.5 ${
+                    adminSubSection === 'security' && activeTab === 'admin'
+                      ? 'bg-white text-emerald-900 shadow-2xs border border-emerald-200 font-bold'
+                      : 'text-stone-600 hover:text-stone-900'
+                  }`}
+                >
+                  <ShieldCheck className="w-3.5 h-3.5 text-emerald-600" />
+                  <span>Sécurité &amp; Gouvernance</span>
                 </button>
               </div>
             )}
@@ -11108,6 +11349,40 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
                   </div>
                   <button
                     type="button"
+                    data-testid="toolbar-sort-lead-score-btn"
+                    onClick={() => toggleSort('leadScore')}
+                    title="Trier par Score Priorité Commerciale (A → C)"
+                    className={`px-2.5 py-1.5 rounded-lg border text-xs font-semibold flex items-center gap-1 whitespace-nowrap transition-colors ${
+                      sortField === 'leadScore'
+                        ? 'bg-emerald-700 text-white border-emerald-700'
+                        : 'bg-white text-stone-700 border-stone-300 hover:bg-stone-50'
+                    }`}
+                  >
+                    <Sparkles className="w-3.5 h-3.5" />
+                    <span>
+                      Score Priorité (A → C){' '}
+                      {sortField === 'leadScore' ? (sortDir === 'desc' ? '↓' : '↑') : ''}
+                    </span>
+                  </button>
+                  <button
+                    type="button"
+                    data-testid="toolbar-filter-rotting-btn"
+                    aria-pressed={onlyRotting}
+                    onClick={() => setOnlyRotting((v) => !v)}
+                    title={`Afficher uniquement les affaires dormantes (> ${effectiveRottingThreshold} sans action)`}
+                    className={`px-2.5 py-1.5 rounded-lg border text-xs font-semibold flex items-center gap-1 whitespace-nowrap transition-colors ${
+                      onlyRotting
+                        ? 'bg-red-700 text-white border-red-700'
+                        : rottingCountInPortfolio > 0
+                          ? 'bg-red-50 text-red-800 border-red-200 hover:bg-red-100'
+                          : 'bg-white text-stone-600 border-stone-300 hover:bg-stone-50'
+                    }`}
+                  >
+                    <Flame className="w-3.5 h-3.5" />
+                    <span>Affaires dormantes ({rottingCountInPortfolio})</span>
+                  </button>
+                  <button
+                    type="button"
                     data-testid="toolbar-sort-date-ajout-btn"
                     onClick={() => toggleSort('dateAjout')}
                     title="Trier par Date d'ajout (ascendant / descendant)"
@@ -11279,6 +11554,10 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
                   canSuperviseTeam={isTeamSupervisor}
                   targetMaturityPct={advPrefs.targetMaturityPct}
                   preferredContactChannel={advPrefs.preferredContactChannel}
+                  orgSettings={orgSettings}
+                  monthlyGoalPayoutMad={advPrefs.monthlyGoalPayoutMad}
+                  followUpAlertDelay={advPrefs.followUpAlertDelay}
+                  enforceCndpOptOutLock={orgSettings.enforceCndpOptOutLock}
                   onMoveFiche={handleMoveFicheKanban}
                   onOpenEmail={openEmailStudio}
                   onVerifyOne={handleVerifyWeb}
@@ -11385,6 +11664,9 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
                                 : f.statut === 'Pas intéressé'
                                   ? 'bg-stone-200 text-stone-700 border-stone-300'
                                   : 'bg-stone-100 text-stone-800 border-stone-200';
+                      const leadScore = computeLeadScore(f);
+                      const rotting = computeDealRotting(f, effectiveRottingThreshold);
+                      const isOptOutLocked = Boolean(f.optOut && orgSettings.enforceCndpOptOutLock);
                       return (
                         <article
                           key={`card-${f.id}`}
@@ -11396,6 +11678,30 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
                                 {f.numeroFiche && (
                                   <span className="font-mono text-[10px] font-bold px-1.5 py-0.5 rounded bg-stone-100 text-stone-700">
                                     {f.numeroFiche}
+                                  </span>
+                                )}
+                                <span
+                                  title={`Score Priorité ${leadScore.score}/100`}
+                                  className={`px-1.5 py-0.5 rounded text-[10px] font-extrabold border tabular-nums ${
+                                    leadScore.grade === 'A'
+                                      ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+                                      : leadScore.grade === 'B'
+                                        ? 'bg-amber-50 border-amber-200 text-amber-800'
+                                        : 'bg-stone-100 border-stone-200 text-stone-600'
+                                  }`}
+                                >
+                                  {leadScore.grade}·{leadScore.score}
+                                </span>
+                                {rotting.isRotting && (
+                                  <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] font-bold bg-red-50 border border-red-200 text-red-700">
+                                    <Flame className="w-2.5 h-2.5" />
+                                    {rotting.label}
+                                  </span>
+                                )}
+                                {f.optOut && (
+                                  <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] font-bold bg-red-600 text-white">
+                                    <Ban className="w-2.5 h-2.5" />
+                                    Liste Rouge
                                   </span>
                                 )}
                                 <h3 className="text-sm font-bold text-stone-900 truncate">
@@ -11459,7 +11765,7 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
                                 Appeler
                               </span>
                             )}
-                            {wa ? (
+                            {wa && !isOptOutLocked ? (
                               <a
                                 href={`https://wa.me/${wa}?text=${encodeURIComponent(waMsg)}`}
                                 target="_blank"
@@ -11470,9 +11776,12 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
                                 WhatsApp
                               </a>
                             ) : (
-                              <span className="min-h-[44px] rounded-lg bg-stone-100 text-stone-400 text-xs font-semibold flex items-center justify-center gap-1.5 cursor-not-allowed">
+                              <span
+                                title={isOptOutLocked ? 'Verrouillé : Liste Rouge CNDP' : 'WhatsApp indisponible'}
+                                className="min-h-[44px] rounded-lg bg-stone-100 text-stone-400 text-xs font-semibold flex items-center justify-center gap-1.5 cursor-not-allowed"
+                              >
                                 <MessageSquare className="w-3.5 h-3.5" />
-                                WhatsApp
+                                {isOptOutLocked ? 'Bloqué' : 'WhatsApp'}
                               </span>
                             )}
                             <button
@@ -11682,6 +11991,10 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
                           );
                         };
 
+                        const leadScore = computeLeadScore(f);
+                        const rotting = computeDealRotting(f, effectiveRottingThreshold);
+                        const isOptOutLocked = Boolean(f.optOut && orgSettings.enforceCndpOptOutLock);
+
                         return (
                           <tr key={f.id} className="hover:bg-stone-50/80 align-top">
                             <td className="p-3">
@@ -11700,6 +12013,37 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
                                   >
                                     {f.numeroFiche}
                                   </button>
+                                )}
+                                <span
+                                  data-testid={`lead-score-${f.id}`}
+                                  title={`Score Priorité ${leadScore.score}/100 · ${leadScore.reasons.join(', ')}`}
+                                  className={`px-1.5 py-0.5 rounded text-[10px] font-extrabold border tabular-nums shrink-0 ${
+                                    leadScore.grade === 'A'
+                                      ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+                                      : leadScore.grade === 'B'
+                                        ? 'bg-amber-50 border-amber-200 text-amber-800'
+                                        : 'bg-stone-100 border-stone-200 text-stone-600'
+                                  }`}
+                                >
+                                  {leadScore.grade}·{leadScore.score}
+                                </span>
+                                {rotting.isRotting && (
+                                  <span
+                                    title={`Affaire dormante (${rotting.elapsedHours}h sans action · seuil SLA ${rotting.thresholdHours}h)`}
+                                    className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded bg-red-50 border border-red-200 text-red-700 text-[10px] font-bold shrink-0"
+                                  >
+                                    <Flame className="w-2.5 h-2.5" />
+                                    {rotting.label}
+                                  </span>
+                                )}
+                                {f.optOut && (
+                                  <span
+                                    title={`Liste Rouge CNDP : ${f.optOutReason || 'Ne plus contacter'}`}
+                                    className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded bg-red-600 text-white text-[10px] font-bold shrink-0"
+                                  >
+                                    <Ban className="w-2.5 h-2.5" />
+                                    Liste Rouge
+                                  </span>
                                 )}
                                 {renderEditable('societe', f.societe, 'Société')}
                                 <button
@@ -12073,7 +12417,7 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
                                     <Phone className="w-3.5 h-3.5" />
                                   </a>
                                 )}
-                                {wa && (
+                                {wa && !isOptOutLocked && (
                                   <a
                                     href={`https://wa.me/${wa}?text=${encodeURIComponent(waMsg)}`}
                                     target="_blank"
@@ -12144,10 +12488,15 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
                                 </button>
                                 <button
                                   type="button"
+                                  disabled={isOptOutLocked}
                                   onClick={() => openEmailStudio(f)}
                                   aria-label={`Studio Email IA pour ${f.societe}`}
-                                  title="Studio Email IA & Skills"
-                                  className="p-1.5 rounded-lg bg-blue-50 hover:bg-blue-100 text-blue-700"
+                                  title={
+                                    isOptOutLocked
+                                      ? 'Verrouillé : prospect sur Liste Rouge CNDP'
+                                      : 'Studio Email IA & Skills'
+                                  }
+                                  className="p-1.5 rounded-lg bg-blue-50 hover:bg-blue-100 text-blue-700 disabled:opacity-35 disabled:cursor-not-allowed"
                                 >
                                   <Mail className="w-3.5 h-3.5" />
                                 </button>
@@ -12362,6 +12711,12 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
                 velocityReport={velocityReport}
                 verifyingId={verifyingId}
                 canSuperviseTeam={isTeamSupervisor}
+                targetMaturityPct={advPrefs.targetMaturityPct}
+                preferredContactChannel={advPrefs.preferredContactChannel}
+                orgSettings={orgSettings}
+                monthlyGoalPayoutMad={advPrefs.monthlyGoalPayoutMad}
+                followUpAlertDelay={advPrefs.followUpAlertDelay}
+                enforceCndpOptOutLock={orgSettings.enforceCndpOptOutLock}
                 onMoveFiche={handleMoveFicheKanban}
                 onOpenEmail={openEmailStudio}
                 onVerifyOne={handleVerifyWeb}
@@ -13094,6 +13449,8 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
               portfolioRefreshKey={portfolioRefreshKey}
               initialSelectedUid={teamFocusUid}
               workspaceLegal={workspaceLegal}
+              orgSettings={orgSettings}
+              monthlyGoalPayoutMad={advPrefs.monthlyGoalPayoutMad}
               onNotify={(msg, type) =>
                 notify(msg, type === 'err' ? 'err' : type === 'warn' ? 'warn' : 'ok')
               }
@@ -13244,6 +13601,7 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
             <AdminUsersPanel
               adminUid={cloudUser.uid}
               adminEmail={cloudUser.email || ''}
+              adminDisplayName={currentUserDisplayName}
               adminHasPasswordProvider={cloudUser.providerData.some((p) => p.providerId === 'password')}
               users={managedUsers}
               cloudApiKeys={cloudApiKeys}
@@ -13274,6 +13632,8 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
                 return list.length;
               }}
               onOpenLocalApiHub={() => setShowApiHub(true)}
+              orgSettings={orgSettings}
+              onOrgSettingsSaved={(nextOrg) => setOrgSettings(nextOrg)}
               onNotify={notify}
             />
           </Suspense>
@@ -14536,6 +14896,16 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
               copyTextSafe(val);
               notify(`${label} copié.`);
             }}
+            enforceCndpOptOutLock={orgSettings.enforceCndpOptOutLock}
+            rottingThreshold={effectiveRottingThreshold}
+            onToggleOptOut={(targetFiche, nextOptOut, reason) =>
+              handleToggleFicheOptOut(
+                targetFiche,
+                nextOptOut,
+                reason,
+                detailModalExternalTarget?.ownerUid || cloudUser.uid
+              )
+            }
           />
         </Suspense>
       )}
@@ -14660,6 +15030,7 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
             target={signContractTarget}
             isSuperAdmin={isSuperAdmin}
             canSetInitialPayout={isTeamSupervisor}
+            orgSettings={orgSettings}
             submitting={signingContractBusy}
             onClose={() => setSignContractTarget(null)}
             onConfirm={handleConfirmSignContract}
@@ -14801,6 +15172,19 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
           />
         </Suspense>
       )}
+
+      {/* Verrouillage automatique de session après inactivité (Sécurité écran — sans couper le Coaching Audio) */}
+      <IdleLockOverlay
+        enabled={Boolean(cloudUser && canAccessWorkspace)}
+        idleMinutes={advPrefs.idleLockMinutes ?? orgSettings.defaultIdleLockMinutes}
+        userUid={cloudUser.uid}
+        userDisplayName={currentUserDisplayName}
+        userEmail={cloudUser.email || ''}
+        userRole={currentUserRole}
+        hasPasswordProvider={cloudUser.providerData.some((p) => p.providerId === 'password')}
+        onSignOut={handleGoogleSignOut}
+        onNotify={notify}
+      />
     </div>
   );
 }

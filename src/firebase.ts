@@ -11,6 +11,8 @@ import {
   updateProfile,
   linkWithCredential,
   updatePassword,
+  reauthenticateWithCredential,
+  reauthenticateWithPopup,
   signOut,
   type User,
 } from 'firebase/auth';
@@ -21,10 +23,13 @@ import {
   persistentMultipleTabManager,
   memoryLocalCache,
   onSnapshotsInSync,
+  onSnapshot,
   doc,
   collection,
   query,
   where,
+  orderBy,
+  limit,
   getDoc,
   getDocs,
   getDocFromServer,
@@ -66,6 +71,8 @@ import {
   sanitizeDirectChatMessagePayload,
   sanitizeCoachingSessionPayload,
   sanitizeCoachingCandidatePayload,
+  sanitizeSecurityAuditLogPayload,
+  sanitizeOrgSettingsPayload,
   clampUtf8Bytes,
   type FicheLike,
   type EmailSkillLike,
@@ -81,6 +88,8 @@ import {
   type DirectChatMessageLike,
   type CoachingSessionLike,
   type CoachingCandidateLike,
+  type SecurityAuditLogLike,
+  type OrgSettingsLike,
   type SanitizedFicheDoc,
   type SanitizedEmailSkillDoc,
   type SanitizedSignedContractDoc,
@@ -93,6 +102,8 @@ import {
   type SanitizedDirectChatMessageDoc,
   type SanitizedCoachingSessionDoc,
   type SanitizedCoachingCandidateDoc,
+  type SanitizedSecurityAuditLogDoc,
+  type SanitizedOrgSettingsDoc,
   type SyncDiff,
   type PayoutStatus,
 } from './utils/firestoreSanitize';
@@ -1098,6 +1109,9 @@ function buildMutableFicheUpdate(docData: SanitizedFicheDoc): DocumentData {
     restoredByName,
     restoredAt,
     restoredReason,
+    optOut,
+    optOutAt,
+    optOutReason,
     ...requiredMutable
   } = docData;
 
@@ -1122,6 +1136,9 @@ function buildMutableFicheUpdate(docData: SanitizedFicheDoc): DocumentData {
     restoredByName: restoredByName !== undefined ? restoredByName : deleteField(),
     restoredAt: restoredAt !== undefined ? restoredAt : deleteField(),
     restoredReason: restoredReason !== undefined ? restoredReason : deleteField(),
+    optOut: optOut !== undefined ? optOut : deleteField(),
+    optOutAt: optOutAt !== undefined ? optOutAt : deleteField(),
+    optOutReason: optOutReason !== undefined ? optOutReason : deleteField(),
   };
 }
 
@@ -3861,6 +3878,214 @@ export async function adminSaveCloudRtcIceConfig(params: {
     handleFirestoreError(error, OperationType.WRITE, path);
   }
 }
+
+export async function reauthenticateCurrentUserWithPassword(password: string): Promise<void> {
+  const user = auth.currentUser;
+  if (!user || !user.email) {
+    throw new Error('Session utilisateur introuvable.');
+  }
+  const cred = EmailAuthProvider.credential(user.email, password);
+  await reauthenticateWithCredential(user, cred);
+}
+
+export async function reauthenticateCurrentUserWithGoogle(): Promise<void> {
+  const user = auth.currentUser;
+  if (!user) {
+    throw new Error('Session utilisateur introuvable.');
+  }
+  const provider = new GoogleAuthProvider();
+  provider.setCustomParameters({ prompt: 'select_account' });
+  await reauthenticateWithPopup(user, provider);
+}
+
+export async function recordSecurityAuditLog(
+  input: SecurityAuditLogLike
+): Promise<SanitizedSecurityAuditLogDoc | null> {
+  if (!auth.currentUser) return null;
+  const clean = sanitizeSecurityAuditLogPayload({
+    ...input,
+    actorUid: auth.currentUser.uid,
+    createdAtIso: input.createdAtIso || new Date().toISOString(),
+  });
+  try {
+    await setDoc(doc(db, 'security_audit_logs', clean.id), {
+      ...clean,
+      createdAt: serverTimestamp(),
+    });
+    return clean;
+  } catch {
+    // Non-blocking audit write so business flows never crash offline
+    return null;
+  }
+}
+
+export async function fetchSecurityAuditLogs(
+  maxItems = 150
+): Promise<SanitizedSecurityAuditLogDoc[]> {
+  if (!auth.currentUser) return [];
+  const colRef = collection(db, 'security_audit_logs');
+  const q = query(
+    colRef,
+    where('orgScope', '==', 'orange_pro_team'),
+    orderBy('createdAtIso', 'desc'),
+    limit(Math.max(10, Math.min(300, maxItems)))
+  );
+  try {
+    const snap = await getDocsWithOfflineFallback(q);
+    const items: SanitizedSecurityAuditLogDoc[] = [];
+    snap.forEach((docSnap) => {
+      const d = docSnap.data();
+      items.push(
+        sanitizeSecurityAuditLogPayload({
+          id: docSnap.id,
+          severity: typeof d.severity === 'string' ? d.severity : 'info',
+          category: typeof d.category === 'string' ? d.category : 'session',
+          action: typeof d.action === 'string' ? d.action : 'event',
+          summary: typeof d.summary === 'string' ? d.summary : '',
+          actorUid: typeof d.actorUid === 'string' ? d.actorUid : '',
+          actorName: typeof d.actorName === 'string' ? d.actorName : 'Collaborateur',
+          actorRole: typeof d.actorRole === 'string' ? d.actorRole : 'commercial',
+          targetUid: typeof d.targetUid === 'string' ? d.targetUid : undefined,
+          targetLabel: typeof d.targetLabel === 'string' ? d.targetLabel : undefined,
+          recordCount: typeof d.recordCount === 'number' ? d.recordCount : undefined,
+          createdAtIso: typeof d.createdAtIso === 'string' ? d.createdAtIso : new Date().toISOString(),
+        })
+      );
+    });
+    return items.sort((a, b) => b.createdAtIso.localeCompare(a.createdAtIso));
+  } catch {
+    // Fallback without orderBy if composite index isn't built yet
+    try {
+      const simpleQ = query(colRef, where('orgScope', '==', 'orange_pro_team'));
+      const snap = await getDocsWithOfflineFallback(simpleQ);
+      const items: SanitizedSecurityAuditLogDoc[] = [];
+      snap.forEach((docSnap) => {
+        const d = docSnap.data();
+        items.push(
+          sanitizeSecurityAuditLogPayload({
+            id: docSnap.id,
+            severity: typeof d.severity === 'string' ? d.severity : 'info',
+            category: typeof d.category === 'string' ? d.category : 'session',
+            action: typeof d.action === 'string' ? d.action : 'event',
+            summary: typeof d.summary === 'string' ? d.summary : '',
+            actorUid: typeof d.actorUid === 'string' ? d.actorUid : '',
+            actorName: typeof d.actorName === 'string' ? d.actorName : 'Collaborateur',
+            actorRole: typeof d.actorRole === 'string' ? d.actorRole : 'commercial',
+            targetUid: typeof d.targetUid === 'string' ? d.targetUid : undefined,
+            targetLabel: typeof d.targetLabel === 'string' ? d.targetLabel : undefined,
+            recordCount: typeof d.recordCount === 'number' ? d.recordCount : undefined,
+            createdAtIso: typeof d.createdAtIso === 'string' ? d.createdAtIso : new Date().toISOString(),
+          })
+        );
+      });
+      return items.sort((a, b) => b.createdAtIso.localeCompare(a.createdAtIso)).slice(0, maxItems);
+    } catch {
+      return [];
+    }
+  }
+}
+
+export interface CloudOrgSettingsRecord extends SanitizedOrgSettingsDoc {
+  updatedAtIso?: string;
+}
+
+function parseOrgSettingsSnap(snap: DocumentSnapshot<DocumentData>): CloudOrgSettingsRecord | null {
+  if (!snap.exists()) return null;
+  const d = snap.data();
+  let updatedAtIso: string | undefined;
+  if (d.updatedAt && typeof d.updatedAt.toDate === 'function') {
+    try {
+      updatedAtIso = d.updatedAt.toDate().toISOString();
+    } catch {
+      updatedAtIso = undefined;
+    }
+  }
+  const clean = sanitizeOrgSettingsPayload(
+    {
+      companyName: typeof d.companyName === 'string' ? d.companyName : undefined,
+      companyIce: typeof d.companyIce === 'string' ? d.companyIce : undefined,
+      companyAddress: typeof d.companyAddress === 'string' ? d.companyAddress : undefined,
+      companyPhone: typeof d.companyPhone === 'string' ? d.companyPhone : undefined,
+      defaultPayoutGrandCompteMad:
+        typeof d.defaultPayoutGrandCompteMad === 'number' ? d.defaultPayoutGrandCompteMad : undefined,
+      defaultPayoutPmeMad: typeof d.defaultPayoutPmeMad === 'number' ? d.defaultPayoutPmeMad : undefined,
+      defaultPayoutTpeMad: typeof d.defaultPayoutTpeMad === 'number' ? d.defaultPayoutTpeMad : undefined,
+      defaultSlaRottingHours:
+        typeof d.defaultSlaRottingHours === 'number' ? d.defaultSlaRottingHours : undefined,
+      defaultIdleLockMinutes:
+        typeof d.defaultIdleLockMinutes === 'number' ? d.defaultIdleLockMinutes : undefined,
+      dlpExportAlertThreshold:
+        typeof d.dlpExportAlertThreshold === 'number' ? d.dlpExportAlertThreshold : undefined,
+      enforceCndpOptOutLock:
+        typeof d.enforceCndpOptOutLock === 'boolean' ? d.enforceCndpOptOutLock : undefined,
+      updatedBy: typeof d.updatedBy === 'string' ? d.updatedBy : 'admin',
+    },
+    typeof d.updatedBy === 'string' ? d.updatedBy : 'admin'
+  );
+  return {
+    ...clean,
+    ...(updatedAtIso ? { updatedAtIso } : {}),
+  };
+}
+
+export async function fetchCloudOrgSettings(): Promise<CloudOrgSettingsRecord | null> {
+  if (!auth.currentUser) return null;
+  try {
+    const snap = await getDocWithOfflineFallback(doc(db, 'app_config', 'org_settings'));
+    return parseOrgSettingsSnap(snap);
+  } catch {
+    return null;
+  }
+}
+
+export function subscribeCloudOrgSettings(
+  onUpdate: (cfg: CloudOrgSettingsRecord | null) => void
+): () => void {
+  const ref = doc(db, 'app_config', 'org_settings');
+  return onSnapshot(
+    ref,
+    (snap) => {
+      onUpdate(parseOrgSettingsSnap(snap));
+    },
+    () => {
+      // Non-fatal fallback if org_settings hasn't been created yet
+    }
+  );
+}
+
+export async function adminSaveCloudOrgSettings(
+  input: OrgSettingsLike
+): Promise<{ updatedAtIso: string; saved: SanitizedOrgSettingsDoc }> {
+  const path = 'app_config/org_settings';
+  const ref = doc(db, 'app_config', 'org_settings');
+  const adminUid = auth.currentUser?.uid || '';
+  if (!adminUid) {
+    throw new Error('Authentification Super-Admin requise.');
+  }
+  const clean = sanitizeOrgSettingsPayload(input, adminUid);
+  const updatedAtIso = new Date().toISOString();
+
+  try {
+    await ensureFreshAuthUser(adminUid);
+    const snap = await getDocWithOfflineFallback(ref);
+    const payload: DocumentData = {
+      ...clean,
+      updatedAt: serverTimestamp(),
+    };
+    if (snap.exists()) {
+      await updateDoc(ref, payload);
+    } else {
+      await setDoc(ref, {
+        ...payload,
+        createdAt: serverTimestamp(),
+      });
+    }
+    return { updatedAtIso, saved: clean };
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, path);
+  }
+}
+
 
 
 

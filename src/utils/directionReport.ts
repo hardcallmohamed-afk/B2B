@@ -10,6 +10,7 @@ import {
   type TeamStatRecord,
 } from './gamification';
 import type { WorkspaceLegalInfo } from './accountPreferences';
+import { sanitizeCsvCell } from './securityHardening';
 
 export interface AttendanceSessionLike {
   ownerId: string;
@@ -324,25 +325,7 @@ export function buildMonthlyDirectionReport(params: {
  * protection against CSV Formula Injection (=, +, -, @, TAB, CR).
  */
 export function escapeExcelCsvCell(raw: string | number | null | undefined): string {
-  if (raw === null || raw === undefined) return '';
-  if (typeof raw === 'number') {
-    if (!Number.isFinite(raw)) return '0';
-    // Excel FR/Maroc uses comma as decimal separator when semicolon is field separator
-    return String(raw).replace('.', ',');
-  }
-
-  let s = String(raw).replace(/\r\n/g, ' ').replace(/[\r\n]/g, ' ').trim();
-  if (!s) return '';
-
-  // Neutralize Excel formula injection triggers on string cells
-  if (/^[=+\-@\t\r]/.test(s)) {
-    s = `'${s}`;
-  }
-
-  if (/[;"\n\r]/.test(s)) {
-    return `"${s.replace(/"/g, '""')}"`;
-  }
-  return s;
+  return sanitizeCsvCell(raw, { delimiter: ';', decimalCommaForNumbers: true });
 }
 
 function csvRow(cells: Array<string | number | null | undefined>): string {

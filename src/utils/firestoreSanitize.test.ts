@@ -874,3 +874,119 @@ test('isDuringWorkHours uses Africa/Casablanca timezone and projectLatLngToMerca
   assert.equal(markerPos.isInsideViewport, true);
 });
 
+test('sanitizeSecurityAuditLogPayload, sanitizeOrgSettingsPayload, optOut, and advancedPrefsJson enforce strict schema bounds', async () => {
+  const {
+    sanitizeSecurityAuditLogPayload,
+    sanitizeOrgSettingsPayload,
+    sanitizeWorkspacePayload,
+    sanitizeFichePayload,
+    sanitizeCloudNotificationPayload,
+  } = await import('./firestoreSanitize');
+
+  const log = sanitizeSecurityAuditLogPayload({
+    id: 'sec/bad id!',
+    severity: 'CRITICAL',
+    category: 'export_dlp',
+    action: 'csv_export_mass',
+    summary: 'Export CSV de 85 fiches par Youssef',
+    actorUid: 'u/1!',
+    actorName: 'Youssef Benali',
+    actorRole: 'commercial',
+    targetUid: 'target/2',
+    targetLabel: 'Portefeuille complet',
+    recordCount: 85,
+  });
+  assert.equal(log.id, 'sec_bad_id_');
+  assert.equal(log.orgScope, 'orange_pro_team');
+  assert.equal(log.severity, 'critical');
+  assert.equal(log.category, 'export_dlp');
+  assert.equal(log.actorUid, 'u_1_');
+  assert.equal(log.recordCount, 85);
+
+  const fallbackLog = sanitizeSecurityAuditLogPayload({
+    severity: 'unknown_sev',
+    category: 'unknown_cat',
+    action: '',
+    summary: '',
+    actorUid: 'u1',
+    actorName: '',
+  });
+  assert.equal(fallbackLog.severity, 'info');
+  assert.equal(fallbackLog.category, 'session');
+
+  const org = sanitizeOrgSettingsPayload(
+    {
+      companyName: '  DIVERSIFIA MAROC  ',
+      companyIce: '002345678000091',
+      defaultPayoutGrandCompteMad: 4200,
+      defaultPayoutPmeMad: 2100,
+      defaultPayoutTpeMad: 950,
+      defaultSlaRottingHours: 48,
+      defaultIdleLockMinutes: 15,
+      dlpExportAlertThreshold: 40,
+      enforceCndpOptOutLock: true,
+    },
+    'admin_uid_1'
+  );
+  assert.equal(org.companyName, 'DIVERSIFIA MAROC');
+  assert.equal(org.defaultPayoutGrandCompteMad, 4200);
+  assert.equal(org.defaultIdleLockMinutes, 15);
+  assert.equal(org.updatedBy, 'admin_uid_1');
+
+  const ws = sanitizeWorkspacePayload('u_prefs', {
+    villesAll: ['Meknès'],
+    villesActive: ['Meknès'],
+    modeVille: 'default',
+    defaultVille: 'Meknès',
+    emailSignature: 'Sig',
+    seeded: true,
+    advancedPrefsJson: JSON.stringify({ monthlyGoalPayoutMad: 20000, idleLockMinutes: 15 }),
+  });
+  assert.ok(ws.advancedPrefsJson && ws.advancedPrefsJson.includes('20000'));
+
+  const wsBadJson = sanitizeWorkspacePayload('u_prefs', {
+    villesAll: ['Meknès'],
+    villesActive: ['Meknès'],
+    modeVille: 'default',
+    defaultVille: 'Meknès',
+    emailSignature: 'Sig',
+    seeded: true,
+    advancedPrefsJson: '{not valid json',
+  });
+  assert.equal(wsBadJson.advancedPrefsJson, undefined);
+
+  const ficheOptOut = sanitizeFichePayload('u1', {
+    id: 'f_cndp',
+    societe: 'Cabinet CNDP',
+    secteur: 'fiduciaire',
+    ville: 'Rabat',
+    telephone: '0537001122',
+    email: 'c@cndp.ma',
+    contact: 'Mme Salma',
+    role: 'Directrice',
+    source: 'Manuel',
+    effectif: '10',
+    statut: 'À contacter',
+    dateAjout: '2026-11-27T10:00:00.000Z',
+    optOut: true,
+    optOutAt: '2026-11-27T11:00:00.000Z',
+    optOutReason: 'Demande explicite Loi 09-08',
+  });
+  assert.equal(ficheOptOut.optOut, true);
+  assert.equal(ficheOptOut.optOutAt, '2026-11-27T11:00:00.000Z');
+  assert.equal(ficheOptOut.optOutReason, 'Demande explicite Loi 09-08');
+
+  const dlpNotif = sanitizeCloudNotificationPayload({
+    recipientUid: 'admin_1',
+    senderUid: 'collab_1',
+    senderName: 'Youssef',
+    kind: 'security_dlp_alert',
+    title: 'Alerte DLP Export Massif',
+    message: 'Export de 85 fiches',
+    targetTab: 'admin',
+  });
+  assert.equal(dlpNotif.kind, 'security_dlp_alert');
+  assert.equal(dlpNotif.targetTab, 'admin');
+});
+
+

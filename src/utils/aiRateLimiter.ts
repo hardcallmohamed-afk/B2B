@@ -553,3 +553,104 @@ export function isVaultOrMaskedApiKey(keyId?: string | null, apiKeyValue?: strin
   return false;
 }
 
+export const GLOBAL_API_IP_PER_MINUTE_LIMIT = 120;
+
+interface MinuteWindowUsage {
+  windowKey: number;
+  count: number;
+}
+
+const apiIpRateLimitStore = new Map<string, MinuteWindowUsage>();
+
+export function checkAndIncrementApiIpRateLimit(
+  ip: string,
+  limit: number = GLOBAL_API_IP_PER_MINUTE_LIMIT,
+  nowMs: number = Date.now()
+): { allowed: boolean; count: number; limit: number; remaining: number; retryAfterSeconds: number } {
+  const key = (ip || 'unknown').trim().slice(0, 128) || 'unknown';
+  const windowKey = Math.floor(nowMs / 60_000);
+  const secondsIntoWindow = Math.floor((nowMs % 60_000) / 1000);
+  const retryAfterSeconds = Math.max(1, 60 - secondsIntoWindow);
+
+  // Periodic lightweight cleanup to keep memory bounded
+  if (apiIpRateLimitStore.size > 2000) {
+    for (const [k, entry] of apiIpRateLimitStore.entries()) {
+      if (entry.windowKey < windowKey - 1) {
+        apiIpRateLimitStore.delete(k);
+      }
+    }
+  }
+
+  const existing = apiIpRateLimitStore.get(key);
+  if (!existing || existing.windowKey !== windowKey) {
+    apiIpRateLimitStore.set(key, { windowKey, count: 1 });
+    return {
+      allowed: true,
+      count: 1,
+      limit,
+      remaining: Math.max(0, limit - 1),
+      retryAfterSeconds,
+    };
+  }
+
+  if (existing.count >= limit) {
+    return {
+      allowed: false,
+      count: existing.count,
+      limit,
+      remaining: 0,
+      retryAfterSeconds,
+    };
+  }
+
+  existing.count += 1;
+  return {
+    allowed: true,
+    count: existing.count,
+    limit,
+    remaining: Math.max(0, limit - existing.count),
+    retryAfterSeconds,
+  };
+}
+
+export function resetApiIpRateLimiter(): void {
+  apiIpRateLimitStore.clear();
+}
+
+/**
+ * Lightweight anti-CSRF check for state-changing API requests (POST/DELETE):
+ * When Origin or Referer is present, confirms its host matches the request Host header
+ * (or localhost/127.0.0.1 in dev).
+ */
+export function isAllowedSameOriginRequest(
+  originHeader: string | undefined,
+  refererHeader: string | undefined,
+  hostHeader: string | undefined
+): boolean {
+  const candidate = (originHeader || refererHeader || '').trim();
+  if (!candidate || candidate === 'null') {
+    return true;
+  }
+  const normalizedHost = (hostHeader || '').trim().toLowerCase();
+  if (!normalizedHost) return true;
+  const hostWithoutPort = normalizedHost.split(':')[0];
+
+  try {
+    const parsed = new URL(candidate);
+    const parsedHost = parsed.host.toLowerCase();
+    const parsedHostname = parsed.hostname.toLowerCase();
+    if (parsedHost === normalizedHost || parsedHostname === hostWithoutPort) {
+      return true;
+    }
+    // Allow loopback aliases in local development
+    const isLoopback = (h: string) => h === 'localhost' || h === '127.0.0.1' || h === '[::1]';
+    if (isLoopback(parsedHostname) && isLoopback(hostWithoutPort)) {
+      return true;
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+

@@ -17,6 +17,8 @@ import {
   FileSpreadsheet,
   UserPlus,
   RotateCcw,
+  Ban,
+  Flame,
 } from 'lucide-react';
 import {
   SECTEURS_META,
@@ -34,6 +36,10 @@ import {
   type PortfolioVelocityReport,
   type VelocityLevel,
 } from '../utils/analytics';
+import { computeDealRotting, computeLeadScore } from '../utils/salesIntelligence';
+import type { OrgSettingsConfig } from '../utils/securityHardening';
+import type { AdvancedAccountPreferences } from '../utils/accountPreferences';
+import { PipelineForecastBar } from './PipelineForecastBar';
 
 interface KanbanBoardProps {
   fiches: FicheEntreprise[];
@@ -41,6 +47,10 @@ interface KanbanBoardProps {
   verifyingId: string | null;
   targetMaturityPct?: number;
   preferredContactChannel?: 'whatsapp' | 'phone' | 'email';
+  orgSettings?: OrgSettingsConfig | null;
+  monthlyGoalPayoutMad?: number;
+  followUpAlertDelay?: AdvancedAccountPreferences['followUpAlertDelay'];
+  enforceCndpOptOutLock?: boolean;
   onMoveFiche: (ficheId: string, targetStatut: StatutCRM) => void;
   onOpenEmail: (fiche: FicheEntreprise) => void;
   onVerifyOne: (fiche: FicheEntreprise) => void;
@@ -105,6 +115,10 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
   verifyingId,
   targetMaturityPct = 85,
   preferredContactChannel = 'whatsapp',
+  orgSettings,
+  monthlyGoalPayoutMad = 15000,
+  followUpAlertDelay = '48h',
+  enforceCndpOptOutLock = true,
   onMoveFiche,
   onOpenEmail,
   onVerifyOne,
@@ -120,16 +134,22 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
   const [draggingId, setDraggingId] = useState<string | null>(null);
   const [dragOverStage, setDragOverStage] = useState<StatutCRM | null>(null);
   const [onlyBottlenecks, setOnlyBottlenecks] = useState(false);
+  const [onlyRotting, setOnlyRotting] = useState(false);
 
   const velocityReport = useMemo(
     () => externalVelocityReport ?? computePortfolioVelocity(fiches),
     [externalVelocityReport, fiches]
   );
 
+  const effectiveRottingThreshold = orgSettings?.defaultSlaRottingHours || followUpAlertDelay;
+
   const visibleFiches = useMemo(() => {
-    if (!onlyBottlenecks) return fiches;
-    return fiches.filter((f) => velocityReport.byFicheId.get(f.id)?.isBottleneck);
-  }, [fiches, onlyBottlenecks, velocityReport]);
+    return fiches.filter((f) => {
+      if (onlyBottlenecks && !velocityReport.byFicheId.get(f.id)?.isBottleneck) return false;
+      if (onlyRotting && !computeDealRotting(f, effectiveRottingThreshold).isRotting) return false;
+      return true;
+    });
+  }, [fiches, onlyBottlenecks, onlyRotting, velocityReport, effectiveRottingThreshold]);
 
   const columns = useMemo(() => groupFichesByStatut(visibleFiches), [visibleFiches]);
 
@@ -213,6 +233,15 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
           </span>
         </div>
       </div>
+
+      <PipelineForecastBar
+        fiches={fiches}
+        monthlyGoalPayoutMad={monthlyGoalPayoutMad}
+        orgSettings={orgSettings}
+        rottingThreshold={effectiveRottingThreshold}
+        onlyRottingActive={onlyRotting}
+        onToggleRottingFilter={() => setOnlyRotting((v) => !v)}
+      />
 
       <div className="overflow-x-auto pb-2">
         <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-6 gap-3 min-w-0 xl:min-w-[1260px] items-start">
@@ -322,6 +351,9 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
                       const segMeta = SEGMENTS_COULEUR[secMeta.couleur] || SEGMENTS_COULEUR.orange;
                       const reco = getOrangeProRecommendation(f);
                       const mat = computeMaturityScore(f);
+                      const leadScore = computeLeadScore(f);
+                      const rotting = computeDealRotting(f, effectiveRottingThreshold);
+                      const isOptOutLocked = Boolean(f.optOut && enforceCndpOptOutLock);
                       const vel = velocityReport.byFicheId.get(f.id);
                       const velStyles = getVelocityCardStyles(vel?.level || 'normal');
                       const isDragging = draggingId === f.id;
@@ -356,15 +388,45 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
                             aria-hidden="true"
                           />
 
-                          {/* Numéro fiche unique + poignée drag */}
+                          {/* Numéro fiche unique + Score IA + poignée drag */}
                           <div className="flex items-center justify-between gap-1.5 pt-0.5">
-                            {f.numeroFiche ? (
-                              <span className="font-mono text-[10px] font-bold text-stone-500 tracking-tight">
-                                {f.numeroFiche}
+                            <div className="flex items-center gap-1 min-w-0 flex-wrap">
+                              {f.numeroFiche && (
+                                <span className="font-mono text-[10px] font-bold text-stone-500 tracking-tight">
+                                  {f.numeroFiche}
+                                </span>
+                              )}
+                              <span
+                                title={`Score Priorité ${leadScore.score}/100 · ${leadScore.reasons.join(', ')}`}
+                                className={`inline-flex items-center rounded px-1 py-0.5 text-[9px] font-extrabold tabular-nums border ${
+                                  leadScore.grade === 'A'
+                                    ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+                                    : leadScore.grade === 'B'
+                                      ? 'bg-amber-50 border-amber-200 text-amber-800'
+                                      : 'bg-stone-100 border-stone-200 text-stone-600'
+                                }`}
+                              >
+                                {leadScore.grade}·{leadScore.score}
                               </span>
-                            ) : (
-                              <span />
-                            )}
+                              {rotting.isRotting && (
+                                <span
+                                  title={`Affaire dormante (${rotting.elapsedHours}h sans action)`}
+                                  className="inline-flex items-center gap-0.5 rounded px-1 py-0.5 text-[9px] font-bold bg-red-50 border border-red-200 text-red-700"
+                                >
+                                  <Flame className="w-2.5 h-2.5" />
+                                  {rotting.label}
+                                </span>
+                              )}
+                              {f.optOut && (
+                                <span
+                                  title="Liste Rouge CNDP — Ne plus contacter"
+                                  className="inline-flex items-center gap-0.5 rounded px-1 py-0.5 text-[9px] font-bold bg-red-600 text-white"
+                                >
+                                  <Ban className="w-2.5 h-2.5" />
+                                  CNDP
+                                </span>
+                              )}
+                            </div>
                             <GripVertical
                               className="w-3.5 h-3.5 text-stone-400 shrink-0"
                               aria-hidden="true"
@@ -502,7 +564,7 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
                                     <Phone className="w-3.5 h-3.5" />
                                   </a>
                                 )}
-                                {waPhone && (
+                                {waPhone && !isOptOutLocked && (
                                   <a
                                     href={`https://wa.me/${waPhone}`}
                                     target="_blank"
@@ -520,10 +582,15 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
                                 )}
                                 <button
                                   type="button"
+                                  disabled={isOptOutLocked}
                                   onClick={() => onOpenEmail(f)}
                                   aria-label={`Studio Email ${f.societe}`}
-                                  title={`Studio Email IA${preferredContactChannel === 'email' ? ' (Canal prioritaire)' : ''}`}
-                                  className={`p-1 rounded ${
+                                  title={
+                                    isOptOutLocked
+                                      ? 'Verrouillé : prospect sur Liste Rouge CNDP'
+                                      : `Studio Email IA${preferredContactChannel === 'email' ? ' (Canal prioritaire)' : ''}`
+                                  }
+                                  className={`p-1 rounded disabled:opacity-35 disabled:cursor-not-allowed ${
                                     preferredContactChannel === 'email'
                                       ? 'bg-sky-100 text-sky-800 ring-1 ring-sky-300'
                                       : 'hover:bg-sky-50 text-sky-700'

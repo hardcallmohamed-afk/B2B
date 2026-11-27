@@ -54,6 +54,9 @@ export interface FicheLike {
   restoredByName?: string;
   restoredAt?: string;
   restoredReason?: string;
+  optOut?: boolean;
+  optOutAt?: string;
+  optOutReason?: string;
 }
 
 export interface EmailSkillLike {
@@ -88,6 +91,7 @@ export interface WorkspaceLike {
   legalIce?: string;
   legalAdresse?: string;
   legalTelephone?: string;
+  advancedPrefsJson?: string;
 }
 
 export interface SanitizedWorkspaceDoc {
@@ -113,6 +117,7 @@ export interface SanitizedWorkspaceDoc {
   legalIce?: string;
   legalAdresse?: string;
   legalTelephone?: string;
+  advancedPrefsJson?: string;
 }
 
 export interface SanitizedFicheDoc {
@@ -145,6 +150,9 @@ export interface SanitizedFicheDoc {
   restoredByName?: string;
   restoredAt?: string;
   restoredReason?: string;
+  optOut?: boolean;
+  optOutAt?: string;
+  optOutReason?: string;
 }
 
 export interface SanitizedEmailSkillDoc {
@@ -251,6 +259,7 @@ export const VALID_CLOUD_NOTIFICATION_KINDS = new Set([
   'contract_status_changed',
   'direct_message',
   'coaching_invite',
+  'security_dlp_alert',
 ] as const);
 
 export type CloudNotificationKind =
@@ -261,7 +270,8 @@ export type CloudNotificationKind =
   | 'contract_signed'
   | 'contract_status_changed'
   | 'direct_message'
-  | 'coaching_invite';
+  | 'coaching_invite'
+  | 'security_dlp_alert';
 
 export interface CloudNotificationLike {
   id?: string;
@@ -278,7 +288,7 @@ export interface CloudNotificationLike {
   societe?: string;
   payoutStatus?: string;
   payoutMad?: number;
-  targetTab?: 'crm' | 'team' | 'badges';
+  targetTab?: 'crm' | 'team' | 'badges' | 'admin';
   read?: boolean;
   createdAtIso?: string;
 }
@@ -299,7 +309,7 @@ export interface SanitizedCloudNotificationDoc {
   societe?: string;
   payoutStatus?: 'En attente' | 'Validé' | 'Versé' | 'Refusé';
   payoutMad?: number;
-  targetTab?: 'crm' | 'team' | 'badges';
+  targetTab?: 'crm' | 'team' | 'badges' | 'admin';
   read: boolean;
   createdAtIso: string;
 }
@@ -615,6 +625,17 @@ export function sanitizeWorkspacePayload(ownerId: string, input: WorkspaceLike):
   if (typeof input.legalTelephone === 'string' && input.legalTelephone.trim().length > 0) {
     doc.legalTelephone = clampString(input.legalTelephone.trim(), 30);
   }
+  if (typeof input.advancedPrefsJson === 'string' && input.advancedPrefsJson.trim().length > 0) {
+    const clampedJson = clampUtf8Bytes(input.advancedPrefsJson.trim(), 2000);
+    try {
+      const parsed = JSON.parse(clampedJson);
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        doc.advancedPrefsJson = clampedJson;
+      }
+    } catch {
+      // Ignore malformed JSON
+    }
+  }
 
   return doc;
 }
@@ -692,6 +713,15 @@ export function sanitizeFichePayload(ownerId: string, fiche: FicheLike): Sanitiz
   }
   if (typeof fiche.restoredReason === 'string' && fiche.restoredReason.trim().length > 0) {
     doc.restoredReason = clampString(fiche.restoredReason.trim(), 300);
+  }
+  if (typeof fiche.optOut === 'boolean') {
+    doc.optOut = fiche.optOut;
+  }
+  if (typeof fiche.optOutAt === 'string' && fiche.optOutAt.trim().length > 0) {
+    doc.optOutAt = clampString(fiche.optOutAt.trim(), 64);
+  }
+  if (typeof fiche.optOutReason === 'string' && fiche.optOutReason.trim().length > 0) {
+    doc.optOutReason = clampString(fiche.optOutReason.trim(), 240);
   }
 
   return doc;
@@ -805,7 +835,12 @@ export function sanitizeCloudNotificationPayload(
   if (typeof input.payoutMad === 'number' && Number.isFinite(input.payoutMad)) {
     doc.payoutMad = Math.min(10000000, Math.max(0, Math.round(input.payoutMad)));
   }
-  if (input.targetTab === 'crm' || input.targetTab === 'team' || input.targetTab === 'badges') {
+  if (
+    input.targetTab === 'crm' ||
+    input.targetTab === 'team' ||
+    input.targetTab === 'badges' ||
+    input.targetTab === 'admin'
+  ) {
     doc.targetTab = input.targetTab;
   }
 
@@ -1650,4 +1685,169 @@ export function parseFriendlyCloudError(err: unknown): FriendlyCloudError {
     retryable: true,
   };
 }
+export const VALID_SECURITY_AUDIT_SEVERITIES = new Set(['info', 'warn', 'critical'] as const);
+export const VALID_SECURITY_AUDIT_CATEGORIES = new Set([
+  'export_dlp',
+  'access_control',
+  'vault_config',
+  'org_settings',
+  'data_privacy',
+  'session',
+] as const);
 
+export interface SecurityAuditLogLike {
+  id?: string;
+  severity: string;
+  category: string;
+  action: string;
+  summary: string;
+  actorUid: string;
+  actorName: string;
+  actorRole?: string;
+  targetUid?: string;
+  targetLabel?: string;
+  recordCount?: number;
+  createdAtIso?: string;
+}
+
+export interface SanitizedSecurityAuditLogDoc {
+  id: string;
+  orgScope: 'orange_pro_team';
+  severity: 'info' | 'warn' | 'critical';
+  category:
+    | 'export_dlp'
+    | 'access_control'
+    | 'vault_config'
+    | 'org_settings'
+    | 'data_privacy'
+    | 'session';
+  action: string;
+  summary: string;
+  actorUid: string;
+  actorName: string;
+  actorRole: string;
+  targetUid?: string;
+  targetLabel?: string;
+  recordCount?: number;
+  createdAtIso: string;
+}
+
+export function sanitizeSecurityAuditLogPayload(
+  input: SecurityAuditLogLike
+): SanitizedSecurityAuditLogDoc {
+  const id = sanitizeDocId(
+    input.id || `sec_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+    'sec'
+  );
+  const rawSeverity = clampString(input.severity, 20).toLowerCase();
+  const severity: SanitizedSecurityAuditLogDoc['severity'] = VALID_SECURITY_AUDIT_SEVERITIES.has(
+    rawSeverity as never
+  )
+    ? (rawSeverity as SanitizedSecurityAuditLogDoc['severity'])
+    : 'info';
+
+  const rawCategory = clampString(input.category, 32).toLowerCase();
+  const category: SanitizedSecurityAuditLogDoc['category'] = VALID_SECURITY_AUDIT_CATEGORIES.has(
+    rawCategory as never
+  )
+    ? (rawCategory as SanitizedSecurityAuditLogDoc['category'])
+    : 'session';
+
+  const action = clampUtf8Bytes(input.action?.trim?.() || 'event', 80) || 'event';
+  const summary = clampUtf8Bytes(input.summary?.trim?.() || 'Événement sécurité', 400) || 'Événement sécurité';
+  const actorUid = sanitizeDocId(input.actorUid, 'user');
+  const actorName = clampUtf8Bytes(input.actorName?.trim?.() || 'Collaborateur', 120) || 'Collaborateur';
+  const actorRole = clampUtf8Bytes(input.actorRole?.trim?.() || 'commercial', 40) || 'commercial';
+  const createdAtIso = clampString(input.createdAtIso?.trim?.() || new Date().toISOString(), 64);
+
+  const doc: SanitizedSecurityAuditLogDoc = {
+    id,
+    orgScope: 'orange_pro_team',
+    severity,
+    category,
+    action,
+    summary,
+    actorUid,
+    actorName,
+    actorRole,
+    createdAtIso,
+  };
+
+  if (typeof input.targetUid === 'string' && input.targetUid.trim().length > 0) {
+    doc.targetUid = sanitizeDocId(input.targetUid, 'target');
+  }
+  if (typeof input.targetLabel === 'string' && input.targetLabel.trim().length > 0) {
+    doc.targetLabel = clampUtf8Bytes(input.targetLabel.trim(), 160);
+  }
+  if (typeof input.recordCount === 'number' && Number.isFinite(input.recordCount)) {
+    doc.recordCount = Math.min(1000000, Math.max(0, Math.round(input.recordCount)));
+  }
+
+  return doc;
+}
+
+export interface OrgSettingsLike {
+  companyName?: string;
+  companyIce?: string;
+  companyAddress?: string;
+  companyPhone?: string;
+  defaultPayoutGrandCompteMad?: number;
+  defaultPayoutPmeMad?: number;
+  defaultPayoutTpeMad?: number;
+  defaultSlaRottingHours?: number;
+  defaultIdleLockMinutes?: number;
+  dlpExportAlertThreshold?: number;
+  enforceCndpOptOutLock?: boolean;
+  updatedBy?: string;
+}
+
+export interface SanitizedOrgSettingsDoc {
+  companyName: string;
+  companyIce: string;
+  companyAddress: string;
+  companyPhone: string;
+  defaultPayoutGrandCompteMad: number;
+  defaultPayoutPmeMad: number;
+  defaultPayoutTpeMad: number;
+  defaultSlaRottingHours: number;
+  defaultIdleLockMinutes: 0 | 15 | 30 | 60;
+  dlpExportAlertThreshold: number;
+  enforceCndpOptOutLock: boolean;
+  updatedBy: string;
+}
+
+export function sanitizeOrgSettingsPayload(
+  input: OrgSettingsLike,
+  adminUid: string
+): SanitizedOrgSettingsDoc {
+  const clampNum = (val: unknown, min: number, max: number, def: number): number => {
+    const n = Number(val);
+    if (!Number.isFinite(n)) return def;
+    return Math.min(max, Math.max(min, Math.round(n)));
+  };
+  const rawIdle = Number(input.defaultIdleLockMinutes);
+  const defaultIdleLockMinutes: 0 | 15 | 30 | 60 =
+    rawIdle === 0 || rawIdle === 15 || rawIdle === 30 || rawIdle === 60
+      ? (rawIdle as 0 | 15 | 30 | 60)
+      : 30;
+
+  return {
+    companyName:
+      clampUtf8Bytes(
+        (input.companyName || '').trim() || 'DIVERSIFIA — Partenaire Officiel Orange Pro B2B',
+        140
+      ) || 'DIVERSIFIA — Partenaire Officiel Orange Pro B2B',
+    companyIce: clampUtf8Bytes((input.companyIce || '').trim(), 40),
+    companyAddress: clampUtf8Bytes((input.companyAddress || '').trim(), 220),
+    companyPhone: clampUtf8Bytes((input.companyPhone || '').trim(), 40),
+    defaultPayoutGrandCompteMad: clampNum(input.defaultPayoutGrandCompteMad, 0, 200000, 3500),
+    defaultPayoutPmeMad: clampNum(input.defaultPayoutPmeMad, 0, 200000, 1800),
+    defaultPayoutTpeMad: clampNum(input.defaultPayoutTpeMad, 0, 200000, 900),
+    defaultSlaRottingHours: clampNum(input.defaultSlaRottingHours, 12, 720, 72),
+    defaultIdleLockMinutes,
+    dlpExportAlertThreshold: clampNum(input.dlpExportAlertThreshold, 5, 5000, 50),
+    enforceCndpOptOutLock:
+      typeof input.enforceCndpOptOutLock === 'boolean' ? input.enforceCndpOptOutLock : true,
+    updatedBy: sanitizeDocId(input.updatedBy || adminUid, 'admin'),
+  };
+}

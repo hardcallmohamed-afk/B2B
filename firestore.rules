@@ -120,12 +120,13 @@ service cloud.firestore {
     function isValidNotificationKind(val) {
       return val is string && val in [
         'fiche_assigned', 'fiche_accessed', 'fiche_restored', 'fiche_updated',
-        'contract_signed', 'contract_status_changed', 'direct_message', 'coaching_invite'
+        'contract_signed', 'contract_status_changed', 'direct_message', 'coaching_invite',
+        'security_dlp_alert'
       ];
     }
 
     function isValidNotificationTab(val) {
-      return val is string && val in ['crm', 'team', 'badges'];
+      return val is string && val in ['crm', 'team', 'badges', 'admin'];
     }
 
     function canSuperviseTeam() {
@@ -355,6 +356,7 @@ service cloud.firestore {
           'monthlyGoalContracts', 'notifyBadges', 'notifySound', 'compactUi',
           'dismissedDedupKeys', 'includePhoneOnlyDedup',
           'legalRaisonSociale', 'legalIce', 'legalAdresse', 'legalTelephone',
+          'advancedPrefsJson',
           'createdAt', 'updatedAt'
         ])
         && data.ownerId is string
@@ -384,6 +386,7 @@ service cloud.firestore {
         && (!('legalIce' in data) || (data.legalIce is string && data.legalIce.size() <= 30))
         && (!('legalAdresse' in data) || (data.legalAdresse is string && data.legalAdresse.size() <= 300))
         && (!('legalTelephone' in data) || (data.legalTelephone is string && data.legalTelephone.size() <= 30))
+        && (!('advancedPrefsJson' in data) || (data.advancedPrefsJson is string && data.advancedPrefsJson.size() <= 2000))
         && data.createdAt is timestamp
         && data.updatedAt is timestamp;
     }
@@ -402,6 +405,7 @@ service cloud.firestore {
           'prochaineRelanceAt', 'rdvAt', 'rdvLieu',
           'assignedByUid', 'assignedByName', 'assignedAt',
           'restoredByName', 'restoredAt', 'restoredReason',
+          'optOut', 'optOutAt', 'optOutReason',
           'dateAjout', 'createdAt', 'updatedAt'
         ])
         && data.ownerId is string
@@ -436,6 +440,9 @@ service cloud.firestore {
         && (!('restoredByName' in data) || (data.restoredByName is string && data.restoredByName.size() <= 120))
         && (!('restoredAt' in data) || (data.restoredAt is string && data.restoredAt.size() <= 64))
         && (!('restoredReason' in data) || (data.restoredReason is string && data.restoredReason.size() <= 300))
+        && (!('optOut' in data) || data.optOut is bool)
+        && (!('optOutAt' in data) || (data.optOutAt is string && data.optOutAt.size() <= 64))
+        && (!('optOutReason' in data) || (data.optOutReason is string && data.optOutReason.size() <= 240))
         && data.dateAjout is string && data.dateAjout.size() <= 64
         && data.createdAt is timestamp
         && data.updatedAt is timestamp;
@@ -638,6 +645,63 @@ service cloud.firestore {
         && (!('updatedBy' in data) || (data.updatedBy is string && isValidId(data.updatedBy)))
         && (!('createdAt' in data) || data.createdAt is timestamp)
         && data.updatedAt is timestamp;
+    }
+
+    function isValidOrgSettings(data) {
+      return data.keys().hasAll([
+          'companyName', 'companyIce', 'companyAddress', 'companyPhone',
+          'defaultPayoutGrandCompteMad', 'defaultPayoutPmeMad', 'defaultPayoutTpeMad',
+          'defaultSlaRottingHours', 'defaultIdleLockMinutes', 'dlpExportAlertThreshold',
+          'enforceCndpOptOutLock', 'updatedBy', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'companyName', 'companyIce', 'companyAddress', 'companyPhone',
+          'defaultPayoutGrandCompteMad', 'defaultPayoutPmeMad', 'defaultPayoutTpeMad',
+          'defaultSlaRottingHours', 'defaultIdleLockMinutes', 'dlpExportAlertThreshold',
+          'enforceCndpOptOutLock', 'updatedBy', 'createdAt', 'updatedAt'
+        ])
+        && data.companyName is string && data.companyName.size() >= 1 && data.companyName.size() <= 140
+        && data.companyIce is string && data.companyIce.size() <= 40
+        && data.companyAddress is string && data.companyAddress.size() <= 220
+        && data.companyPhone is string && data.companyPhone.size() <= 40
+        && data.defaultPayoutGrandCompteMad is number && data.defaultPayoutGrandCompteMad >= 0 && data.defaultPayoutGrandCompteMad <= 200000
+        && data.defaultPayoutPmeMad is number && data.defaultPayoutPmeMad >= 0 && data.defaultPayoutPmeMad <= 200000
+        && data.defaultPayoutTpeMad is number && data.defaultPayoutTpeMad >= 0 && data.defaultPayoutTpeMad <= 200000
+        && data.defaultSlaRottingHours is number && data.defaultSlaRottingHours >= 12 && data.defaultSlaRottingHours <= 720
+        && data.defaultIdleLockMinutes is number && data.defaultIdleLockMinutes in [0, 15, 30, 60]
+        && data.dlpExportAlertThreshold is number && data.dlpExportAlertThreshold >= 5 && data.dlpExportAlertThreshold <= 5000
+        && data.enforceCndpOptOutLock is bool
+        && data.updatedBy is string && isValidId(data.updatedBy) && data.updatedBy == request.auth.uid
+        && (!('createdAt' in data) || data.createdAt is timestamp)
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidSecurityAuditLog(data, logId) {
+      return data.keys().hasAll([
+          'id', 'orgScope', 'severity', 'category', 'action', 'summary',
+          'actorUid', 'actorName', 'actorRole', 'createdAtIso', 'createdAt'
+        ])
+        && data.keys().hasOnly([
+          'id', 'orgScope', 'severity', 'category', 'action', 'summary',
+          'actorUid', 'actorName', 'actorRole', 'targetUid', 'targetLabel',
+          'recordCount', 'createdAtIso', 'createdAt'
+        ])
+        && data.id is string && data.id == logId && isValidId(data.id)
+        && data.orgScope is string && data.orgScope == 'orange_pro_team'
+        && data.severity is string && data.severity in ['info', 'warn', 'critical']
+        && data.category is string && data.category in [
+          'export_dlp', 'access_control', 'vault_config', 'org_settings', 'data_privacy', 'session'
+        ]
+        && data.action is string && data.action.size() >= 1 && data.action.size() <= 80
+        && data.summary is string && data.summary.size() >= 1 && data.summary.size() <= 400
+        && data.actorUid is string && isValidId(data.actorUid) && data.actorUid == request.auth.uid
+        && data.actorName is string && data.actorName.size() >= 1 && data.actorName.size() <= 120
+        && data.actorRole is string && data.actorRole.size() >= 1 && data.actorRole.size() <= 40
+        && (!('targetUid' in data) || (data.targetUid is string && isValidId(data.targetUid)))
+        && (!('targetLabel' in data) || (data.targetLabel is string && data.targetLabel.size() <= 160))
+        && (!('recordCount' in data) || (data.recordCount is number && data.recordCount >= 0 && data.recordCount <= 1000000))
+        && data.createdAtIso is string && data.createdAtIso.size() >= 1 && data.createdAtIso.size() <= 64
+        && data.createdAt is timestamp;
     }
 
     function isValidEmailSkill(data, userId, skillId) {
@@ -1061,6 +1125,7 @@ service cloud.firestore {
             'notifyBadges', 'notifySound', 'compactUi',
             'dismissedDedupKeys', 'includePhoneOnlyDedup',
             'legalRaisonSociale', 'legalIce', 'legalAdresse', 'legalTelephone',
+            'advancedPrefsJson',
             'updatedAt'
           ])
         );
@@ -1113,7 +1178,7 @@ service cloud.firestore {
               'statut', 'statutUpdatedAt', 'prochaineRelanceAt', 'rdvAt', 'rdvLieu', 'updatedAt'
             ])
             ||
-            // Action 2: Full CRM edit, multi-contact addition, web/AI enrichment, attribution, or signed fiche restoration
+            // Action 2: Full CRM edit, multi-contact addition, web/AI enrichment, attribution, CNDP opt-out, or signed fiche restoration
             incoming().diff(existing()).affectedKeys().hasOnly([
               'numeroFiche', 'societe', 'secteur', 'ville', 'telephone',
               'telephonesSupplementaires', 'email', 'emailsSupplementaires',
@@ -1122,6 +1187,7 @@ service cloud.firestore {
               'prochaineRelanceAt', 'rdvAt', 'rdvLieu',
               'assignedByUid', 'assignedByName', 'assignedAt',
               'restoredByName', 'restoredAt', 'restoredReason',
+              'optOut', 'optOutAt', 'optOutReason',
               'dateAjout', 'updatedAt'
             ])
           );
@@ -1437,33 +1503,66 @@ service cloud.firestore {
       }
     }
 
-    // 15. Collection: /app_config/{configId} (Non-Sensitive Shared WebRTC ICE/TURN Relay Config for 4G/5G NAT Traversal)
+    // 15. Collection: /app_config/{configId} (Shared WebRTC ICE/TURN Relay Config & Org Governance Settings)
     match /app_config/{configId} {
-      allow get: if configId == 'rtc_ice'
+      allow get: if (configId == 'rtc_ice' || configId == 'org_settings')
         && (isSuperAdmin() || isApprovedMember(request.auth.uid));
 
       allow list: if false;
 
       allow create: if isSuperAdmin()
-        && configId == 'rtc_ice'
-        && isValidRtcIceConfig(incoming())
         && (!('createdAt' in incoming()) || incoming().createdAt == request.time)
-        && incoming().updatedAt == request.time;
+        && incoming().updatedAt == request.time
+        && (
+          (configId == 'rtc_ice' && isValidRtcIceConfig(incoming()))
+          || (configId == 'org_settings' && isValidOrgSettings(incoming()))
+        );
 
       allow update: if isSuperAdmin()
-        && configId == 'rtc_ice'
-        && isValidRtcIceConfig(incoming())
         && (
           !('createdAt' in existing())
           || ('createdAt' in incoming() && incoming().createdAt == existing().createdAt)
           || ('createdAt' in incoming() && incoming().createdAt == request.time)
         )
         && incoming().updatedAt == request.time
-        && incoming().diff(existing()).affectedKeys().hasOnly([
-          'iceServersJson', 'turnEnabled', 'providerLabel', 'updatedBy', 'createdAt', 'updatedAt'
-        ]);
+        && (
+          (
+            configId == 'rtc_ice'
+            && isValidRtcIceConfig(incoming())
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+              'iceServersJson', 'turnEnabled', 'providerLabel', 'updatedBy', 'createdAt', 'updatedAt'
+            ])
+          )
+          || (
+            configId == 'org_settings'
+            && isValidOrgSettings(incoming())
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+              'companyName', 'companyIce', 'companyAddress', 'companyPhone',
+              'defaultPayoutGrandCompteMad', 'defaultPayoutPmeMad', 'defaultPayoutTpeMad',
+              'defaultSlaRottingHours', 'defaultIdleLockMinutes', 'dlpExportAlertThreshold',
+              'enforceCndpOptOutLock', 'updatedBy', 'createdAt', 'updatedAt'
+            ])
+          )
+        );
 
-      allow delete: if isSuperAdmin() && configId == 'rtc_ice';
+      allow delete: if isSuperAdmin() && (configId == 'rtc_ice' || configId == 'org_settings');
+    }
+
+    // 16. Collection: /security_audit_logs/{logId} (Immutable Append-Only Security, DLP & CNDP Audit Trail)
+    match /security_audit_logs/{logId} {
+      allow get: if isSuperAdmin() && isValidId(logId);
+
+      allow list: if isSuperAdmin() && resource.data.orgScope == 'orange_pro_team';
+
+      allow create: if isValidId(logId)
+        && (isSuperAdmin() || isApprovedMember(request.auth.uid))
+        && isValidSecurityAuditLog(incoming(), logId)
+        && incoming().createdAt == request.time;
+
+      // Security audit logs are strictly immutable (append-only)
+      allow update: if false;
+
+      allow delete: if isSuperAdmin() && isValidId(logId);
     }
   }
 }
