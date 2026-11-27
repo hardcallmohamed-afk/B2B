@@ -12,6 +12,9 @@ import {
 interface KpiTrendChartProps {
   fiches: FicheEntreprise[];
   totalUnfilteredCount: number;
+  targetMaturityPct?: number;
+  monthlyGoalPayoutMad?: number;
+  currentMonthPayoutMad?: number;
 }
 
 const SEGMENT_SERIES: { key: SegmentCouleur; label: string; stroke: string }[] = [
@@ -44,7 +47,14 @@ function buildAreaPath(coords: { x: number; y: number }[], baselineY: number): s
   return `${line} L ${last.x.toFixed(1)} ${baselineY.toFixed(1)} L ${first.x.toFixed(1)} ${baselineY.toFixed(1)} Z`;
 }
 
-export const KpiTrendChart: React.FC<KpiTrendChartProps> = ({ fiches, totalUnfilteredCount }) => {
+export const KpiTrendChart: React.FC<KpiTrendChartProps> = ({
+  fiches,
+  totalUnfilteredCount,
+  targetMaturityPct = 80,
+  monthlyGoalPayoutMad = 0,
+  currentMonthPayoutMad = 0,
+}) => {
+  const safeTargetMaturity = Math.min(95, Math.max(50, Math.round(Number(targetMaturityPct) || 80)));
   const [period, setPeriod] = useState<TrendPeriod>('30d');
   const [metricMode, setMetricMode] = useState<TrendMetricMode>('pipeline');
   const [collapsed, setCollapsed] = useState(false);
@@ -256,6 +266,20 @@ export const KpiTrendChart: React.FC<KpiTrendChartProps> = ({ fiches, totalUnfil
                   ({summary.maturityDelta >= 0 ? `+${summary.maturityDelta}` : summary.maturityDelta} pts)
                 </span>
               </div>
+              {monthlyGoalPayoutMad > 0 && (
+                <>
+                  <span className="text-stone-300" aria-hidden="true">·</span>
+                  <div>
+                    <span className="text-stone-500">Prime mois : </span>
+                    <span className="font-bold text-emerald-700 text-sm">
+                      {currentMonthPayoutMad.toLocaleString('fr-FR')} / {monthlyGoalPayoutMad.toLocaleString('fr-FR')} MAD
+                    </span>
+                    <span className="ml-1 text-stone-500">
+                      ({Math.min(100, Math.round((currentMonthPayoutMad / monthlyGoalPayoutMad) * 100))}%)
+                    </span>
+                  </div>
+                </>
+              )}
             </div>
 
             {isTimeSeriesMode && activePoint && (
@@ -277,7 +301,7 @@ export const KpiTrendChart: React.FC<KpiTrendChartProps> = ({ fiches, totalUnfil
                 )}
                 {metricMode === 'maturity' && (
                   <span className="text-orange-700">
-                    Maturité moyenne : {activePoint.avgMaturity}% (cible 80%)
+                    Maturité moyenne : {activePoint.avgMaturity}% (cible {safeTargetMaturity}%)
                   </span>
                 )}
                 {metricMode === 'segments' && (
@@ -402,10 +426,10 @@ export const KpiTrendChart: React.FC<KpiTrendChartProps> = ({ fiches, totalUnfil
                   );
                 })()}
 
-                {/* Mode 2 : Maturité moyenne (%) + ligne objectif 80% */}
+                {/* Mode 2 : Maturité moyenne (%) + ligne objectif dynamique */}
                 {metricMode === 'maturity' && (() => {
                   const matCoords = points.map((p, i) => ({ x: xFor(i), y: yFor(p.avgMaturity) }));
-                  const targetY = yFor(80);
+                  const targetY = yFor(safeTargetMaturity);
                   return (
                     <>
                       <line
@@ -425,7 +449,7 @@ export const KpiTrendChart: React.FC<KpiTrendChartProps> = ({ fiches, totalUnfil
                         fontSize="10"
                         fontWeight="600"
                       >
-                        Objectif qualité 80%
+                        Objectif qualité {safeTargetMaturity}%
                       </text>
                       <path d={buildAreaPath(matCoords, baselineY)} fill="url(#orangeAreaGrad)" />
                       <path
@@ -838,7 +862,7 @@ export const KpiTrendChart: React.FC<KpiTrendChartProps> = ({ fiches, totalUnfil
                   </span>
                   <span className="flex items-center gap-1.5">
                     <span className="w-3 h-0.5 border-t border-dashed border-emerald-600 inline-block" aria-hidden="true" />
-                    Seuil cible prêt à prospecter (80%)
+                    Seuil cible prêt à prospecter ({safeTargetMaturity}%)
                   </span>
                 </>
               )}

@@ -50,6 +50,7 @@ interface AiCopilotDrawerProps {
   onClearFocusedFiche: () => void;
   aiAvailable: boolean;
   aiModel: string;
+  activeZoneLabel?: string;
   hasConfiguredFallbackKeys?: boolean;
   onOpenApiHub?: () => void;
   onOpenEmailStudio: (fiche: FicheEntreprise) => void;
@@ -62,28 +63,30 @@ interface AiCopilotDrawerProps {
   onRefreshAiStatus?: () => void;
 }
 
-const QUICK_PROMPTS = [
-  {
-    label: 'Priorités du jour',
-    prompt:
-      'Analyse mon portefeuille actuel et donne-moi le top 3 des comptes à appeler en priorité aujourd’hui avec le motif précis et leur code OP-XXXX.',
-  },
-  {
-    label: 'Plan Fibre & Flotte',
-    prompt:
-      'Quels comptes Grand Compte ou PME de mon portefeuille ont le plus fort potentiel Fibre Dédiée + Flotte Mobile Corporate ? Propose un angle d’attaque.',
-  },
-  {
-    label: 'Relance Devis',
-    prompt:
-      'Prépare un plan de relance concret pour les comptes actuellement en "RDV pris" ou "Devis envoyé" afin d’accélérer la signature Orange Pro.',
-  },
-  {
-    label: 'Script appel à froid',
-    prompt:
-      'Rédige un script d’appel à froid de 30 secondes adapté aux décideurs B2B de Meknès & Région pour obtenir un rendez-vous d’audit télécom sans coupure.',
-  },
-];
+function buildQuickPrompts(zoneLabel: string) {
+  const targetZone = zoneLabel.trim() || 'votre région au Maroc';
+  return [
+    {
+      label: 'Priorités du jour',
+      prompt:
+        'Analyse mon portefeuille actuel et donne-moi le top 3 des comptes à appeler en priorité aujourd’hui avec le motif précis et leur code fiche.',
+    },
+    {
+      label: 'Plan Fibre & Flotte',
+      prompt:
+        'Quels comptes Grand Compte ou PME de mon portefeuille ont le plus fort potentiel Fibre Dédiée + Flotte Mobile Corporate ? Propose un angle d’attaque.',
+    },
+    {
+      label: 'Relance Devis',
+      prompt:
+        'Prépare un plan de relance concret pour les comptes actuellement en "RDV pris" ou "Devis envoyé" afin d’accélérer la signature Orange Pro.',
+    },
+    {
+      label: 'Script appel à froid',
+      prompt: `Rédige un script d’appel à froid de 30 secondes adapté aux décideurs B2B de ${targetZone} pour obtenir un rendez-vous d’audit télécom sans coupure.`,
+    },
+  ];
+}
 
 function toCopilotFicheInput(f: FicheEntreprise): CopilotFicheInput {
   return {
@@ -91,7 +94,7 @@ function toCopilotFicheInput(f: FicheEntreprise): CopilotFicheInput {
     numeroFiche: f.numeroFiche,
     societe: f.societe,
     secteur: f.secteur,
-    secteurLabel: SECTEURS_META[f.secteur]?.label || f.secteur,
+    secteurLabel: (SECTEURS_META[f.secteur] || SECTEURS_META.pme).label,
     ville: f.ville,
     telephone: f.telephone,
     telephonesSupplementaires: f.telephonesSupplementaires,
@@ -114,6 +117,7 @@ export const AiCopilotDrawer: React.FC<AiCopilotDrawerProps> = ({
   onClearFocusedFiche,
   aiAvailable,
   aiModel,
+  activeZoneLabel,
   hasConfiguredFallbackKeys = false,
   onOpenApiHub,
   onOpenEmailStudio,
@@ -206,7 +210,7 @@ export const AiCopilotDrawer: React.FC<AiCopilotDrawerProps> = ({
       const ficheInput = toCopilotFicheInput(fiche);
       const briefPayload = {
         societe: fiche.societe,
-        secteur: SECTEURS_META[fiche.secteur].label,
+        secteur: (SECTEURS_META[fiche.secteur] || SECTEURS_META.pme).label,
         ville: fiche.ville,
         effectif: fiche.effectif,
         statut: fiche.statut,
@@ -392,7 +396,7 @@ export const AiCopilotDrawer: React.FC<AiCopilotDrawerProps> = ({
     try {
       const portfolioSummary = buildPortfolioAiSummary(fiches);
       const focusedSummary = focusedFiche
-        ? `[${focusedFiche.numeroFiche || 'N/A'}] ${focusedFiche.societe} (${SECTEURS_META[focusedFiche.secteur].label}, ${focusedFiche.ville}, statut: ${focusedFiche.statut}, contact: ${focusedFiche.contact || 'absent'}, effectif: ${focusedFiche.effectif || 'N/A'})`
+        ? `[${focusedFiche.numeroFiche || 'N/A'}] ${focusedFiche.societe} (${(SECTEURS_META[focusedFiche.secteur] || SECTEURS_META.pme).label}, ${focusedFiche.ville}, statut: ${focusedFiche.statut}, contact: ${focusedFiche.contact || 'absent'}, effectif: ${focusedFiche.effectif || 'N/A'})`
         : '';
 
       const chatHistoryPayload = nextHistory
@@ -597,7 +601,7 @@ export const AiCopilotDrawer: React.FC<AiCopilotDrawerProps> = ({
           <>
             <div className="flex-1 overflow-y-auto p-4 space-y-3">
               <div className="grid grid-cols-2 gap-1.5 pb-2 border-b border-stone-100">
-                {QUICK_PROMPTS.map((qp) => (
+                {buildQuickPrompts(activeZoneLabel || focusedFiche?.ville || fiches[0]?.ville || 'Maroc').map((qp) => (
                   <button
                     key={qp.label}
                     type="button"
@@ -938,7 +942,7 @@ export const AiCopilotDrawer: React.FC<AiCopilotDrawerProps> = ({
                         <h3 className="text-sm font-bold text-stone-900">{focusedFiche.societe}</h3>
                       </div>
                       <p className="text-xs text-stone-500">
-                        {SECTEURS_META[focusedFiche.secteur].label} · {focusedFiche.ville || 'Maroc'} · Statut : {focusedFiche.statut}
+                        {(SECTEURS_META[focusedFiche.secteur] || SECTEURS_META.pme).label} · {focusedFiche.ville || 'Maroc'} · Statut : {focusedFiche.statut}
                       </p>
                     </div>
                     <button

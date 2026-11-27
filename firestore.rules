@@ -128,10 +128,23 @@ service cloud.firestore {
       return val is string && val in ['crm', 'team', 'badges'];
     }
 
+    function canSuperviseTeam() {
+      return isSuperAdmin() || isTeamLeadOrManager();
+    }
+
     function isValidStringList(arr, maxItems, maxItemLen) {
       return arr is list
         && arr.size() <= maxItems
-        && (arr.size() == 0 || (arr[0] is string && arr[0].size() <= maxItemLen));
+        && (
+          arr.size() == 0
+          || (
+            arr[0] is string
+            && arr[0].size() <= maxItemLen
+            && (arr.size() < 2 || (arr[1] is string && arr[1].size() <= maxItemLen))
+            && arr[arr.size() - 1] is string
+            && arr[arr.size() - 1].size() <= maxItemLen
+          )
+        );
     }
 
     // 3. Entity Validation Blueprints (Anti-Update-Gap)
@@ -179,7 +192,9 @@ service cloud.firestore {
     }
 
     function isValidAvatarDataUrl(val) {
-      return val is string && val.size() <= 45000;
+      return val is string
+        && val.size() <= 45000
+        && (val == '' || val.matches('^data:image/(jpeg|png|webp);base64,[A-Za-z0-9+/=]+$'));
     }
 
     function isValidTeamStat(data, targetUid) {
@@ -727,7 +742,7 @@ service cloud.firestore {
             ])
           )
           ||
-          // Action 2: Collaborator updates ONLY displayName, zone, avatarDataUrl (cannot alter financial counters, role, or active)
+          // Action 2: Collaborator updates own profile & non-financial progression stats (cannot alter financial counters, manual badges, role, or active)
           (
             isOwner(userId)
             && incoming().uid == request.auth.uid
@@ -738,15 +753,12 @@ service cloud.firestore {
             && incoming().manualBadges == existing().manualBadges
             && incoming().role == existing().role
             && incoming().active == existing().active
-            && incoming().totalProspects == existing().totalProspects
-            && incoming().totalQualified == existing().totalQualified
             && incoming().totalContracts == existing().totalContracts
             && incoming().totalPayoutMad == existing().totalPayoutMad
-            && incoming().xp == existing().xp
-            && incoming().unlockedCount == existing().unlockedCount
-            && incoming().monthlyHistory == existing().monthlyHistory
             && incoming().diff(existing()).affectedKeys().hasOnly([
-              'displayName', 'zone', 'avatarDataUrl', 'updatedAt'
+              'displayName', 'zone', 'avatarDataUrl',
+              'totalProspects', 'totalQualified', 'xp', 'unlockedCount', 'monthlyHistory',
+              'updatedAt'
             ])
           )
         );
@@ -762,15 +774,33 @@ service cloud.firestore {
         || (isApprovedMember(request.auth.uid) && (resource == null || existing().ownerId == request.auth.uid))
       );
 
-      // Super-Admin and Manager/Team-Lead list team contracts; collaborators list ONLY their own.
+      // Super-Admin and Manager/Team-Lead list team contracts; active collaborators list ONLY their own.
       allow list: if (isSuperAdmin() && resource.data.orgScope == 'orange_pro_team')
         || (isTeamLeadOrManager() && resource.data.orgScope == 'orange_pro_team')
-        || (isVerifiedUser() && resource.data.ownerId == request.auth.uid);
+        || (isApprovedMember(request.auth.uid) && resource.data.ownerId == request.auth.uid);
 
       allow create: if isValidId(contractId)
         && isValidSignedContract(incoming(), contractId)
         && incoming().createdAt == request.time
         && incoming().updatedAt == request.time
+        && (
+          incoming().payoutStatus != 'Versé'
+          || (
+            'referenceVirement' in incoming()
+            && incoming().referenceVirement is string
+            && incoming().referenceVirement.size() >= 1
+            && incoming().referenceVirement.size() <= 80
+          )
+        )
+        && (
+          incoming().payoutStatus != 'Refusé'
+          || (
+            'refusMotif' in incoming()
+            && incoming().refusMotif is string
+            && incoming().refusMotif.size() >= 1
+            && incoming().refusMotif.size() <= 200
+          )
+        )
         && (
           isSuperAdmin()
           || isTeamLeadOrManager()
@@ -991,7 +1021,7 @@ service cloud.firestore {
         );
 
         allow list: if (isSuperAdmin() && resource.data.orgScope == 'orange_pro_team')
-          || (isVerifiedUser() && request.auth.uid == userId && resource.data.ownerId == request.auth.uid);
+          || (isOwner(userId) && resource.data.ownerId == request.auth.uid);
 
         allow create: if isValidId(userId)
           && isValidId(sessionId)
@@ -1066,10 +1096,8 @@ service cloud.firestore {
           || ((isSuperAdmin() || isTeamLeadOrManager()) && (resource == null || existing().ownerId == userId))
         );
 
-        allow list: if isVerifiedUser() && (
-          (request.auth.uid == userId && resource.data.ownerId == request.auth.uid)
-          || ((isSuperAdmin() || isTeamLeadOrManager()) && resource.data.ownerId == userId)
-        );
+        allow list: if (isOwner(userId) && resource.data.ownerId == request.auth.uid)
+          || (canSuperviseTeam() && resource.data.ownerId == userId);
 
         allow create: if isValidId(userId)
           && isValidId(ficheId)
@@ -1142,10 +1170,8 @@ service cloud.firestore {
             || ((isSuperAdmin() || isTeamLeadOrManager()) && (resource == null || existing().ownerId == userId))
           );
 
-          allow list: if isVerifiedUser() && (
-            (request.auth.uid == userId && resource.data.ownerId == request.auth.uid)
-            || ((isSuperAdmin() || isTeamLeadOrManager()) && resource.data.ownerId == userId)
-          );
+          allow list: if (isOwner(userId) && resource.data.ownerId == request.auth.uid)
+            || (canSuperviseTeam() && resource.data.ownerId == userId);
 
           allow create: if isValidId(userId)
             && isValidId(ficheId)
@@ -1195,10 +1221,8 @@ service cloud.firestore {
             || ((isSuperAdmin() || isTeamLeadOrManager()) && (resource == null || existing().ownerId == userId))
           );
 
-          allow list: if isVerifiedUser() && (
-            (request.auth.uid == userId && resource.data.ownerId == request.auth.uid)
-            || ((isSuperAdmin() || isTeamLeadOrManager()) && resource.data.ownerId == userId)
-          );
+          allow list: if (isOwner(userId) && resource.data.ownerId == request.auth.uid)
+            || (canSuperviseTeam() && resource.data.ownerId == userId);
 
           allow create: if isValidId(userId)
             && isValidId(ficheId)
@@ -1224,8 +1248,7 @@ service cloud.firestore {
         allow get: if isValidId(userId) && isValidId(skillId) && isOwner(userId)
           && (resource == null || existing().ownerId == request.auth.uid);
 
-        allow list: if isVerifiedUser()
-          && request.auth.uid == userId
+        allow list: if isOwner(userId)
           && resource.data.ownerId == request.auth.uid;
 
         allow create: if isValidId(userId)
@@ -1264,10 +1287,9 @@ service cloud.firestore {
     // 12. Collection: /notifications/{notifId} (Real-time Cross-User Notifications: Fiche Assignment, Access, Restoration)
     match /notifications/{notifId} {
       allow get: if isValidId(notifId)
-        && isVerifiedUser()
-        && (resource == null || existing().recipientUid == request.auth.uid || isSuperAdmin());
+        && (isSuperAdmin() || (isApprovedMember(request.auth.uid) && (resource == null || existing().recipientUid == request.auth.uid)));
 
-      allow list: if isVerifiedUser()
+      allow list: if (isSuperAdmin() || isApprovedMember(request.auth.uid))
         && resource.data.recipientUid == request.auth.uid;
 
       allow create: if isValidId(notifId)
@@ -1275,12 +1297,13 @@ service cloud.firestore {
         && (isSuperAdmin() || isApprovedMember(request.auth.uid))
         && incoming().senderUid == request.auth.uid
         && incoming().read == false
+        && (!(incoming().kind in ['fiche_assigned', 'fiche_restored', 'contract_status_changed', 'coaching_invite']) || canSuperviseTeam())
         && incoming().createdAt == request.time
         && incoming().updatedAt == request.time;
 
       allow update: if isValidId(notifId)
         && isValidAppNotification(incoming(), notifId)
-        && isVerifiedUser()
+        && (isSuperAdmin() || isApprovedMember(request.auth.uid))
         && existing().recipientUid == request.auth.uid
         && incoming().id == existing().id
         && incoming().recipientUid == existing().recipientUid
@@ -1290,7 +1313,7 @@ service cloud.firestore {
         && incoming().diff(existing()).affectedKeys().hasOnly(['read', 'updatedAt']);
 
       allow delete: if isValidId(notifId)
-        && (isSuperAdmin() || (isVerifiedUser() && existing().recipientUid == request.auth.uid));
+        && (isSuperAdmin() || (isApprovedMember(request.auth.uid) && existing().recipientUid == request.auth.uid));
     }
 
     // 13. Collection: /direct_chats/{collabUid} (Private 1-to-1 Discussion Channel: Super-Admin <-> Collaborator)
@@ -1301,7 +1324,7 @@ service cloud.firestore {
       );
 
       allow list: if (isSuperAdmin() && resource.data.orgScope == 'orange_pro_team')
-        || (isVerifiedUser() && resource.data.collabUid == request.auth.uid);
+        || (isOwner(collabUid) && resource.data.collabUid == request.auth.uid);
 
       allow create: if isValidId(collabUid)
         && isValidDirectChatChannel(incoming(), collabUid)
@@ -1338,7 +1361,7 @@ service cloud.firestore {
         );
 
         allow list: if (isSuperAdmin() && resource.data.orgScope == 'orange_pro_team')
-          || (isVerifiedUser() && request.auth.uid == collabUid && resource.data.collabUid == request.auth.uid);
+          || (isOwner(collabUid) && resource.data.collabUid == request.auth.uid);
 
         allow create: if isValidId(collabUid)
           && isValidId(messageId)
@@ -1363,7 +1386,7 @@ service cloud.firestore {
       );
 
       allow list: if (isSuperAdmin() && resource.data.orgScope == 'orange_pro_team')
-        || (isVerifiedUser() && resource.data.collabUid == request.auth.uid);
+        || (isOwner(collabUid) && resource.data.collabUid == request.auth.uid);
 
       // Only the collaborator themselves can opt-in (collabConsentActive == true); Super-Admin can only initialize idle/ended doc with consent false.
       allow create: if isValidId(collabUid)
@@ -1395,6 +1418,7 @@ service cloud.firestore {
           // Super-Admin can join/answer/Push-to-Talk ONLY while collaborator consent is active (cannot force collabConsentActive true)
           (
             isSuperAdmin()
+            && existing().collabConsentActive == true
             && incoming().collabConsentActive == existing().collabConsentActive
             && incoming().diff(existing()).affectedKeys().hasOnly([
               'status', 'adminUid', 'adminName', 'adminPttActive',
@@ -1413,7 +1437,7 @@ service cloud.firestore {
 
         allow list: if isValidId(collabUid) && (
           isSuperAdmin()
-          || (isVerifiedUser() && request.auth.uid == collabUid)
+          || isOwner(collabUid)
         );
 
         allow create: if isValidId(collabUid)

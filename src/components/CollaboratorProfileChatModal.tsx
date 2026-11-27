@@ -60,10 +60,28 @@ import { resolveCityAndRegionFromZoneString } from '../utils/moroccoCities';
 import { getUserInitials } from '../utils/avatarResize';
 import { RoleBadge } from './RoleBadge';
 
-const RTC_ICE_SERVERS: RTCIceServer[] = [
+const DEFAULT_RTC_ICE_SERVERS: RTCIceServer[] = [
   { urls: 'stun:stun.l.google.com:19302' },
   { urls: 'stun:stun1.l.google.com:19302' },
 ];
+
+async function fetchRtcIceServers(): Promise<RTCIceServer[]> {
+  try {
+    const res = await fetch('/api/rtc/ice-servers', {
+      method: 'GET',
+      headers: { Accept: 'application/json' },
+      signal: AbortSignal.timeout(3500),
+    });
+    if (!res.ok) return DEFAULT_RTC_ICE_SERVERS;
+    const data = await res.json();
+    if (Array.isArray(data?.iceServers) && data.iceServers.length > 0) {
+      return data.iceServers as RTCIceServer[];
+    }
+  } catch {
+    // Fallback to STUN
+  }
+  return DEFAULT_RTC_ICE_SERVERS;
+}
 
 export type ProfileChatModalTab = 'profile' | 'chat' | 'coaching';
 
@@ -130,6 +148,7 @@ export const CollaboratorProfileChatModal: React.FC<CollaboratorProfileChatModal
   const remoteAudioRef = useRef<HTMLAudioElement | null>(null);
   const candidatesUnsubRef = useRef<(() => void) | null>(null);
   const seenCandidateIdsRef = useRef<Set<string>>(new Set());
+  const pendingIceCandidatesRef = useRef<RTCIceCandidateInit[]>([]);
   const activeOfferSdpRef = useRef<string>('');
   const meterCtxRef = useRef<AudioContext | null>(null);
   const meterTimerRef = useRef<number | null>(null);
@@ -277,7 +296,7 @@ export const CollaboratorProfileChatModal: React.FC<CollaboratorProfileChatModal
   };
 
   // Cleanup WebRTC session cleanly
-  const stopAdminCoachingSession = async (updateCloud = true) => {
+  const stopAdminCoachingSession = async (updateCloud = true, preserveError = false) => {
     setPttActive(false);
     setPttLatched(false);
     stopAudioMeter();
@@ -302,8 +321,11 @@ export const CollaboratorProfileChatModal: React.FC<CollaboratorProfileChatModal
       remoteAudioRef.current.srcObject = null;
     }
     seenCandidateIdsRef.current.clear();
-    setRtcStatus('idle');
-    setRtcError('');
+    pendingIceCandidatesRef.current = [];
+    if (!preserveError) {
+      setRtcStatus('idle');
+      setRtcError('');
+    }
 
     if (updateCloud && target?.uid && coachingDoc?.collabConsentActive) {
       try {
@@ -318,12 +340,15 @@ export const CollaboratorProfileChatModal: React.FC<CollaboratorProfileChatModal
     }
   };
 
-  // Stop WebRTC if modal closes or collaborator revokes consent
+  // Stop WebRTC if modal closes, unmounts, or target collaborator changes
   useEffect(() => {
     if (!isOpen) {
       void stopAdminCoachingSession(true);
     }
-  }, [isOpen]);
+    return () => {
+      void stopAdminCoachingSession(true);
+    };
+  }, [isOpen, target?.uid]);
 
   useEffect(() => {
     if (rtcStatus !== 'idle' && coachingDoc && !coachingDoc.collabConsentActive) {
@@ -370,7 +395,8 @@ export const CollaboratorProfileChatModal: React.FC<CollaboratorProfileChatModal
     setRtcError('');
 
     try {
-      const pc = new RTCPeerConnection({ iceServers: RTC_ICE_SERVERS });
+      const iceServers = await fetchRtcIceServers();
+      const pc = new RTCPeerConnection({ iceServers });
       pcRef.current = pc;
 
       // Attach Super-Admin microphone track (muted by default until Push-to-Talk is pressed)
@@ -413,6 +439,7 @@ export const CollaboratorProfileChatModal: React.FC<CollaboratorProfileChatModal
         const st = pc.connectionState;
         if (st === 'connected') {
           setRtcStatus('connected');
+          onNotify(`Écoute Coaching Live connectée avec ${target.displayName}.`);
         } else if (st === 'failed' || st === 'disconnected' || st === 'closed') {
           setRtcStatus('idle');
           setPttActive(false);
@@ -420,8 +447,39 @@ export const CollaboratorProfileChatModal: React.FC<CollaboratorProfileChatModal
         }
       };
 
+      // Listen for collaborator ICE candidates and queue until remoteDescription is set
+      seenCandidateIdsRef.current.clear();
+      pendingIceCandidatesRef.current = [];
+      candidatesUnsubRef.current = onSnapshot(
+        getCoachingCandidatesQuery(target.uid),
+        (snap) => {
+          snap.forEach((docSnap) => {
+            if (seenCandidateIdsRef.current.has(docSnap.id)) return;
+            const d = docSnap.data();
+            if (d.fromRole !== 'collab' || typeof d.candidateJson !== 'string') return;
+            seenCandidateIdsRef.current.add(docSnap.id);
+            try {
+              const cand = JSON.parse(d.candidateJson) as RTCIceCandidateInit;
+              if (pc.remoteDescription && pc.remoteDescription.type) {
+                void pc.addIceCandidate(new RTCIceCandidate(cand)).catch(() => {});
+              } else {
+                pendingIceCandidatesRef.current.push(cand);
+              }
+            } catch {
+              // ignore malformed candidate
+            }
+          });
+        },
+        () => {}
+      );
+
       const offerDesc = JSON.parse(coachingDoc.offerSdp) as RTCSessionDescriptionInit;
       await pc.setRemoteDescription(new RTCSessionDescription(offerDesc));
+
+      const queued = pendingIceCandidatesRef.current.splice(0);
+      for (const cand of queued) {
+        await pc.addIceCandidate(new RTCIceCandidate(cand)).catch(() => {});
+      }
 
       const answer = await pc.createAnswer();
       await pc.setLocalDescription(answer);
@@ -433,35 +491,11 @@ export const CollaboratorProfileChatModal: React.FC<CollaboratorProfileChatModal
         adminPttActive: false,
         answerSdp: JSON.stringify(answer),
       });
-
-      // Listen for collaborator ICE candidates
-      seenCandidateIdsRef.current.clear();
-      candidatesUnsubRef.current = onSnapshot(
-        getCoachingCandidatesQuery(target.uid),
-        (snap) => {
-          snap.forEach((docSnap) => {
-            if (seenCandidateIdsRef.current.has(docSnap.id)) return;
-            const d = docSnap.data();
-            if (d.fromRole !== 'collab' || typeof d.candidateJson !== 'string') return;
-            seenCandidateIdsRef.current.add(docSnap.id);
-            try {
-              const cand = JSON.parse(d.candidateJson) as RTCIceCandidateInit;
-              void pc.addIceCandidate(new RTCIceCandidate(cand)).catch(() => {});
-            } catch {
-              // ignore malformed candidate
-            }
-          });
-        },
-        () => {}
-      );
-
-      setRtcStatus('connected');
-      onNotify(`Écoute Coaching Live connectée avec ${target.displayName}.`);
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Échec de connexion WebRTC.';
       setRtcStatus('error');
       setRtcError(msg);
-      await stopAdminCoachingSession(false);
+      await stopAdminCoachingSession(false, true);
     }
   };
 

@@ -41,7 +41,6 @@ export const AchievementToast: React.FC<AchievementToastProps> = ({
 }) => {
   const canViewSupervision = isSupervisorRole(currentUserRole);
   if (!notification) return null;
-  if (notification.kind === 'coaching_invite' && !canViewSupervision) return null;
 
   const isContractNotif =
     notification.kind === 'contract_signed' || notification.kind === 'contract_status_changed';
@@ -134,7 +133,7 @@ export const AchievementToast: React.FC<AchievementToastProps> = ({
       role="status"
       aria-live="polite"
       data-testid="achievement-unlock-toast"
-      className={`fixed top-2 inset-x-2.5 sm:inset-x-auto sm:top-3.5 sm:right-4 z-[60] sm:w-88 max-w-sm rounded-xl sm:rounded-2xl border ${borderCls} bg-white shadow-lg overflow-hidden animate-in fade-in slide-in-from-top-3 duration-200`}
+      className={`fixed top-2 inset-x-2.5 sm:inset-x-auto sm:top-3.5 sm:right-4 z-[60] sm:w-88 max-w-sm rounded-xl sm:rounded-2xl border ${borderCls} bg-white shadow-lg overflow-hidden op-animate-toast-in`}
     >
       <div
         className={`px-2.5 py-1 sm:px-3.5 sm:py-1.5 flex items-center justify-between text-[10px] sm:text-[11px] font-extrabold ${headerBg} ${headerText}`}
@@ -163,7 +162,7 @@ export const AchievementToast: React.FC<AchievementToastProps> = ({
         </span>
         <span className="inline-flex items-center gap-1.5 tabular-nums">
           {queueCount > 1 && (
-            <span className="rounded bg-black/15 px-1.5 py-0.2 text-[9px] sm:text-[10px]">
+            <span className="rounded bg-black/15 px-1.5 py-0.5 text-[9px] sm:text-[10px]">
               1/{queueCount}
             </span>
           )}
@@ -259,7 +258,7 @@ export const AchievementToast: React.FC<AchievementToastProps> = ({
               {displayTitle}
             </span>
             {!isContractNotif && !isFicheNotif && !isDirectComm && (
-              <span className={`rounded px-1.5 py-0.2 text-[9px] font-extrabold ${meta.pillBg} ${meta.pillText}`}>
+              <span className={`rounded px-1.5 py-0.5 text-[9px] font-extrabold ${meta.pillBg} ${meta.pillText}`}>
                 {meta.label}
               </span>
             )}

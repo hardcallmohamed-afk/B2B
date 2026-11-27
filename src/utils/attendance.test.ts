@@ -194,7 +194,7 @@ test('6-decimal GPS precision and Web Mercator Google Maps HD projection place m
     mapStyle: 'hybride',
   });
   assert.ok(tilesResult.tiles.length >= 6);
-  assert.ok(tilesResult.tiles[0].url.includes('google.com/vt/lyrs=y'));
+  assert.ok(tilesResult.tiles[0].url.includes('arcgisonline.com/ArcGIS/rest/services/World_Imagery'));
 
   const worldBefore = projectLatLngToMercatorWorld(33.893524, -5.547271, 16);
   const panned = panMercatorCenterByPixels(33.893524, -5.547271, 128, -64, 16);

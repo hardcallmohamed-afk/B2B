@@ -21,7 +21,11 @@ import {
   formatFriendlyDateFr,
 } from '../utils/activiteHelpers';
 import type { ActiviteType, ActiviteResultat, SanitizedActiviteDoc } from '../utils/firestoreSanitize';
-import { saveFicheActivite, fetchFicheActivites } from '../firebase';
+import { saveFicheActivite, saveFicheAuditLog, fetchFicheActivites } from '../firebase';
+import {
+  getDefaultProchaineRelanceIso,
+  type AdvancedAccountPreferences,
+} from '../utils/accountPreferences';
 
 interface ActiviteModalProps {
   isOpen: boolean;
@@ -32,6 +36,7 @@ interface ActiviteModalProps {
   ficheOwnerUid?: string;
   actorUid?: string;
   actorRole?: string;
+  defaultFollowUpDelay?: AdvancedAccountPreferences['followUpAlertDelay'];
   onFicheUpdated: (updatedFiche: FicheEntreprise) => void;
   onNotify: (msg: string, type?: 'ok' | 'err' | 'warn' | 'info') => void;
 }
@@ -52,6 +57,7 @@ export const ActiviteModal: React.FC<ActiviteModalProps> = ({
   ficheOwnerUid,
   actorUid,
   actorRole,
+  defaultFollowUpDelay = '48h',
   onFicheUpdated,
   onNotify,
 }) => {
@@ -74,7 +80,11 @@ export const ActiviteModal: React.FC<ActiviteModalProps> = ({
     setType('appel');
     setResultat('joint');
     setTexte('');
-    setProchaineRelanceAt('');
+    setProchaineRelanceAt(
+      fiche.prochaineRelanceAt
+        ? toLocalDateTimeInput(fiche.prochaineRelanceAt)
+        : toLocalDateTimeInput(getDefaultProchaineRelanceIso(defaultFollowUpDelay))
+    );
     setRdvAt(toLocalDateTimeInput(fiche.rdvAt));
     setRdvLieu(fiche.rdvLieu || fiche.ville || '');
     setErrorMessage(null);
@@ -99,7 +109,7 @@ export const ActiviteModal: React.FC<ActiviteModalProps> = ({
     return () => {
       cancelled = true;
     };
-  }, [isOpen, fiche, effectiveOwnerUid]);
+  }, [isOpen, fiche, effectiveOwnerUid, defaultFollowUpDelay]);
 
   if (!isOpen || !fiche) return null;
 
@@ -152,13 +162,37 @@ export const ActiviteModal: React.FC<ActiviteModalProps> = ({
         rdvLieu: cleanRdvLieu,
       });
 
-      // Mettre à jour l'état local de la fiche avec les miroirs
+      const shouldAdvanceToRdvPris =
+        isRdvType &&
+        fiche.statut !== 'Signé Orange Pro' &&
+        fiche.statut !== 'Devis envoyé' &&
+        fiche.statut !== 'RDV pris';
+
+      void saveFicheAuditLog(effectiveOwnerUid, fiche.id, {
+        ownerId: effectiveOwnerUid,
+        ficheId: fiche.id,
+        action: shouldAdvanceToRdvPris ? 'status_change' : 'updated',
+        field: shouldAdvanceToRdvPris ? 'statut' : `activite_${type}`,
+        oldValue: shouldAdvanceToRdvPris ? fiche.statut : resultat,
+        newValue: shouldAdvanceToRdvPris
+          ? 'RDV pris'
+          : (texte.trim().slice(0, 180) || `${type} (${resultat})`),
+        summary: shouldAdvanceToRdvPris
+          ? `Activité RDV enregistrée — passage au statut RDV pris`
+          : `Activité ${type} (${resultat}) enregistrée`,
+        actorUid: actorUid || currentUserUid,
+        actorName: auteur,
+        actorRole: actorRole || 'commercial',
+        createdAtIso: nowIso,
+      }).catch(() => {});
+
+      // Mettre à jour l'état local de la fiche avec les miroirs (sans jamais rétrograder Signé Orange Pro ou Devis envoyé)
       const updated: FicheEntreprise = {
         ...fiche,
         ...(cleanRelanceAt !== undefined ? { prochaineRelanceAt: cleanRelanceAt } : {}),
         ...(cleanRdvAt !== undefined ? { rdvAt: cleanRdvAt } : {}),
         ...(cleanRdvLieu !== undefined ? { rdvLieu: cleanRdvLieu } : {}),
-        ...(isRdvType ? { statut: 'RDV pris', statutUpdatedAt: new Date().toISOString() } : {}),
+        ...(shouldAdvanceToRdvPris ? { statut: 'RDV pris', statutUpdatedAt: nowIso } : {}),
       };
 
       onFicheUpdated(updated);

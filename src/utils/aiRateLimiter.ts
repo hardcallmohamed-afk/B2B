@@ -3,6 +3,8 @@
 
 export const AI_DAILY_LIMIT_PER_UID = 40;
 export const CRAWL_HOURLY_LIMIT_PER_UID = 30;
+export const DETECT_PROVIDER_HOURLY_LIMIT_PER_UID = 30;
+export const EMAIL_DAILY_LIMIT_PER_UID = 40;
 
 export function getCasablancaDateKey(date: Date = new Date()): string {
   try {
@@ -370,5 +372,184 @@ export function extractVisibleTextFromHtml(html: string, maxLen: number = 300000
     .join('\n');
 
   return cleaned.slice(0, maxLen);
+}
+
+const detectProviderUsageStore = new Map<string, CrawlUserUsage>();
+const emailUsageStore = new Map<string, AiUserUsage>();
+
+export function checkAndIncrementDetectProviderUsage(
+  uid: string,
+  limit: number = DETECT_PROVIDER_HOURLY_LIMIT_PER_UID,
+  now: Date = new Date()
+): CrawlUsageResult {
+  if (!uid || typeof uid !== 'string') {
+    return { allowed: false, count: 0, limit, hourKey: '', remaining: 0 };
+  }
+  const cleanUid = uid.trim();
+  const hourKey = getCasablancaHourKey(now);
+  const existing = detectProviderUsageStore.get(cleanUid);
+
+  if (!existing || existing.hourKey !== hourKey) {
+    detectProviderUsageStore.set(cleanUid, {
+      hourKey,
+      count: 1,
+      lastUsedAt: now.getTime(),
+    });
+    return {
+      allowed: true,
+      count: 1,
+      limit,
+      hourKey,
+      remaining: Math.max(0, limit - 1),
+    };
+  }
+
+  if (existing.count >= limit) {
+    return {
+      allowed: false,
+      count: existing.count,
+      limit,
+      hourKey,
+      remaining: 0,
+    };
+  }
+
+  existing.count += 1;
+  existing.lastUsedAt = now.getTime();
+  detectProviderUsageStore.set(cleanUid, existing);
+
+  return {
+    allowed: true,
+    count: existing.count,
+    limit,
+    hourKey,
+    remaining: Math.max(0, limit - existing.count),
+  };
+}
+
+export function checkAndIncrementEmailUsage(
+  uid: string,
+  limit: number = EMAIL_DAILY_LIMIT_PER_UID,
+  now: Date = new Date()
+): AiUsageResult {
+  if (!uid || typeof uid !== 'string') {
+    return { allowed: false, count: 0, limit, dateKey: '', remaining: 0 };
+  }
+  const cleanUid = uid.trim();
+  const dateKey = getCasablancaDateKey(now);
+  const existing = emailUsageStore.get(cleanUid);
+
+  if (!existing || existing.dateKey !== dateKey) {
+    emailUsageStore.set(cleanUid, {
+      dateKey,
+      count: 1,
+      lastUsedAt: now.getTime(),
+    });
+    return {
+      allowed: true,
+      count: 1,
+      limit,
+      dateKey,
+      remaining: Math.max(0, limit - 1),
+    };
+  }
+
+  if (existing.count >= limit) {
+    return {
+      allowed: false,
+      count: existing.count,
+      limit,
+      dateKey,
+      remaining: 0,
+    };
+  }
+
+  existing.count += 1;
+  existing.lastUsedAt = now.getTime();
+  emailUsageStore.set(cleanUid, existing);
+
+  return {
+    allowed: true,
+    count: existing.count,
+    limit,
+    dateKey,
+    remaining: Math.max(0, limit - existing.count),
+  };
+}
+
+export function resetDetectProviderUsageTracker(): void {
+  detectProviderUsageStore.clear();
+}
+
+export function resetEmailUsageTracker(): void {
+  emailUsageStore.clear();
+}
+
+/**
+ * Safely extracts and parses a JSON object from an LLM text response,
+ * handling markdown code fences, leading/trailing commentary, and invalid JSON without throwing.
+ */
+export function parseJsonObjectFromLlmText<T = Record<string, unknown>>(rawText: unknown): T | null {
+  if (typeof rawText !== 'string') return null;
+  const trimmed = rawText.replace(/^```(?:json)?\s*|\s*```$/gi, '').trim();
+  if (!trimmed) return null;
+
+  try {
+    const direct = JSON.parse(trimmed);
+    if (direct && typeof direct === 'object' && !Array.isArray(direct)) {
+      return direct as T;
+    }
+  } catch {
+    // Fallback: extract first balanced {...} block
+  }
+
+  const firstBrace = trimmed.indexOf('{');
+  const lastBrace = trimmed.lastIndexOf('}');
+  if (firstBrace !== -1 && lastBrace > firstBrace) {
+    const candidate = trimmed.slice(firstBrace, lastBrace + 1);
+    try {
+      const extracted = JSON.parse(candidate);
+      if (extracted && typeof extracted === 'object' && !Array.isArray(extracted)) {
+        return extracted as T;
+      }
+    } catch {
+      return null;
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Detects HTML encoding (utf-8, windows-1252, iso-8859-1) from HTTP Content-Type header or HTML meta tags.
+ */
+export function detectHtmlCharset(contentTypeHeader: string | null, firstBytesAscii: string): string {
+  const combined = `${contentTypeHeader || ''} ${firstBytesAscii.slice(0, 2048)}`.toLowerCase();
+  if (combined.includes('windows-1252') || combined.includes('cp1252')) {
+    return 'windows-1252';
+  }
+  if (combined.includes('iso-8859-1') || combined.includes('latin1') || combined.includes('latin-1')) {
+    return 'iso-8859-1';
+  }
+  return 'utf-8';
+}
+
+/**
+ * Detects whether an API key entry in the client hub is a masked Cloud Vault reference
+ * (e.g. "cloud_gemini", "••••••••1234", or contains non-ASCII bullets) that must be routed
+ * through the backend server proxy rather than sent directly in a browser Authorization header.
+ */
+export function isVaultOrMaskedApiKey(keyId?: string | null, apiKeyValue?: string | null): boolean {
+  if (typeof keyId === 'string' && keyId.trim().toLowerCase().startsWith('cloud_')) {
+    return true;
+  }
+  if (typeof apiKeyValue !== 'string' || !apiKeyValue.trim()) {
+    return true;
+  }
+  const val = apiKeyValue.trim();
+  if (val.includes('•') || val.includes('*') || /[^\x20-\x7E]/.test(val)) {
+    return true;
+  }
+  return false;
 }
 

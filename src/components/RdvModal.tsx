@@ -10,7 +10,7 @@ import {
 } from 'lucide-react';
 import type { FicheEntreprise } from '../App';
 import { validateRdvRequirements } from '../utils/activiteHelpers';
-import { saveFicheActivite } from '../firebase';
+import { saveFicheActivite, saveFicheAuditLog } from '../firebase';
 
 interface RdvModalProps {
   isOpen: boolean;
@@ -107,10 +107,30 @@ export const RdvModal: React.FC<RdvModalProps> = ({
         rdvLieu: cleanRdvLieu,
       });
 
+      const preserveAdvancedStatut =
+        fiche.statut === 'Signé Orange Pro' || fiche.statut === 'Devis envoyé';
+      const nextStatut = preserveAdvancedStatut ? fiche.statut : 'RDV pris';
+
+      void saveFicheAuditLog(effectiveOwnerUid, fiche.id, {
+        ownerId: effectiveOwnerUid,
+        ficheId: fiche.id,
+        action: preserveAdvancedStatut ? 'updated' : 'status_change',
+        field: preserveAdvancedStatut ? 'rdvAt' : 'statut',
+        oldValue: preserveAdvancedStatut ? (fiche.rdvAt || '') : fiche.statut,
+        newValue: preserveAdvancedStatut
+          ? `${cleanRdvAt} (${cleanRdvLieu})`
+          : `RDV pris (${cleanRdvLieu})`,
+        summary: `Rendez-vous planifié (${cleanRdvLieu})`,
+        actorUid: actorUid || currentUserUid,
+        actorName: auteur,
+        actorRole: actorRole || 'commercial',
+        createdAtIso: nowIso,
+      }).catch(() => {});
+
       const updatedFiche: FicheEntreprise = {
         ...fiche,
-        statut: 'RDV pris',
-        statutUpdatedAt: nowIso,
+        statut: nextStatut,
+        ...(preserveAdvancedStatut ? {} : { statutUpdatedAt: nowIso }),
         rdvAt: cleanRdvAt,
         rdvLieu: cleanRdvLieu,
       };

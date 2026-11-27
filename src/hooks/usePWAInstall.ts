@@ -117,13 +117,19 @@ export function usePWAInstall() {
     try {
       await promptEv.prompt();
       const { outcome } = await promptEv.userChoice;
-      if (outcome === 'accepted') {
+      if (typeof window !== 'undefined') {
         window.__opDeferredInstallPrompt = null;
-        setDeferredPrompt(null);
+      }
+      setDeferredPrompt(null);
+      if (outcome === 'accepted') {
         setIsInstalled(true);
       }
       return outcome;
     } catch {
+      if (typeof window !== 'undefined') {
+        window.__opDeferredInstallPrompt = null;
+      }
+      setDeferredPrompt(null);
       return 'unavailable';
     }
   }, [deferredPrompt]);

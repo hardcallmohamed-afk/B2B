@@ -1,4 +1,6 @@
-import 'dotenv/config';
+import dotenv from 'dotenv';
+dotenv.config({ path: '.env.local' });
+dotenv.config();
 import fs from 'fs';
 import http from 'http';
 import express from 'express';
@@ -9,6 +11,8 @@ import {
   initializeApp as initializeAdminApp,
   getApps as getAdminApps,
   getApp as getAdminApp,
+  cert,
+  type ServiceAccount,
 } from 'firebase-admin/app';
 import { getAuth as getAdminAuth } from 'firebase-admin/auth';
 import { getFirestore as getAdminFirestore, FieldValue } from 'firebase-admin/firestore';
@@ -19,17 +23,32 @@ import {
   AI_DAILY_LIMIT_PER_UID,
   checkAndIncrementCrawlUsage,
   CRAWL_HOURLY_LIMIT_PER_UID,
+  checkAndIncrementDetectProviderUsage,
+  DETECT_PROVIDER_HOURLY_LIMIT_PER_UID,
+  checkAndIncrementEmailUsage,
+  EMAIL_DAILY_LIMIT_PER_UID,
   validatePublicHttpUrl,
   isPrivateOrReservedIp,
   extractVisibleTextFromHtml,
+  parseJsonObjectFromLlmText,
+  detectHtmlCharset,
 } from './src/utils/aiRateLimiter.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const PORT = Number(process.env.PORT) || 3000;
-const AI_MODEL = 'gemini-4-hydrogen';
-const AI_FALLBACK_MODELS = ['gemini-4-hydrogen', 'gemini-3.1-flash-lite'] as const;
+const AI_MODEL = (process.env.GEMINI_MODEL || 'gemini-2.5-flash').trim();
+const AI_FALLBACK_MODELS = Array.from(
+  new Set([
+    AI_MODEL,
+    'gemini-2.5-flash',
+    'gemini-2.0-flash',
+    'gemini-2.5-flash-lite',
+    'gemini-4-hydrogen',
+    'gemini-3.1-flash-lite',
+  ])
+);
 const SUPER_ADMIN_EMAIL = 'hardcallmohamed@gmail.com';
 
 interface FirebaseAppletConfig {
@@ -38,6 +57,11 @@ interface FirebaseAppletConfig {
 }
 
 const SECURE_LLM_PROVIDERS: Record<string, { url: string; defaultModel: string; label: string }> = {
+  gemini: {
+    url: 'https://generativelanguage.googleapis.com/v1beta/models',
+    defaultModel: AI_MODEL,
+    label: 'Google Gemini',
+  },
   groq: {
     url: 'https://api.groq.com/openai/v1/chat/completions',
     defaultModel: 'llama-3.3-70b-versatile',
@@ -86,9 +110,25 @@ function getFirebaseAdminServices() {
   const config = loadFirebaseAppletConfig();
   if (!config) return null;
 
-  const adminApp = getAdminApps().length
-    ? getAdminApp()
-    : initializeAdminApp({ projectId: config.projectId });
+  let adminApp;
+  if (getAdminApps().length > 0) {
+    adminApp = getAdminApp();
+  } else {
+    const rawSaJson = process.env.FIREBASE_SERVICE_ACCOUNT_JSON?.trim();
+    if (rawSaJson) {
+      try {
+        const parsedSa = JSON.parse(rawSaJson) as ServiceAccount;
+        adminApp = initializeAdminApp({
+          credential: cert(parsedSa),
+          projectId: config.projectId,
+        });
+      } catch {
+        adminApp = initializeAdminApp({ projectId: config.projectId });
+      }
+    } else {
+      adminApp = initializeAdminApp({ projectId: config.projectId });
+    }
+  }
 
   const adminAuth = getAdminAuth(adminApp);
   const adminDb =
@@ -334,6 +374,51 @@ async function startServer() {
   const app = express();
   app.use(express.json({ limit: '2mb' }));
 
+  // 0. Healthcheck & WebRTC ICE/TURN Servers Configuration
+  app.get('/api/health', (_req, res) => {
+    const aiAvailable = isValidConfiguredKey(process.env.GEMINI_API_KEY);
+    const smtpRequired = ['SMTP_HOST', 'SMTP_PORT', 'SMTP_USER', 'SMTP_PASS', 'SMTP_FROM'] as const;
+    const emailAvailable = smtpRequired.every((k) => Boolean(process.env[k]?.trim()));
+    res.json({
+      ok: true,
+      status: 'healthy',
+      aiAvailable,
+      aiModel: AI_MODEL,
+      emailAvailable,
+      timestamp: new Date().toISOString(),
+    });
+  });
+
+  app.get('/api/rtc/ice-servers', (_req, res) => {
+    const iceServers: Array<{
+      urls: string | string[];
+      username?: string;
+      credential?: string;
+    }> = [
+      {
+        urls: [
+          'stun:stun.l.google.com:19302',
+          'stun:stun1.l.google.com:19302',
+          'stun:stun2.l.google.com:19302',
+        ],
+      },
+    ];
+    const turnUrl = process.env.TURN_URL?.trim();
+    const turnUsername = process.env.TURN_USERNAME?.trim();
+    const turnCredential = process.env.TURN_CREDENTIAL?.trim();
+    if (turnUrl) {
+      iceServers.push({
+        urls: turnUrl.includes(',') ? turnUrl.split(',').map((u) => u.trim()).filter(Boolean) : turnUrl,
+        ...(turnUsername ? { username: turnUsername } : {}),
+        ...(turnCredential ? { credential: turnCredential } : {}),
+      });
+    }
+    res.json({
+      iceServers,
+      turnConfigured: Boolean(turnUrl),
+    });
+  });
+
   // 1. Statut de l'intégration IA serveur (sans jamais exposer la clé)
   app.get('/api/ai/status', (_req, res) => {
     const available = isValidConfiguredKey(process.env.GEMINI_API_KEY);
@@ -449,10 +534,9 @@ ${focusedFiche ? `\n=== FICHE CIBLÉE ===\n${focusedFiche}` : ''}`;
         },
       }));
 
-      const text = (response.text ?? '').replace(/^```(?:json)?\s*|\s*```$/g, '').trim();
-      const parsed = JSON.parse(text);
+      const parsed = parseJsonObjectFromLlmText<{ objet?: unknown; corps?: unknown }>(response.text ?? '');
       if (!parsed?.objet || !parsed?.corps) {
-        res.status(502).json({ error: 'Format de réponse email IA incomplet.' });
+        res.status(502).json({ error: 'Format de réponse email IA incomplet ou JSON invalide.' });
         return;
       }
 
@@ -543,8 +627,11 @@ ${focusedFiche ? `\n=== FICHE CIBLÉE ===\n${focusedFiche}` : ''}`;
         },
       }));
 
-      const cleanText = (response.text ?? '{}').replace(/^```(?:json)?\s*|\s*```$/g, '').trim();
-      const parsed = JSON.parse(cleanText);
+      const parsed = parseJsonObjectFromLlmText(response.text ?? '');
+      if (!parsed) {
+        res.status(502).json({ error: 'Réponse battlecard IA mal formée.' });
+        return;
+      }
       res.json({ brief: parsed, model: usedModel });
     } catch (err) {
       const formatted = formatAiError(err);
@@ -694,8 +781,11 @@ ${rawText}`;
         },
       }));
 
-      const cleanText = (response.text ?? '{}').replace(/^```(?:json)?\s*|\s*```$/g, '').trim();
-      const parsed = JSON.parse(cleanText);
+      const parsed = parseJsonObjectFromLlmText(response.text ?? '');
+      if (!parsed) {
+        res.status(502).json({ error: 'Réponse d’extraction IA mal formée.' });
+        return;
+      }
       res.json({ extracted: parsed, model: usedModel });
     } catch (err) {
       const formatted = formatAiError(err);
@@ -783,8 +873,11 @@ Produis un audit structuré, actionnable immédiatement sur le terrain (Meknès 
         },
       }));
 
-      const cleanText = (response.text ?? '{}').replace(/^```(?:json)?\s*|\s*```$/g, '').trim();
-      const parsed = JSON.parse(cleanText);
+      const parsed = parseJsonObjectFromLlmText(response.text ?? '');
+      if (!parsed) {
+        res.status(502).json({ error: 'Réponse diagnostic IA mal formée.' });
+        return;
+      }
       res.json({ insights: parsed, model: usedModel });
     } catch (err) {
       const formatted = formatAiError(err);
@@ -793,8 +886,8 @@ Produis un audit structuré, actionnable immédiatement sur le terrain (Meknès 
   });
 
   // 8. Proxy IA sécurisé via Firebase Admin SDK (/api_keys/{provider} dans Firestore)
-  // Vérifie le token Firebase ID + contrôle d'accès (Super-Admin ou collaborateur actif dans /app_users)
-  app.post('/api/ai/groq-secure', async (req, res) => {
+  // Supporte: gemini, groq, mistral, openrouter, openai, deepseek, anthropic
+  const handleSecureVaultProxy = async (req: express.Request, res: express.Response) => {
     const caller = await authenticateAndRateLimitAiCaller(req, res);
     if (!caller) return;
 
@@ -809,9 +902,18 @@ Produis un audit structuré, actionnable immédiatement sur le terrain (Meknès 
       return;
     }
 
-    const prompt = clampString(req.body?.prompt, 6000);
-    if (!prompt) {
-      res.status(400).json({ error: 'Veuillez fournir un prompt valide.' });
+    const prompt = clampString(req.body?.prompt, 8000);
+    const rawMessages = Array.isArray(req.body?.messages) ? req.body.messages : [];
+    const sanitizedMessages = rawMessages
+      .slice(-12)
+      .map((m: { role?: unknown; content?: unknown }) => ({
+        role: m?.role === 'assistant' ? 'assistant' : 'user',
+        content: clampString(m?.content, 4000),
+      }))
+      .filter((m: { content: string }) => m.content.length > 0);
+
+    if (!prompt && sanitizedMessages.length === 0) {
+      res.status(400).json({ error: 'Veuillez fournir un prompt ou un historique de messages valide.' });
       return;
     }
 
@@ -825,24 +927,29 @@ Produis un audit structuré, actionnable immédiatement sur le terrain (Meknès 
     try {
       const keySnap = await services.adminDb.doc(`api_keys/${rawProvider}`).get();
       if (!keySnap.exists) {
-        res.status(404).json({
-          error: `La clé API ${providerConfig.label} n'est pas encore configurée dans le coffre-fort Cloud (/api_keys/${rawProvider}).`,
-        });
-        return;
-      }
-      const keyData = keySnap.data();
-      if (keyData?.active === false) {
-        res.status(403).json({
-          error: `La clé API ${providerConfig.label} est actuellement désactivée dans le coffre-fort Cloud.`,
-        });
-        return;
-      }
-      apiKey = typeof keyData?.key === 'string' ? keyData.key.trim() : '';
-      if (!apiKey) {
-        res.status(404).json({
-          error: `La clé API ${providerConfig.label} enregistrée dans Firestore est vide.`,
-        });
-        return;
+        if (rawProvider === 'gemini' && isValidConfiguredKey(process.env.GEMINI_API_KEY)) {
+          apiKey = process.env.GEMINI_API_KEY.trim();
+        } else {
+          res.status(404).json({
+            error: `La clé API ${providerConfig.label} n'est pas encore configurée dans le coffre-fort Cloud (/api_keys/${rawProvider}).`,
+          });
+          return;
+        }
+      } else {
+        const keyData = keySnap.data();
+        if (keyData?.active === false) {
+          res.status(403).json({
+            error: `La clé API ${providerConfig.label} est actuellement désactivée dans le coffre-fort Cloud.`,
+          });
+          return;
+        }
+        apiKey = typeof keyData?.key === 'string' ? keyData.key.trim() : '';
+        if (!apiKey) {
+          res.status(404).json({
+            error: `La clé API ${providerConfig.label} enregistrée dans Firestore est vide.`,
+          });
+          return;
+        }
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -859,13 +966,62 @@ Produis un audit structuré, actionnable immédiatement sur le terrain (Meknès 
       return;
     }
 
-    const systemInstruction = clampString(req.body?.systemInstruction, 2500);
+    const systemInstruction = clampString(req.body?.systemInstruction, 4000);
+    const jsonMode = req.body?.jsonMode === true;
+
+    if (rawProvider === 'gemini') {
+      try {
+        const vaultGemini = new GoogleGenAI({
+          apiKey,
+          httpOptions: {
+            headers: {
+              'User-Agent': 'aistudio-build',
+            },
+          },
+        });
+        const geminiContents =
+          sanitizedMessages.length > 0
+            ? sanitizedMessages.map((m: { role: string; content: string }) => ({
+                role: m.role === 'assistant' ? 'model' : 'user',
+                parts: [{ text: m.content }],
+              }))
+            : prompt;
+
+        const { response, usedModel } = await generateContentWithFallback(vaultGemini, (fallbackModel) => ({
+          model: requestedModel || fallbackModel,
+          contents: geminiContents,
+          config: {
+            ...(systemInstruction ? { systemInstruction } : {}),
+            ...(jsonMode ? { responseMimeType: 'application/json' } : {}),
+            thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+          },
+        }));
+
+        const reply = clampString(response.text ?? '', 8000);
+        if (!reply) {
+          res.status(502).json({ error: 'Réponse vide renvoyée par Google Gemini (Coffre Cloud).' });
+          return;
+        }
+
+        res.json({
+          reply,
+          provider: 'gemini',
+          providerLabel: providerConfig.label,
+          model: usedModel,
+        });
+        return;
+      } catch (err) {
+        const formatted = formatAiError(err);
+        res.status(formatted.status).json({ error: formatted.message });
+        return;
+      }
+    }
+
+    const conversationTurns =
+      sanitizedMessages.length > 0 ? sanitizedMessages : [{ role: 'user', content: prompt }];
     const messages = systemInstruction
-      ? [
-          { role: 'system', content: systemInstruction },
-          { role: 'user', content: prompt },
-        ]
-      : [{ role: 'user', content: prompt }];
+      ? [{ role: 'system', content: systemInstruction }, ...conversationTurns]
+      : conversationTurns;
 
     try {
       let upstream: Response;
@@ -881,7 +1037,7 @@ Produis un audit structuré, actionnable immédiatement sur le terrain (Meknès 
             model,
             max_tokens: 1400,
             ...(systemInstruction ? { system: systemInstruction } : {}),
-            messages: [{ role: 'user', content: prompt }],
+            messages: conversationTurns,
           }),
           signal: AbortSignal.timeout(25000),
         });
@@ -897,6 +1053,9 @@ Produis un audit structuré, actionnable immédiatement sur le terrain (Meknès 
             messages,
             temperature: 0.4,
             max_tokens: 1400,
+            ...(jsonMode && (rawProvider === 'groq' || rawProvider === 'openai' || rawProvider === 'mistral')
+              ? { response_format: { type: 'json_object' } }
+              : {}),
           }),
           signal: AbortSignal.timeout(25000),
         });
@@ -941,13 +1100,26 @@ Produis un audit structuré, actionnable immédiatement sur le terrain (Meknès 
         error: `Impossible de joindre ${providerConfig.label} depuis le serveur.`,
       });
     }
-  });
+  };
+
+  app.post('/api/ai/groq-secure', handleSecureVaultProxy);
+  app.post('/api/ai/vault-proxy', handleSecureVaultProxy);
 
   // 9. Détection automatique du distributeur d'une clé API (sans jamais logger ni renvoyer la clé)
-  // Utilise uniquement des URL officielles codées en dur (aucune URL client acceptée)
+  // Rate-limité par UID (20/h) et n'interroge que les fournisseurs compatibles avec le format de la clé
   app.post('/api/ai/detect-provider', async (req, res) => {
     const caller = await authenticateVerifiedCaller(req, res, 'la détection de clé API');
     if (!caller) return;
+
+    const rateLimit = checkAndIncrementDetectProviderUsage(caller.uid, DETECT_PROVIDER_HOURLY_LIMIT_PER_UID);
+    if (!rateLimit.allowed) {
+      res.status(429).json({
+        error: `Plafond de détection de clé atteint (${DETECT_PROVIDER_HOURLY_LIMIT_PER_UID} vérifications/heure). Veuillez patienter ou sélectionner le fournisseur manuellement.`,
+        limit: rateLimit.limit,
+        remaining: 0,
+      });
+      return;
+    }
 
     const rawKey = clampString(req.body?.apiKey, 512);
     if (!rawKey || rawKey.length < 8) {
@@ -1043,10 +1215,12 @@ Produis un audit structuré, actionnable immédiatement sur le terrain (Meknès 
           return r.ok;
         }
         if (provider === 'tavily') {
+          // Never probe Tavily unless the key explicitly starts with tvly- to avoid burning search credits or leaking non-Tavily keys
+          if (!/^tvly-/i.test(rawKey)) return false;
           const r = await fetch('https://api.tavily.com/search', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ api_key: rawKey, query: 'test', max_results: 1 }),
+            body: JSON.stringify({ api_key: rawKey, query: 'Orange Maroc', max_results: 1 }),
             signal: timeout,
           });
           return r.ok;
@@ -1057,7 +1231,7 @@ Produis un audit structuré, actionnable immédiatement sur le terrain (Meknès 
       return false;
     };
 
-    // Déterminer les candidats probables d'après le format pour répondre très rapidement
+    // Déterminer les candidats strictement compatibles avec le format de la clé (sans diffuser la clé aux fournisseurs incompatibles)
     let candidates: ProbeId[] = [];
     if (/^gsk_/.test(rawKey)) candidates = ['groq'];
     else if (/^sk-or-/i.test(rawKey)) candidates = ['openrouter'];
@@ -1068,8 +1242,8 @@ Produis un audit structuré, actionnable immédiatement sur le terrain (Meknès 
     else if (/^mis_/i.test(rawKey)) candidates = ['mistral'];
     else if (/^sk-[a-f0-9]{24,}$/.test(rawKey)) candidates = ['deepseek', 'openai', 'openrouter'];
     else if (/^sk-/.test(rawKey)) candidates = ['openai', 'deepseek', 'openrouter'];
-    else if (/^[A-Za-z0-9]{32}$/.test(rawKey)) candidates = ['mistral', 'groq', 'gemini', 'deepseek', 'openai'];
-    else candidates = [...ALL_PROVIDERS];
+    else if (/^[A-Za-z0-9]{32}$/.test(rawKey)) candidates = ['mistral'];
+    else candidates = ['mistral', 'deepseek', 'openai', 'openrouter'];
 
     candidates = candidates.filter((p) => allowedSet.has(p));
 
@@ -1089,25 +1263,6 @@ Produis un audit structuré, actionnable immédiatement sur le terrain (Meknès 
       }
     }
 
-    // Repli sur la liste complète si le format était inhabituel
-    if (candidates.length < allowedSet.size) {
-      const remaining = Array.from(allowedSet).filter((p) => !candidates.includes(p));
-      const restResults = await Promise.all(
-        remaining.map(async (p) => ({ p, ok: await probeOne(p) }))
-      );
-      const verifiedRest = restResults.find((r) => r.ok);
-      if (verifiedRest) {
-        res.json({
-          detectedProvider: verifiedRest.p,
-          label: LABELS[verifiedRest.p],
-          verified: true,
-          confidence: 'verified',
-        });
-        return;
-      }
-    }
-
-    // Aucun appel distant n'a confirmé : renvoyer la meilleure estimation par motif s'il y en a une
     const fallbackPattern = candidates[0] || null;
     res.json({
       detectedProvider: fallbackPattern,
@@ -1130,10 +1285,20 @@ Produis un audit structuré, actionnable immédiatement sur le terrain (Meknès 
     });
   });
 
-  // 11. LOT 3: Envoi d'email serveur sécurisé (uniquement si les 5 variables SMTP sont présentes)
+  // 11. LOT 3: Envoi d'email serveur sécurisé (uniquement si les 5 variables SMTP sont présentes + rate-limit par UID)
   app.post('/api/email/send', async (req, res) => {
     const caller = await authenticateVerifiedCaller(req, res, 'l’envoi d’e-mails');
     if (!caller) return;
+
+    const emailLimit = checkAndIncrementEmailUsage(caller.uid, EMAIL_DAILY_LIMIT_PER_UID);
+    if (!emailLimit.allowed) {
+      res.status(429).json({
+        error: `Plafond d'envoi d'e-mails SMTP atteint (${EMAIL_DAILY_LIMIT_PER_UID} e-mails/jour). Utilisez « Ouvrir dans la messagerie » ou réessayez demain.`,
+        limit: emailLimit.limit,
+        remaining: 0,
+      });
+      return;
+    }
 
     const required = ['SMTP_HOST', 'SMTP_PORT', 'SMTP_USER', 'SMTP_PASS', 'SMTP_FROM'] as const;
     const missing = required.filter((key) => !process.env[key] || !process.env[key]!.trim());
@@ -1193,7 +1358,25 @@ Produis un audit structuré, actionnable immédiatement sur le terrain (Meknès 
     }
   });
 
-  // 12. LOT 7: Crawl serveur souverain et anti-SSRF (DNS resolution check, redirect: error, timeout 12s, max 1 Mo)
+  // 12. LOT 7: Crawl serveur souverain et anti-SSRF (suivi manuel sécurisé jusqu'à 5 redirections, DNS check à chaque saut, détection charset, timeout 12s, max 1 Mo)
+  const verifySafeHostnameDns = async (hostname: string): Promise<{ ok: boolean; error?: string }> => {
+    try {
+      const lookups = await dns.promises.lookup(hostname, { all: true });
+      if (!lookups.length || lookups.some((entry) => isPrivateOrReservedIp(entry.address))) {
+        return {
+          ok: false,
+          error: 'Accès interdit : résolution DNS sur une adresse IP privée ou interne (anti-SSRF).',
+        };
+      }
+      return { ok: true };
+    } catch {
+      return {
+        ok: false,
+        error: 'Impossible de résoudre le nom de domaine de l’URL cible.',
+      };
+    }
+  };
+
   app.post('/api/crawl', async (req, res) => {
     const caller = await authenticateAndRateLimitCrawlCaller(req, res);
     if (!caller) return;
@@ -1207,40 +1390,71 @@ Produis un audit structuré, actionnable immédiatement sur le terrain (Meknès 
       return;
     }
 
-    const targetUrl = urlValidation.normalizedUrl;
-    const parsedUrl = new URL(targetUrl);
+    let currentUrl = urlValidation.normalizedUrl;
+    const maxRedirects = 5;
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 12000);
 
     try {
-      const lookups = await dns.promises.lookup(parsedUrl.hostname, { all: true });
-      if (!lookups.length || lookups.some((entry) => isPrivateOrReservedIp(entry.address))) {
-        res.status(400).json({ error: 'Accès interdit : résolution DNS sur une adresse IP privée ou interne (anti-SSRF).' });
-        return;
+      let upstream: Response | null = null;
+
+      for (let hop = 0; hop <= maxRedirects; hop++) {
+        const hopValidation = validatePublicHttpUrl(currentUrl);
+        if (!hopValidation.valid || !hopValidation.normalizedUrl) {
+          res.status(400).json({
+            error: hopValidation.error || 'Redirection vers une URL interdite (anti-SSRF).',
+          });
+          return;
+        }
+        currentUrl = hopValidation.normalizedUrl;
+        const parsedHop = new URL(currentUrl);
+        const dnsCheck = await verifySafeHostnameDns(parsedHop.hostname);
+        if (!dnsCheck.ok) {
+          res.status(400).json({ error: dnsCheck.error });
+          return;
+        }
+
+        const resp = await fetch(currentUrl, {
+          method: 'GET',
+          headers: {
+            'User-Agent':
+              'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36 (DIVERSIFIA-B2B-Crawler/1.0)',
+            Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'fr-FR,fr;q=0.9,ar-MA;q=0.8,en;q=0.7',
+          },
+          redirect: 'manual',
+          signal: controller.signal,
+        });
+
+        if ([301, 302, 303, 307, 308].includes(resp.status)) {
+          const locationHeader = resp.headers.get('location');
+          if (!locationHeader) {
+            res.status(502).json({ error: 'Redirection HTTP reçue sans en-tête Location.' });
+            return;
+          }
+          if (hop === maxRedirects) {
+            res.status(502).json({ error: 'Trop de redirections HTTP consécutives (maximum 5).' });
+            return;
+          }
+          try {
+            currentUrl = new URL(locationHeader, currentUrl).toString();
+          } catch {
+            res.status(400).json({ error: 'URL de redirection HTTP invalide.' });
+            return;
+          }
+          continue;
+        }
+
+        upstream = resp;
+        break;
       }
-    } catch {
-      res.status(400).json({ error: 'Impossible de résoudre le nom de domaine de l’URL cible.' });
-      return;
-    }
 
-    try {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 12000);
-
-      const upstream = await fetch(targetUrl, {
-        method: 'GET',
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36 (DIVERSIFIA-B2B-Crawler/1.0)',
-          Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-          'Accept-Language': 'fr-FR,fr;q=0.9,ar-MA;q=0.8,en;q=0.7',
-        },
-        redirect: 'error',
-        signal: controller.signal,
-      });
-
-      clearTimeout(timer);
-
-      if (!upstream.ok) {
+      if (!upstream || !upstream.ok) {
+        const status = upstream ? upstream.status : 502;
+        const statusText = upstream ? upstream.statusText : 'Erreur';
         res.status(502).json({
-          error: `Le site distant a répondu avec le statut HTTP ${upstream.status} (${upstream.statusText || 'Erreur'}).`,
+          error: `Le site distant a répondu avec le statut HTTP ${status} (${statusText || 'Erreur'}).`,
         });
         return;
       }
@@ -1261,14 +1475,21 @@ Produis un audit structuré, actionnable immédiatement sur le terrain (Meknès 
         return;
       }
 
-      const decoder = new TextDecoder('utf-8');
-      const html = decoder.decode(buffer);
+      const firstBytesAscii = new TextDecoder('latin1').decode(buffer.slice(0, 2048));
+      const charset = detectHtmlCharset(upstream.headers.get('content-type'), firstBytesAscii);
+      let html = '';
+      try {
+        html = new TextDecoder(charset).decode(buffer);
+      } catch {
+        html = new TextDecoder('utf-8').decode(buffer);
+      }
       const text = extractVisibleTextFromHtml(html, 300000);
 
       res.json({
-        url: targetUrl,
+        url: currentUrl,
         text,
         bytes: text.length,
+        charset,
         fetchedAt: new Date().toISOString(),
       });
     } catch (err) {
@@ -1284,6 +1505,8 @@ Produis un audit structuré, actionnable immédiatement sur le terrain (Meknès 
       res.status(502).json({
         error: 'Impossible de joindre le site distant depuis le serveur.',
       });
+    } finally {
+      clearTimeout(timer);
     }
   });
 
@@ -1479,8 +1702,7 @@ Produis un audit structuré, actionnable immédiatement sur le terrain (Meknès 
     const vite = await createViteServer({
       server: {
         middlewareMode: true,
-        ws: { server: httpServer },
-        hmr: process.env.DISABLE_HMR !== 'true',
+        hmr: process.env.DISABLE_HMR === 'true' ? false : { server: httpServer },
       },
       appType: 'spa',
     });

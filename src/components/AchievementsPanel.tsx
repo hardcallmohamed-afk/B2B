@@ -9,9 +9,12 @@ import {
   evaluateAchievements,
   type CollaboratorMetrics,
   type EvaluatedAchievement,
+  type SignedContractRecord,
   type TeamRole,
   type TeamStatRecord,
 } from '../utils/gamification';
+import { fetchTeamMemberFiches } from '../firebase';
+import type { SanitizedFicheDoc } from '../utils/firestoreSanitize';
 import { BadgeArtwork, BadgeChipWithDrawing } from './BadgeArtwork';
 import { RoleBadge } from './RoleBadge';
 
@@ -24,6 +27,7 @@ interface AchievementsPanelProps {
   isSuperAdmin: boolean;
   myMetrics: CollaboratorMetrics;
   teamStats: TeamStatRecord[];
+  signedContracts?: SignedContractRecord[];
   initialSelectedUid?: string | null;
   onAdminToggleManualBadge?: (targetUid: string, nextBadges: string[]) => Promise<void>;
 }
@@ -35,6 +39,7 @@ export const AchievementsPanel: React.FC<AchievementsPanelProps> = ({
   isSuperAdmin,
   myMetrics,
   teamStats,
+  signedContracts = [],
   initialSelectedUid,
   onAdminToggleManualBadge,
 }) => {
@@ -66,25 +71,90 @@ export const AchievementsPanel: React.FC<AchievementsPanelProps> = ({
     [teamStats, effectiveUid]
   );
 
-  // Build metrics for the viewed user: exact live metrics for self, synced team_stats metrics for another collaborator
+  const [memberFichesByUid, setMemberFichesByUid] = useState<Record<string, SanitizedFicheDoc[]>>({});
+
+  useEffect(() => {
+    if (!isSuperAdmin || !effectiveUid || effectiveUid === currentUserUid) return;
+    if (memberFichesByUid[effectiveUid]) return;
+    let cancelled = false;
+    fetchTeamMemberFiches(effectiveUid)
+      .then((rows) => {
+        if (!cancelled) {
+          setMemberFichesByUid((prev) => ({ ...prev, [effectiveUid]: rows }));
+        }
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [isSuperAdmin, effectiveUid, currentUserUid, memberFichesByUid]);
+
+  // Build metrics for the viewed user: exact live metrics for self, and real Firestore contracts + fiches for inspected collaborator
   const evaluated = useMemo(() => {
     const manualBadges = selectedStat?.manualBadges || [];
     if (effectiveUid === currentUserUid) {
       return evaluateAchievements(myMetrics, manualBadges);
     }
-    const approxMetrics: CollaboratorMetrics = {
-      totalProspects: selectedStat?.totalProspects ?? 0,
-      qualifiedCount: selectedStat?.totalQualified ?? 0,
-      contractsCount: selectedStat?.totalContracts ?? 0,
-      grandCompteContracts: Math.floor((selectedStat?.totalContracts ?? 0) / 4),
-      pmeContracts: Math.floor((selectedStat?.totalContracts ?? 0) / 2),
-      totalPayoutMad: selectedStat?.totalPayoutMad ?? 0,
-      multiContactFiches: Math.floor((selectedStat?.totalProspects ?? 0) / 3),
-      highMaturityFiches: Math.floor((selectedStat?.totalProspects ?? 0) / 2),
-      distinctCities: selectedStat?.totalProspects ? Math.min(8, Math.max(1, Math.ceil(selectedStat.totalProspects / 6))) : 0,
+
+    const memberContracts = signedContracts.filter(
+      (c) => c.ownerId === effectiveUid && c.payoutStatus !== 'Refusé'
+    );
+    const memberFiches = memberFichesByUid[effectiveUid] || null;
+
+    const grandCompteContracts = memberContracts.filter((c) => c.tier === 'Grand Compte').length;
+    const pmeContracts = memberContracts.filter((c) => c.tier === 'PME').length;
+    const contractsCount =
+      memberContracts.length > 0 ? memberContracts.length : selectedStat?.totalContracts ?? 0;
+    const totalPayoutMad =
+      memberContracts.length > 0
+        ? memberContracts.reduce((sum, c) => sum + (Number(c.payoutMad) || 0), 0)
+        : selectedStat?.totalPayoutMad ?? 0;
+
+    const totalProspects =
+      memberFiches !== null ? memberFiches.length : selectedStat?.totalProspects ?? 0;
+    const qualifiedCount =
+      memberFiches !== null
+        ? memberFiches.filter(
+            (f) =>
+              f.statut === 'RDV pris' ||
+              f.statut === 'Devis envoyé' ||
+              f.statut === 'Signé Orange Pro'
+          ).length
+        : selectedStat?.totalQualified ?? 0;
+    const multiContactFiches =
+      memberFiches !== null
+        ? memberFiches.filter(
+            (f) =>
+              (Array.isArray(f.telephonesSupplementaires) &&
+                f.telephonesSupplementaires.length >= 1) ||
+              (Array.isArray(f.emailsSupplementaires) && f.emailsSupplementaires.length >= 1)
+          ).length
+        : 0;
+    const highMaturityFiches =
+      memberFiches !== null
+        ? memberFiches.filter((f) => Boolean(f.telephone && f.email && f.contact)).length
+        : 0;
+    const distinctCities =
+      memberFiches !== null
+        ? new Set(memberFiches.map((f) => (f.ville || '').trim().toLowerCase()).filter(Boolean))
+            .size
+        : selectedStat?.zone
+          ? 1
+          : 0;
+
+    const realMemberMetrics: CollaboratorMetrics = {
+      totalProspects,
+      qualifiedCount,
+      contractsCount,
+      grandCompteContracts,
+      pmeContracts,
+      totalPayoutMad,
+      multiContactFiches,
+      highMaturityFiches,
+      distinctCities,
     };
-    return evaluateAchievements(approxMetrics, manualBadges);
-  }, [effectiveUid, currentUserUid, myMetrics, selectedStat]);
+    return evaluateAchievements(realMemberMetrics, manualBadges);
+  }, [effectiveUid, currentUserUid, myMetrics, selectedStat, signedContracts, memberFichesByUid]);
 
   const viewedName =
     effectiveUid === currentUserUid
@@ -393,7 +463,7 @@ export const AchievementsPanel: React.FC<AchievementsPanelProps> = ({
                           </div>
                           <div className="mt-0.5 flex items-center gap-1 text-[10px] text-stone-500">
                             <span
-                              className={`rounded-xs px-1 py-0.2 font-bold ${meta.pillBg} ${meta.pillText}`}
+                              className={`rounded-xs px-1 py-0.5 font-bold ${meta.pillBg} ${meta.pillText}`}
                             >
                               {meta.label}
                             </span>
@@ -457,7 +527,7 @@ export const AchievementsPanel: React.FC<AchievementsPanelProps> = ({
                           </div>
                           <div className="mt-0.5 flex items-center gap-1.5 text-[10px] text-stone-500">
                             <span
-                              className={`rounded-xs px-1.5 py-0.2 font-bold ${meta.pillBg} ${meta.pillText}`}
+                              className={`rounded-xs px-1.5 py-0.5 font-bold ${meta.pillBg} ${meta.pillText}`}
                             >
                               {meta.label}
                             </span>

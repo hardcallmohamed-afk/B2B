@@ -737,3 +737,140 @@ test('buildTeamStatRepairUpdatePayload detects missing/extra keys and heals lega
   assert.equal(repaired.orgScope, 'orange_pro_team');
 });
 
+test('extractPersistedFicheFields preserves relance, rdv, attribution, and restoration fields across reload and sanitization', async () => {
+  const {
+    extractPersistedFicheFields,
+    formatFicheNumeroWithPrefix,
+    formatEmailBodyWithOptionalPhone,
+    getFollowUpAlertDelayMs,
+    computeCurrentMonthContractsAndPayout,
+  } = await import('./accountPreferences');
+
+  const rawDoc: Record<string, unknown> = {
+    id: 'op_relance_1',
+    societe: 'Cabinet Atlas',
+    secteur: 'fiduciaire',
+    ville: 'Meknès',
+    telephone: '0535521100',
+    email: 'contact@atlas.ma',
+    contact: 'M. Karim',
+    role: 'Gérant',
+    source: 'Terrain',
+    effectif: '14',
+    statut: 'RDV pris',
+    dateAjout: '2026-11-26T08:00:00.000Z',
+    prochaineRelanceAt: '2026-11-28T10:30:00.000Z',
+    rdvAt: '2026-11-29T14:00:00.000Z',
+    rdvLieu: 'Siège Meknès Hamria',
+    assignedByUid: 'sup_admin_1',
+    assignedByName: 'Mohamed Admin',
+    assignedAt: '2026-11-26T09:00:00.000Z',
+    restoredByName: 'Mohamed Admin',
+    restoredAt: '2026-11-26T09:15:00.000Z',
+    restoredReason: 'Révision du périmètre Fibre',
+  };
+
+  const extra = extractPersistedFicheFields(rawDoc);
+  const sanitized = sanitizeFichePayload('collab_1', {
+    ...(rawDoc as unknown as Parameters<typeof sanitizeFichePayload>[1]),
+    ...extra,
+  });
+  const roundTrip = extractPersistedFicheFields(sanitized as unknown as Record<string, unknown>);
+
+  assert.equal(roundTrip.prochaineRelanceAt, '2026-11-28T10:30:00.000Z');
+  assert.equal(roundTrip.rdvAt, '2026-11-29T14:00:00.000Z');
+  assert.equal(roundTrip.rdvLieu, 'Siège Meknès Hamria');
+  assert.equal(roundTrip.assignedByUid, 'sup_admin_1');
+  assert.equal(roundTrip.assignedByName, 'Mohamed Admin');
+  assert.equal(roundTrip.assignedAt, '2026-11-26T09:00:00.000Z');
+  assert.equal(roundTrip.restoredByName, 'Mohamed Admin');
+  assert.equal(roundTrip.restoredAt, '2026-11-26T09:15:00.000Z');
+  assert.equal(roundTrip.restoredReason, 'Révision du périmètre Fibre');
+
+  assert.equal(formatFicheNumeroWithPrefix('OP-0042', 'B2B-'), 'B2B-0042');
+  assert.equal(
+    formatEmailBodyWithOptionalPhone('Bonjour,\nCordialement.', '0661223344', true).includes(
+      '0661223344'
+    ),
+    true
+  );
+  assert.equal(getFollowUpAlertDelayMs('24h'), 24 * 60 * 60 * 1000);
+  assert.equal(getFollowUpAlertDelayMs('48h'), 48 * 60 * 60 * 1000);
+
+  const monthSummary = computeCurrentMonthContractsAndPayout(
+    [
+      { signedAt: '2026-11-10T10:00:00.000Z', payoutMad: 1500, payoutStatus: 'Validé' },
+      { signedAt: '2026-11-15T10:00:00.000Z', payoutMad: 2000, payoutStatus: 'Versé' },
+      { signedAt: '2026-11-20T10:00:00.000Z', payoutMad: 1200, payoutStatus: 'Refusé' },
+      { signedAt: '2026-10-20T10:00:00.000Z', payoutMad: 3000, payoutStatus: 'Validé' },
+    ],
+    new Date('2026-11-26T12:00:00.000Z')
+  );
+  assert.equal(monthSummary.currentMonthKey, '2026-11');
+  assert.equal(monthSummary.currentMonthContractsCount, 2);
+  assert.equal(monthSummary.currentMonthPayoutMad, 3500);
+});
+
+test('isVaultOrMaskedApiKey detects masked vault keys and sanitizeWorkspacePayload preserves legal mentions', async () => {
+  const { isVaultOrMaskedApiKey, parseJsonObjectFromLlmText } = await import('./aiRateLimiter');
+
+  assert.equal(isVaultOrMaskedApiKey('', 'gsk_••••••••9a2f'), true);
+  assert.equal(isVaultOrMaskedApiKey('', 'tvly-****1234'), true);
+  assert.equal(isVaultOrMaskedApiKey('cloud_vault_gemini', '__CLOUD_VAULT__'), true);
+  assert.equal(isVaultOrMaskedApiKey('local_1', 'gsk_live_real_unmasked_token_1234567890'), false);
+
+  const parsed = parseJsonObjectFromLlmText<{ objet: string; corps: string }>(
+    'Voici la réponse:\n```json\n{"objet":"Offre Fibre","corps":"Bonjour,\\nProposition Orange Pro."}\n```'
+  );
+  assert.equal(parsed?.objet, 'Offre Fibre');
+  assert.equal(parsed?.corps, 'Bonjour,\nProposition Orange Pro.');
+
+  const ws = sanitizeWorkspacePayload('u_legal', {
+    villesAll: ['Meknès'],
+    villesActive: ['Meknès'],
+    modeVille: 'default',
+    defaultVille: 'Meknès',
+    emailSignature: 'Sig',
+    seeded: true,
+    legalRaisonSociale: 'DIVERSIFIA TELECOM SARL',
+    legalIce: '002345678000091',
+    legalAdresse: 'Avenue Mohammed V, Meknès',
+    legalTelephone: '+212 5 35 52 00 00',
+  });
+  assert.equal(ws.legalRaisonSociale, 'DIVERSIFIA TELECOM SARL');
+  assert.equal(ws.legalIce, '002345678000091');
+  assert.equal(ws.legalAdresse, 'Avenue Mohammed V, Meknès');
+  assert.equal(ws.legalTelephone, '+212 5 35 52 00 00');
+});
+
+test('isDuringWorkHours uses Africa/Casablanca timezone and projectLatLngToMercatorWorld handles negative Moroccan longitudes', async () => {
+  const { isDuringWorkHours, projectLatLngToMercatorWorld, computeMercatorMarkerPosition } =
+    await import('./attendance');
+
+  // Thursday 2026-11-26 at 10:30 UTC is 11:30 in Africa/Casablanca (UTC+1) -> during work hours
+  const thursdayMorning = new Date('2026-11-26T10:30:00.000Z');
+  const whStandard = isDuringWorkHours(thursdayMorning, 'standard_maroc');
+  assert.equal(whStandard.duringWorkHours, true);
+
+  const whLateNight = isDuringWorkHours(new Date('2026-11-26T22:30:00.000Z'), 'standard_maroc');
+  assert.equal(whLateNight.duringWorkHours, false);
+
+  // Meknès negative longitude (-5.5547) must not be clamped to 0
+  const meknesPt = projectLatLngToMercatorWorld(33.8935, -5.5547, 15);
+  const zeroLngPt = projectLatLngToMercatorWorld(33.8935, 0, 15);
+  assert.ok(meknesPt.worldX < zeroLngPt.worldX);
+
+  const markerPos = computeMercatorMarkerPosition({
+    lat: 33.8935,
+    lng: -5.5547,
+    centerLat: 33.8935,
+    centerLng: -5.5547,
+    zoom: 15,
+    viewportWidth: 800,
+    viewportHeight: 500,
+  });
+  assert.equal(markerPos.leftPx, 400);
+  assert.equal(markerPos.topPx, 250);
+  assert.equal(markerPos.isInsideViewport, true);
+});
+

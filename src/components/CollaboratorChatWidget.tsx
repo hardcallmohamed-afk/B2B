@@ -26,10 +26,28 @@ import type {
 import { formatDateTimeShort } from '../utils/attendance';
 import { canUseWhisperCoaching, isSupervisorRole } from '../utils/authAccess';
 
-const RTC_ICE_SERVERS: RTCIceServer[] = [
+const DEFAULT_RTC_ICE_SERVERS: RTCIceServer[] = [
   { urls: 'stun:stun.l.google.com:19302' },
   { urls: 'stun:stun1.l.google.com:19302' },
 ];
+
+async function fetchRtcIceServers(): Promise<RTCIceServer[]> {
+  try {
+    const res = await fetch('/api/rtc/ice-servers', {
+      method: 'GET',
+      headers: { Accept: 'application/json' },
+      signal: AbortSignal.timeout(3500),
+    });
+    if (!res.ok) return DEFAULT_RTC_ICE_SERVERS;
+    const data = await res.json();
+    if (Array.isArray(data?.iceServers) && data.iceServers.length > 0) {
+      return data.iceServers as RTCIceServer[];
+    }
+  } catch {
+    // Fallback to STUN
+  }
+  return DEFAULT_RTC_ICE_SERVERS;
+}
 
 export const SupervisorCoachingPttPill: React.FC<{
   currentUserRole: string;
@@ -59,12 +77,8 @@ export const SupervisorCoachingHeaderStopButton: React.FC<{
   currentUserRole: string;
   coachingActive: boolean;
   onStop: () => void;
-}> = ({ currentUserRole, coachingActive, onStop }) => {
-  if (
-    !isSupervisorRole(currentUserRole) ||
-    !canUseWhisperCoaching(currentUserRole) ||
-    !coachingActive
-  ) {
+}> = ({ coachingActive, onStop }) => {
+  if (!coachingActive) {
     return null;
   }
   return (
@@ -82,43 +96,48 @@ export const SupervisorCoachingHeaderStopButton: React.FC<{
 
 export const SupervisorAudioControlsContainer: React.FC<{
   currentUserRole: string;
+  hasCoachingInvite?: boolean;
   isListeningOrActive: boolean;
   coachingBusy: boolean;
   coachingError: string;
   onStart: () => void;
 }> = ({
   currentUserRole,
+  hasCoachingInvite = false,
   isListeningOrActive,
   coachingBusy,
   coachingError,
   onStart,
 }) => {
-  if (!isSupervisorRole(currentUserRole) || !canUseWhisperCoaching(currentUserRole)) {
+  const isSupervisor =
+    isSupervisorRole(currentUserRole) && canUseWhisperCoaching(currentUserRole);
+  if (!isSupervisor && !hasCoachingInvite) {
+    return null;
+  }
+  if (isListeningOrActive) {
     return null;
   }
   return (
     <>
-      {!isListeningOrActive && (
-        <div
-          data-testid="supervisor-audio-controls-container"
-          className="px-3.5 py-2 border-b border-stone-200 bg-stone-50 flex items-center justify-between gap-2"
-        >
-          <div className="text-[11px] font-semibold text-stone-700 flex items-center gap-1.5">
-            <Mic className="w-3.5 h-3.5 text-orange-600" />
-            <span>Audio Direction</span>
-          </div>
-          <button
-            type="button"
-            disabled={coachingBusy}
-            onClick={onStart}
-            className="inline-flex items-center gap-1 rounded-lg bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 px-2.5 py-1 text-[10px] font-bold text-white"
-          >
-            <Mic className="w-3 h-3" />
-            {coachingBusy ? 'Activation...' : 'Autoriser micro'}
-          </button>
+      <div
+        data-testid="supervisor-audio-controls-container"
+        className="px-3.5 py-2 border-b border-stone-200 bg-stone-50 flex items-center justify-between gap-2"
+      >
+        <div className="text-[11px] font-semibold text-stone-700 flex items-center gap-1.5">
+          <Mic className="w-3.5 h-3.5 text-orange-600" />
+          <span>{isSupervisor ? 'Audio Direction' : 'Invitation Audio Direction'}</span>
         </div>
-      )}
-      {coachingError && !isListeningOrActive && (
+        <button
+          type="button"
+          disabled={coachingBusy}
+          onClick={onStart}
+          className="inline-flex items-center gap-1 rounded-lg bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 px-2.5 py-1 text-[10px] font-bold text-white"
+        >
+          <Mic className="w-3 h-3" />
+          {coachingBusy ? 'Activation...' : 'Autoriser micro'}
+        </button>
+      </div>
+      {coachingError && (
         <div className="px-3.5 py-1.5 bg-red-50 border-b border-red-200 text-[10px] font-semibold text-red-700">
           {coachingError}
         </div>
@@ -134,6 +153,7 @@ interface CollaboratorChatWidgetProps {
   currentUserRole: string;
   currentUserZone: string;
   superAdminUid?: string;
+  hasCoachingInvite?: boolean;
   forceOpenSignal?: number;
   initialOpen?: boolean;
   onNotify: (msg: string, type?: 'ok' | 'warn' | 'err') => void;
@@ -146,6 +166,7 @@ export const CollaboratorChatWidget: React.FC<CollaboratorChatWidgetProps> = ({
   currentUserRole,
   currentUserZone,
   superAdminUid,
+  hasCoachingInvite = false,
   forceOpenSignal = 0,
   initialOpen = false,
   onNotify,
@@ -170,6 +191,7 @@ export const CollaboratorChatWidget: React.FC<CollaboratorChatWidgetProps> = ({
   const remoteAudioRef = useRef<HTMLAudioElement | null>(null);
   const candidatesUnsubRef = useRef<(() => void) | null>(null);
   const seenCandidateIdsRef = useRef<Set<string>>(new Set());
+  const pendingIceCandidatesRef = useRef<RTCIceCandidateInit[]>([]);
   const appliedAnswerRef = useRef<string>('');
   const coachingActiveRef = useRef<boolean>(false);
   const rebuildingOfferRef = useRef<boolean>(false);
@@ -311,11 +333,13 @@ export const CollaboratorChatWidget: React.FC<CollaboratorChatWidgetProps> = ({
         pcRef.current = null;
       }
       seenCandidateIdsRef.current.clear();
+      pendingIceCandidatesRef.current = [];
       appliedAnswerRef.current = '';
 
       await clearCoachingCandidates(currentUserUid).catch(() => {});
 
-      const pc = new RTCPeerConnection({ iceServers: RTC_ICE_SERVERS });
+      const iceServers = await fetchRtcIceServers();
+      const pc = new RTCPeerConnection({ iceServers });
       pcRef.current = pc;
 
       stream.getAudioTracks().forEach((track) => {
@@ -376,7 +400,11 @@ export const CollaboratorChatWidget: React.FC<CollaboratorChatWidgetProps> = ({
             seenCandidateIdsRef.current.add(docSnap.id);
             try {
               const cand = JSON.parse(d.candidateJson) as RTCIceCandidateInit;
-              void pc.addIceCandidate(new RTCIceCandidate(cand)).catch(() => {});
+              if (pc.remoteDescription && pc.remoteDescription.type) {
+                void pc.addIceCandidate(new RTCIceCandidate(cand)).catch(() => {});
+              } else {
+                pendingIceCandidatesRef.current.push(cand);
+              }
             } catch {
               // ignore
             }
@@ -511,10 +539,17 @@ export const CollaboratorChatWidget: React.FC<CollaboratorChatWidgetProps> = ({
           pcRef.current.signalingState === 'have-local-offer'
         ) {
           appliedAnswerRef.current = nextDoc.answerSdp;
+          const pcInstance = pcRef.current;
           try {
             const answerDesc = JSON.parse(nextDoc.answerSdp) as RTCSessionDescriptionInit;
-            void pcRef.current
+            void pcInstance
               .setRemoteDescription(new RTCSessionDescription(answerDesc))
+              .then(() => {
+                const queued = pendingIceCandidatesRef.current.splice(0);
+                queued.forEach((cand) => {
+                  void pcInstance.addIceCandidate(new RTCIceCandidate(cand)).catch(() => {});
+                });
+              })
               .catch(() => {});
           } catch {
             // ignore
@@ -559,6 +594,7 @@ export const CollaboratorChatWidget: React.FC<CollaboratorChatWidgetProps> = ({
       remoteAudioRef.current.srcObject = null;
     }
     seenCandidateIdsRef.current.clear();
+    pendingIceCandidatesRef.current = [];
     appliedAnswerRef.current = '';
     setCoachingActive(false);
     setCoachingError('');
@@ -729,6 +765,7 @@ export const CollaboratorChatWidget: React.FC<CollaboratorChatWidgetProps> = ({
 
           <SupervisorAudioControlsContainer
             currentUserRole={currentUserRole}
+            hasCoachingInvite={hasCoachingInvite}
             isListeningOrActive={isListeningOrActive}
             coachingBusy={coachingBusy}
             coachingError={coachingError}

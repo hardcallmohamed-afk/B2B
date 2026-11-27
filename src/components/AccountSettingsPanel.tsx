@@ -2,6 +2,7 @@ import React, { useRef, useState } from 'react';
 import {
   Award,
   Bell,
+  Building2,
   Camera,
   CheckCircle2,
   Download,
@@ -62,6 +63,10 @@ export interface UserProfileSettings {
   notifyBadges: boolean;
   notifySound: boolean;
   compactUi: boolean;
+  legalRaisonSociale?: string;
+  legalIce?: string;
+  legalAdresse?: string;
+  legalTelephone?: string;
 }
 
 export interface AdvancedAccountPreferences {
@@ -72,6 +77,7 @@ export interface AdvancedAccountPreferences {
   targetMaturityPct: 75 | 85 | 95;
   defaultEmailTone: 'terrain' | 'executif' | 'court';
   defaultEmailCycle:
+    | 'auto'
     | 'premier_contact'
     | 'suite_passage'
     | 'diagnostic'
@@ -129,6 +135,8 @@ interface AccountSettingsPanelProps {
   achievementSummary: AchievementSummary;
   contractsCount: number;
   totalPayoutMad: number;
+  currentMonthContractsCount?: number;
+  currentMonthPayoutMad?: number;
   prospectsCount: number;
   onSaveProfile: (next: UserProfileSettings, nextSignature: string) => void;
   onExportBackup: () => void;
@@ -158,6 +166,8 @@ export const AccountSettingsPanel: React.FC<AccountSettingsPanelProps> = ({
   achievementSummary,
   contractsCount,
   totalPayoutMad,
+  currentMonthContractsCount,
+  currentMonthPayoutMad,
   prospectsCount,
   onSaveProfile,
   onExportBackup,
@@ -182,6 +192,10 @@ export const AccountSettingsPanel: React.FC<AccountSettingsPanelProps> = ({
   const [notifyBadges, setNotifyBadges] = useState(profile.notifyBadges);
   const [notifySound, setNotifySound] = useState(profile.notifySound);
   const [compactUi, setCompactUi] = useState(profile.compactUi);
+  const [legalRaisonSociale, setLegalRaisonSociale] = useState(profile.legalRaisonSociale || '');
+  const [legalIce, setLegalIce] = useState(profile.legalIce || '');
+  const [legalAdresse, setLegalAdresse] = useState(profile.legalAdresse || '');
+  const [legalTelephone, setLegalTelephone] = useState(profile.legalTelephone || '');
   const [advPrefs, setAdvPrefs] = useState<AdvancedAccountPreferences>(() =>
     loadAdvancedAccountPrefs(uid)
   );
@@ -200,7 +214,13 @@ export const AccountSettingsPanel: React.FC<AccountSettingsPanelProps> = ({
   const initials = getUserInitials(displayName || profile.displayName, email);
 
   const awardedBadgeObjects = ADMIN_DISTINCTION_BADGES.filter((b) => manualBadges.includes(b.id));
-  const goalPct = Math.min(100, Math.round((contractsCount / Math.max(1, monthlyGoalContracts)) * 100));
+  const activeMonthContracts = currentMonthContractsCount ?? contractsCount;
+  const activeMonthPayoutMad = currentMonthPayoutMad ?? totalPayoutMad;
+  const goalPct = Math.min(100, Math.round((activeMonthContracts / Math.max(1, monthlyGoalContracts)) * 100));
+  const payoutGoalPct = Math.min(
+    100,
+    Math.round((activeMonthPayoutMad / Math.max(1, advPrefs.monthlyGoalPayoutMad)) * 100)
+  );
 
   const handlePhotoFile = async (file: File | null | undefined) => {
     if (!file) return;
@@ -219,6 +239,10 @@ export const AccountSettingsPanel: React.FC<AccountSettingsPanelProps> = ({
           notifyBadges,
           notifySound,
           compactUi,
+          legalRaisonSociale: legalRaisonSociale.trim(),
+          legalIce: legalIce.trim(),
+          legalAdresse: legalAdresse.trim(),
+          legalTelephone: legalTelephone.trim(),
         },
         signature
       );
@@ -247,6 +271,10 @@ export const AccountSettingsPanel: React.FC<AccountSettingsPanelProps> = ({
         notifyBadges,
         notifySound,
         compactUi,
+        legalRaisonSociale: legalRaisonSociale.trim(),
+        legalIce: legalIce.trim(),
+        legalAdresse: legalAdresse.trim(),
+        legalTelephone: legalTelephone.trim(),
       },
       signature
     );
@@ -257,6 +285,11 @@ export const AccountSettingsPanel: React.FC<AccountSettingsPanelProps> = ({
     setAdvPrefs(nextPrefs);
     try {
       window.localStorage.setItem(`op_advanced_account_prefs_${uid}`, JSON.stringify(nextPrefs));
+      window.dispatchEvent(
+        new CustomEvent('op-advanced-prefs-changed', {
+          detail: { uid, prefs: nextPrefs },
+        })
+      );
     } catch {
       // Ignore quota
     }
@@ -292,6 +325,10 @@ export const AccountSettingsPanel: React.FC<AccountSettingsPanelProps> = ({
           notifyBadges,
           notifySound,
           compactUi,
+          legalRaisonSociale: legalRaisonSociale.trim(),
+          legalIce: legalIce.trim(),
+          legalAdresse: legalAdresse.trim(),
+          legalTelephone: legalTelephone.trim(),
         },
         signature
       );
@@ -523,18 +560,22 @@ export const AccountSettingsPanel: React.FC<AccountSettingsPanelProps> = ({
             <div className="text-[10px] font-bold uppercase text-orange-800 flex items-center justify-between">
               <span className="inline-flex items-center gap-1">
                 <Target className="w-3.5 h-3.5" />
-                Objectif Mensuel
+                Objectif Mensuel (Mois en cours)
               </span>
               <span className="tabular-nums">{goalPct}%</span>
             </div>
             <div className="mt-1 text-sm font-extrabold text-stone-900 tabular-nums">
-              {contractsCount} / {monthlyGoalContracts} contrats
+              {activeMonthContracts} / {monthlyGoalContracts} contrats
             </div>
-            <div className="mt-1.5 h-1.5 w-full rounded-full bg-orange-200/70 overflow-hidden">
+            <div className="mt-1 h-1.5 w-full rounded-full bg-orange-200/70 overflow-hidden">
               <div
                 className="h-full rounded-full bg-orange-600 transition-all"
                 style={{ width: `${goalPct}%` }}
               />
+            </div>
+            <div className="mt-1.5 flex items-center justify-between text-[10px] font-semibold text-stone-600 tabular-nums">
+              <span>Payout mois : {formatMad(activeMonthPayoutMad)} / {formatMad(advPrefs.monthlyGoalPayoutMad)}</span>
+              <span className="font-bold text-emerald-700">{payoutGoalPct}%</span>
             </div>
           </div>
         </div>
@@ -714,6 +755,84 @@ export const AccountSettingsPanel: React.FC<AccountSettingsPanelProps> = ({
               placeholder="Votre signature utilisée dans les emails générés..."
               className="w-full px-3 py-2 rounded-lg border border-stone-300 text-xs focus:outline-none focus:border-orange-600"
             />
+          </div>
+
+          {/* Informations Légales Émetteur (Devis PDF Client) */}
+          <div
+            data-testid="account-legal-issuer-section"
+            className="rounded-xl border border-stone-200 bg-stone-50/70 p-3.5 space-y-3"
+          >
+            <div>
+              <div className="text-xs font-bold text-stone-900 flex items-center gap-1.5">
+                <Building2 className="w-3.5 h-3.5 text-orange-600" />
+                Informations Légales Émetteur (Devis PDF)
+              </div>
+              <p className="text-[11px] text-stone-500">
+                Ces mentions légales sont imprimées automatiquement dans le bloc ÉMETTEUR de vos devis clients Orange Pro.
+              </p>
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div className="space-y-1">
+                <label htmlFor="acc-legal-rs" className="block text-[11px] font-semibold text-stone-700">
+                  Raison sociale émetteur
+                </label>
+                <input
+                  id="acc-legal-rs"
+                  data-testid="account-legal-raison-sociale"
+                  type="text"
+                  value={legalRaisonSociale}
+                  onChange={(e) => setLegalRaisonSociale(e.target.value)}
+                  maxLength={140}
+                  placeholder="Ex. DIVERSIFIA SARL — Partenaire Orange Pro"
+                  className="w-full px-2.5 py-1.5 rounded-lg border border-stone-300 bg-white text-xs focus:outline-none focus:border-orange-600"
+                />
+              </div>
+              <div className="space-y-1">
+                <label htmlFor="acc-legal-ice" className="block text-[11px] font-semibold text-stone-700">
+                  ICE (Identifiant Commun de l&apos;Entreprise)
+                </label>
+                <input
+                  id="acc-legal-ice"
+                  data-testid="account-legal-ice"
+                  type="text"
+                  value={legalIce}
+                  onChange={(e) => setLegalIce(e.target.value)}
+                  maxLength={40}
+                  placeholder="Ex. 001234567000089 (15 chiffres)"
+                  className="w-full px-2.5 py-1.5 rounded-lg border border-stone-300 bg-white text-xs font-mono focus:outline-none focus:border-orange-600"
+                />
+              </div>
+              <div className="space-y-1">
+                <label htmlFor="acc-legal-addr" className="block text-[11px] font-semibold text-stone-700">
+                  Adresse du siège social / agence
+                </label>
+                <input
+                  id="acc-legal-addr"
+                  data-testid="account-legal-adresse"
+                  type="text"
+                  value={legalAdresse}
+                  onChange={(e) => setLegalAdresse(e.target.value)}
+                  maxLength={200}
+                  placeholder="Ex. Avenue des FAR, Ville Nouvelle, Meknès"
+                  className="w-full px-2.5 py-1.5 rounded-lg border border-stone-300 bg-white text-xs focus:outline-none focus:border-orange-600"
+                />
+              </div>
+              <div className="space-y-1">
+                <label htmlFor="acc-legal-tel" className="block text-[11px] font-semibold text-stone-700">
+                  Téléphone standard émetteur
+                </label>
+                <input
+                  id="acc-legal-tel"
+                  data-testid="account-legal-telephone"
+                  type="tel"
+                  value={legalTelephone}
+                  onChange={(e) => setLegalTelephone(e.target.value)}
+                  maxLength={40}
+                  placeholder="Ex. 05 35 XX XX XX"
+                  className="w-full px-2.5 py-1.5 rounded-lg border border-stone-300 bg-white text-xs focus:outline-none focus:border-orange-600"
+                />
+              </div>
+            </div>
           </div>
 
           {/* Préférences Notifications & Affichage */}
@@ -963,7 +1082,7 @@ export const AccountSettingsPanel: React.FC<AccountSettingsPanelProps> = ({
             </div>
 
             {/* 2. Paramètres Studio Email IA, Moteur Multi-LLM & Export CSV */}
-            <div className="pt-3 border-t border-stone-200/80 grid grid-cols-1 sm:grid-cols-4 gap-3">
+            <div className="pt-3 border-t border-stone-200/80 grid grid-cols-1 sm:grid-cols-3 lg:grid-cols-5 gap-3">
               <div className="space-y-1">
                 <label htmlFor="adv-email-tone" className="block text-[11px] font-semibold text-stone-700">
                   Ton Studio Email IA par défaut
@@ -982,6 +1101,31 @@ export const AccountSettingsPanel: React.FC<AccountSettingsPanelProps> = ({
                   <option value="terrain">Direct terrain (PME / TPE)</option>
                   <option value="executif">Exécutif Direction / Grand Compte</option>
                   <option value="court">Relance éclair (4 lignes)</option>
+                </select>
+              </div>
+
+              <div className="space-y-1">
+                <label htmlFor="adv-email-cycle" className="block text-[11px] font-semibold text-stone-700">
+                  Cycle de vie Email par défaut
+                </label>
+                <select
+                  id="adv-email-cycle"
+                  value={advPrefs.defaultEmailCycle}
+                  onChange={(e) =>
+                    persistAdvancedPrefs({
+                      ...advPrefs,
+                      defaultEmailCycle: e.target.value as AdvancedAccountPreferences['defaultEmailCycle'],
+                    })
+                  }
+                  className="w-full px-2.5 py-1.5 rounded-lg border border-stone-300 bg-white text-xs font-medium text-stone-800"
+                >
+                  <option value="premier_contact">1er Contact Prospection</option>
+                  <option value="suite_passage">Suite passage terrain</option>
+                  <option value="diagnostic">Proposition audit / RDV</option>
+                  <option value="relance_devis">Relance devis envoyé</option>
+                  <option value="fin_contrat">Échéance fin d&apos;engagement</option>
+                  <option value="renouvellement">Renouvellement parc</option>
+                  <option value="reactivation">Réactivation prospect</option>
                 </select>
               </div>
 

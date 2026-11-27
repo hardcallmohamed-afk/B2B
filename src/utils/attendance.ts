@@ -115,41 +115,128 @@ export function detectClientDeviceInfo(
   };
 }
 
+export type WorkHoursScheduleMode = 'standard_maroc' | 'continu_08_20' | 'terrain_etendu';
+
+export const WORK_SCHEDULE_LABELS: Record<WorkHoursScheduleMode, string> = {
+  standard_maroc: 'Lun–Ven 08h30–18h30 · Sam 09h00–13h00',
+  continu_08_20: 'Lun–Sam 08h00–20h00',
+  terrain_etendu: 'Lun–Dim 07h30–21h00',
+};
+
+function getMoroccoCalendarParts(date: Date): {
+  year: string;
+  month: string;
+  day: string;
+  dayOfWeek: number;
+  hours: number;
+  minutes: number;
+} {
+  try {
+    const fmt = new Intl.DateTimeFormat('en-US', {
+      timeZone: 'Africa/Casablanca',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      weekday: 'short',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+    });
+    const parts = fmt.formatToParts(date);
+    const get = (type: string) => parts.find((p) => p.type === type)?.value || '';
+    const weekdayMap: Record<string, number> = {
+      Sun: 0,
+      Mon: 1,
+      Tue: 2,
+      Wed: 3,
+      Thu: 4,
+      Fri: 5,
+      Sat: 6,
+    };
+    const rawHour = Number(get('hour'));
+    return {
+      year: get('year') || String(date.getFullYear()),
+      month: get('month') || String(date.getMonth() + 1).padStart(2, '0'),
+      day: get('day') || String(date.getDate()).padStart(2, '0'),
+      dayOfWeek: weekdayMap[get('weekday')] ?? date.getDay(),
+      hours: Number.isFinite(rawHour) ? rawHour % 24 : date.getHours(),
+      minutes: Number(get('minute')) || 0,
+    };
+  } catch {
+    return {
+      year: String(date.getFullYear()),
+      month: String(date.getMonth() + 1).padStart(2, '0'),
+      day: String(date.getDate()).padStart(2, '0'),
+      dayOfWeek: date.getDay(),
+      hours: date.getHours(),
+      minutes: date.getMinutes(),
+    };
+  }
+}
+
 /**
- * Checks whether a timestamp falls within standard B2B Morocco office hours:
- * - Monday–Friday: 08:30 to 18:30
- * - Saturday: 09:00 to 13:00
- * - Sunday: outside work hours
+ * Checks whether a timestamp falls within configured B2B Morocco office hours
+ * evaluated in the Africa/Casablanca timezone:
+ * - standard_maroc: Monday–Friday 08:30–18:30, Saturday 09:00–13:00
+ * - continu_08_20: Monday–Saturday 08:00–20:00
+ * - terrain_etendu: Monday–Sunday 07:30–21:00
  */
-export function isDuringWorkHours(date: Date = new Date()): WorkHoursStatus {
-  const day = date.getDay(); // 0 = Sun, 1 = Mon ... 6 = Sat
-  const minutes = date.getHours() * 60 + date.getMinutes();
+export function isDuringWorkHours(
+  date: Date = new Date(),
+  scheduleMode: WorkHoursScheduleMode = 'standard_maroc'
+): WorkHoursStatus {
+  const mode: WorkHoursScheduleMode =
+    scheduleMode === 'continu_08_20' || scheduleMode === 'terrain_etendu'
+      ? scheduleMode
+      : 'standard_maroc';
+  const scheduleLabel = WORK_SCHEDULE_LABELS[mode];
+  const { dayOfWeek: day, hours, minutes: mins } = getMoroccoCalendarParts(date);
+  const minutes = hours * 60 + mins;
+
+  if (mode === 'terrain_etendu') {
+    return {
+      duringWorkHours: minutes >= 7 * 60 + 30 && minutes < 21 * 60,
+      scheduleLabel,
+    };
+  }
+
+  if (mode === 'continu_08_20') {
+    if (day >= 1 && day <= 6) {
+      return {
+        duringWorkHours: minutes >= 8 * 60 && minutes < 20 * 60,
+        scheduleLabel,
+      };
+    }
+    return {
+      duringWorkHours: false,
+      scheduleLabel,
+    };
+  }
 
   if (day >= 1 && day <= 5) {
     return {
       duringWorkHours: minutes >= 8 * 60 + 30 && minutes < 18 * 60 + 30,
-      scheduleLabel: WORK_SCHEDULE_LABEL,
+      scheduleLabel,
     };
   }
   if (day === 6) {
     return {
       duringWorkHours: minutes >= 9 * 60 && minutes < 13 * 60,
-      scheduleLabel: WORK_SCHEDULE_LABEL,
+      scheduleLabel,
     };
   }
   return {
     duringWorkHours: false,
-    scheduleLabel: WORK_SCHEDULE_LABEL,
+    scheduleLabel,
   };
 }
 
 /**
- * Local calendar day key YYYY-MM-DD (used to reset daily worked hours cleanly at midnight).
+ * Morocco calendar day key YYYY-MM-DD in Africa/Casablanca timezone
+ * (used to reset daily worked hours cleanly at midnight Morocco time).
  */
 export function getLocalDateKey(date: Date = new Date()): string {
-  const year = date.getFullYear();
-  const month = String(date.getMonth() + 1).padStart(2, '0');
-  const day = String(date.getDate()).padStart(2, '0');
+  const { year, month, day } = getMoroccoCalendarParts(date);
   return `${year}-${month}-${day}`;
 }
 
@@ -584,7 +671,7 @@ export function computeDistanceKm(
 }
 
 /**
- * Exact Web Mercator (EPSG:3857) projection used by Google Maps HD tiles.
+ * Exact Web Mercator (EPSG:3857) projection used by OpenStreetMap / CartoDB / Esri HD tiles.
  * Converts (lat, lng) at zoom Z into global pixel coordinates (256 * 2^Z world size).
  */
 export function projectLatLngToMercatorWorld(
@@ -593,9 +680,10 @@ export function projectLatLngToMercatorWorld(
   zoom: number
 ): { worldX: number; worldY: number } {
   const clampedLat = Math.max(-85.05112878, Math.min(85.05112878, Number(lat) || 0));
-  const clampedLng = ((Number(lng) || 0) + 180) % 360 - 180;
+  const rawLng = Number(lng) || 0;
+  const wrappedLng = ((((rawLng + 180) % 360) + 360) % 360) - 180;
   const scale = 256 * Math.pow(2, zoom);
-  const worldX = ((clampedLng + 180) / 360) * scale;
+  const worldX = ((wrappedLng + 180) / 360) * scale;
   const sinLat = Math.sin((clampedLat * Math.PI) / 180);
   const worldY =
     (0.5 - Math.log((1 + sinLat) / (1 - sinLat)) / (4 * Math.PI)) * scale;
@@ -669,31 +757,36 @@ export function computeVisibleGoogleMapTiles(params: {
   const minTileY = Math.max(0, Math.floor((centerWorldY - halfH) / 256) - 1);
   const maxTileY = Math.min(maxTileIdx - 1, Math.floor((centerWorldY + halfH) / 256) + 1);
 
-  // Google Maps HD lyrs parameter: m = Plan standard, s = Satellite pur, y = Hybride (Satellite + routes), p = Terrain/Relief
-  const lyrs =
-    params.mapStyle === 'satellite'
-      ? 's'
-      : params.mapStyle === 'hybride'
-        ? 'y'
-        : params.mapStyle === 'terrain'
-          ? 'p'
-          : 'm';
+  // Legal HD tile providers:
+  // - plan: OpenStreetMap Standard
+  // - terrain / radar: CartoDB Voyager HD (@2x)
+  // - satellite / hybride: Esri World Imagery
+  const styleKey = params.mapStyle;
+  const subdomains = ['a', 'b', 'c', 'd'];
 
   const tiles: GoogleMapTileDescriptor[] = [];
   for (let ty = minTileY; ty <= maxTileY; ty++) {
     for (let tx = minTileX; tx <= maxTileX; tx++) {
       const wrappedTx = ((tx % maxTileIdx) + maxTileIdx) % maxTileIdx;
-      const serverIdx = Math.abs(wrappedTx + ty) % 4;
+      const sub = subdomains[Math.abs(wrappedTx + ty) % subdomains.length];
       const leftPx = Math.round(tx * 256 - centerWorldX + halfW);
       const topPx = Math.round(ty * 256 - centerWorldY + halfH);
+
+      let url = `https://tile.openstreetmap.org/${intZoom}/${wrappedTx}/${ty}.png`;
+      if (styleKey === 'satellite' || styleKey === 'hybride') {
+        url = `https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/${intZoom}/${ty}/${wrappedTx}`;
+      } else if (styleKey === 'terrain' || styleKey === 'radar') {
+        url = `https://${sub}.basemaps.cartocdn.com/rastertiles/voyager/${intZoom}/${wrappedTx}/${ty}@2x.png`;
+      }
+
       tiles.push({
-        key: `${intZoom}-${wrappedTx}-${ty}-${lyrs}`,
+        key: `${intZoom}-${wrappedTx}-${ty}-${styleKey}`,
         tx: wrappedTx,
         ty,
         z: intZoom,
         leftPx,
         topPx,
-        url: `https://mt${serverIdx}.google.com/vt/lyrs=${lyrs}&x=${wrappedTx}&y=${ty}&z=${intZoom}&hl=fr`,
+        url,
       });
     }
   }
@@ -1037,34 +1130,28 @@ export function startAutomaticMultiPlatformLocationEngine(params: {
 
   startHtml5Geolocation();
 
-  // Periodic 10-second active refresh (battery-friendly for iOS Safari & Android while keeping Radar live)
+  // Only fall back to periodic polling if watchPosition could not be established
   if (typeof window !== 'undefined') {
     retryIntervalId = window.setInterval(() => {
-      if (disposed) return;
+      if (disposed || watchId !== null) return;
       if (typeof navigator !== 'undefined' && 'geolocation' in navigator) {
         try {
           navigator.geolocation.getCurrentPosition(
-            (pos) => handleNativePosition(pos, true),
-            () => {
-              navigator.geolocation.getCurrentPosition(
-                (pos) => handleNativePosition(pos, false),
-                () => {},
-                { enableHighAccuracy: false, maximumAge: 5_000, timeout: 5_000 }
-              );
-            },
-            { enableHighAccuracy: true, maximumAge: 4_000, timeout: 6_000 }
+            (pos) => handleNativePosition(pos, false),
+            () => {},
+            { enableHighAccuracy: false, maximumAge: 10_000, timeout: 6_000 }
           );
         } catch {
           // ignore
         }
       }
-    }, 10_000);
+    }, 30_000);
   }
 
   // On Apple iOS Safari & Android mobile browsers, geolocation accepts cleanly on first user gesture
   // and refreshes immediately when returning to the app or regaining connectivity.
   const handleFirstUserGesture = () => {
-    if (disposed) return;
+    if (disposed || hasHardwareFix) return;
     startHtml5Geolocation();
   };
 
@@ -1084,11 +1171,13 @@ export function startAutomaticMultiPlatformLocationEngine(params: {
     document.addEventListener('visibilitychange', handleForegroundOrOnline);
   }
 
+  let permStatusRef: PermissionStatus | null = null;
   if (typeof navigator !== 'undefined' && 'permissions' in navigator && navigator.permissions?.query) {
     navigator.permissions
       .query({ name: 'geolocation' as PermissionName })
       .then((status) => {
         if (disposed) return;
+        permStatusRef = status;
         status.onchange = () => {
           if (!disposed && status.state === 'granted') {
             startHtml5Geolocation();
@@ -1100,6 +1189,10 @@ export function startAutomaticMultiPlatformLocationEngine(params: {
 
   return () => {
     disposed = true;
+    if (permStatusRef) {
+      permStatusRef.onchange = null;
+      permStatusRef = null;
+    }
     if (retryIntervalId !== null && typeof window !== 'undefined') {
       window.clearInterval(retryIntervalId);
     }

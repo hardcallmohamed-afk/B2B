@@ -64,8 +64,11 @@ export function generateClientQuotePdf(config: QuoteConfig): void {
   validUntilDate.setDate(validUntilDate.getDate() + (validityDays || 15));
   const validUntilStr = validUntilDate.toLocaleDateString('fr-FR');
 
-  const totalMonthly = Math.max(0, Number(prixMensuelMad) || 0);
-  const totalAnnual = totalMonthly * 12;
+  const totalMonthlyHt = Math.max(0, Number(prixMensuelMad) || 0);
+  const tvaMonthly = Math.round(totalMonthlyHt * 0.2 * 100) / 100;
+  const totalMonthlyTtc = Math.round((totalMonthlyHt + tvaMonthly) * 100) / 100;
+  const totalAnnualHt = totalMonthlyHt * 12;
+  const totalAnnualTtc = totalMonthlyTtc * 12;
 
   // 1. En-tête DIVERSIFIA (Brand Orange #F96614 & Dark Stone #1C1917)
   doc.setFillColor(28, 25, 23); // #1C1917
@@ -95,7 +98,7 @@ export function generateClientQuotePdf(config: QuoteConfig): void {
   doc.text(`N° ${quoteNumber}`, 195, 25, { align: 'right' });
   doc.text(`Date : ${todayStr}`, 195, 31, { align: 'right' });
 
-  // 2. Coordonnées Émetteur (Workspace Legal ou À compléter)
+  // 2. Coordonnées Émetteur (Workspace Legal)
   doc.setTextColor(60, 60, 60);
   doc.setFontSize(9);
 
@@ -104,21 +107,19 @@ export function generateClientQuotePdf(config: QuoteConfig): void {
   doc.text('ÉMETTEUR :', 15, y);
   doc.setFont('helvetica', 'normal');
   y += 5;
-  const issuerNameLines = doc.splitTextToSize(
-    workspaceLegal?.raisonSociale ? workspaceLegal.raisonSociale : 'DIVERSIFIA (À compléter dans Mon Compte)',
-    95
-  );
+  const issuerName = workspaceLegal?.raisonSociale?.trim() || 'DIVERSIFIA — Partenaire Orange Pro B2B';
+  const issuerNameLines = doc.splitTextToSize(issuerName, 95);
   doc.text(issuerNameLines, 15, y);
   y += issuerNameLines.length * 4;
-  doc.text(`ICE : ${workspaceLegal?.ice ? workspaceLegal.ice : 'À compléter (ICE)'}`, 15, y);
-  y += 4;
-  const issuerAddrLines = doc.splitTextToSize(
-    workspaceLegal?.adresse ? workspaceLegal.adresse : 'Adresse du siège social non renseignée',
-    95
-  );
+  if (workspaceLegal?.ice?.trim()) {
+    doc.text(`ICE : ${workspaceLegal.ice.trim()}`, 15, y);
+    y += 4;
+  }
+  const issuerAddr = workspaceLegal?.adresse?.trim() || 'Maroc — Direction Commerciale Entreprises';
+  const issuerAddrLines = doc.splitTextToSize(issuerAddr, 95);
   doc.text(issuerAddrLines, 15, y);
   y += issuerAddrLines.length * 4;
-  doc.text(`Tél : ${workspaceLegal?.telephone || commercialPhone || 'Service Commercial B2B'}`, 15, y);
+  doc.text(`Tél : ${workspaceLegal?.telephone?.trim() || commercialPhone || 'Service Commercial B2B'}`, 15, y);
 
   // 3. Coordonnées Prospect / Client
   let yRight = 50;
@@ -173,7 +174,7 @@ export function generateClientQuotePdf(config: QuoteConfig): void {
   doc.text("Désignation de l'offre Orange Pro", 18, y + 5.5);
   doc.text('Segment', 108, y + 5.5);
   doc.text('Qté', 138, y + 5.5);
-  doc.text('Total Mensuel', 192, y + 5.5, { align: 'right' });
+  doc.text('Total Mensuel HT', 192, y + 5.5, { align: 'right' });
 
   y += 8;
   doc.setFont('helvetica', 'normal');
@@ -184,24 +185,39 @@ export function generateClientQuotePdf(config: QuoteConfig): void {
   doc.text(productLines, 18, y + 6);
   doc.text(tier, 108, y + 6);
   doc.text(`${quantiteFixe} fix. / ${quantiteMobile} mob.`, 138, y + 6);
-  doc.text(`${formatPdfMad(totalMonthly, 2)} MAD`, 192, y + 6, { align: 'right' });
+  doc.text(`${formatPdfMad(totalMonthlyHt, 2)} MAD`, 192, y + 6, { align: 'right' });
 
-  // 6. Totaux
+  // 6. Totaux HT, TVA (20%) et TTC
   y += rowHeight + 8;
   doc.setFillColor(254, 243, 235); // Orange soft bg
-  doc.roundedRect(112, y, 83, 22, 2, 2, 'F');
+  doc.roundedRect(105, y, 90, 32, 2, 2, 'F');
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(9);
+  doc.setTextColor(80, 80, 80);
+  doc.text('TOTAL HT MENSUEL :', 110, y + 7);
+  doc.text(`${formatPdfMad(totalMonthlyHt, 2)} MAD`, 191, y + 7, { align: 'right' });
+
+  doc.setFont('helvetica', 'normal');
+  doc.text('TVA (20%) :', 110, y + 13);
+  doc.text(`${formatPdfMad(tvaMonthly, 2)} MAD`, 191, y + 13, { align: 'right' });
+
   doc.setFont('helvetica', 'bold');
   doc.setFontSize(10);
   doc.setTextColor(194, 65, 12); // Orange dark
-  doc.text('TOTAL HT MENSUEL :', 117, y + 8);
-  doc.text(`${formatPdfMad(totalMonthly, 2)} MAD`, 191, y + 8, { align: 'right' });
+  doc.text('TOTAL TTC MENSUEL :', 110, y + 20);
+  doc.text(`${formatPdfMad(totalMonthlyTtc, 2)} MAD`, 191, y + 20, { align: 'right' });
 
-  doc.setFontSize(9);
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(8);
   doc.setTextColor(80, 80, 80);
-  doc.text(`Engagement annuel (${formatPdfMad(totalAnnual, 0)} MAD)`, 117, y + 16);
+  doc.text(
+    `Engagement annuel : ${formatPdfMad(totalAnnualHt, 0)} MAD HT (${formatPdfMad(totalAnnualTtc, 0)} MAD TTC)`,
+    110,
+    y + 27
+  );
 
   // 7. Conditions de validité et mentions légales (AUCUNE COMMISSION IMPRIMÉE)
-  y += 32;
+  y += 40;
   doc.setFont('helvetica', 'bold');
   doc.setFontSize(9);
   doc.setTextColor(28, 25, 23);

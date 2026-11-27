@@ -38,6 +38,8 @@ interface KanbanBoardProps {
   fiches: FicheEntreprise[];
   velocityReport?: PortfolioVelocityReport;
   verifyingId: string | null;
+  targetMaturityPct?: number;
+  preferredContactChannel?: 'whatsapp' | 'phone' | 'email';
   onMoveFiche: (ficheId: string, targetStatut: StatutCRM) => void;
   onOpenEmail: (fiche: FicheEntreprise) => void;
   onVerifyOne: (fiche: FicheEntreprise) => void;
@@ -100,6 +102,8 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
   fiches,
   velocityReport: externalVelocityReport,
   verifyingId,
+  targetMaturityPct = 85,
+  preferredContactChannel = 'whatsapp',
   onMoveFiche,
   onOpenEmail,
   onVerifyOne,
@@ -254,7 +258,7 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
                       >
                         {col.items.length}
                       </span>
-                      {onQuickAddInStage && (
+                      {onQuickAddInStage && col.meta.statut !== 'Signé Orange Pro' && (
                         <button
                           type="button"
                           onClick={() => onQuickAddInStage(col.meta.statut)}
@@ -313,14 +317,21 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
                     </div>
                   ) : (
                     col.items.map((f) => {
-                      const secMeta = SECTEURS_META[f.secteur];
-                      const segMeta = SEGMENTS_COULEUR[secMeta.couleur];
+                      const secMeta = SECTEURS_META[f.secteur] || SECTEURS_META.pme;
+                      const segMeta = SEGMENTS_COULEUR[secMeta.couleur] || SEGMENTS_COULEUR.orange;
                       const reco = getOrangeProRecommendation(f);
                       const mat = computeMaturityScore(f);
                       const vel = velocityReport.byFicheId.get(f.id);
                       const velStyles = getVelocityCardStyles(vel?.level || 'normal');
                       const isDragging = draggingId === f.id;
-                      const waPhone = f.telephone ? `212${f.telephone.replace(/^0/, '')}` : '';
+                      const cleanDigits = (f.telephone || '').replace(/\D/g, '');
+                      const waPhone = cleanDigits
+                        ? cleanDigits.startsWith('212')
+                          ? cleanDigits
+                          : cleanDigits.startsWith('00212')
+                            ? cleanDigits.slice(2)
+                            : `212${cleanDigits.replace(/^0+/, '')}`
+                        : '';
                       const extraPhonesCount = f.telephonesSupplementaires?.length || 0;
                       const extraEmailsCount = f.emailsSupplementaires?.length || 0;
                       const velBarPct =
@@ -448,7 +459,7 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
                             <div className="flex-1 h-1 bg-stone-100 rounded-full overflow-hidden">
                               <div
                                 className={`h-full rounded-full ${
-                                  mat >= 80
+                                  mat >= targetMaturityPct
                                     ? 'bg-emerald-600'
                                     : mat >= 50
                                     ? 'bg-amber-500'
@@ -470,8 +481,12 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
                                   <a
                                     href={`tel:${f.telephone}`}
                                     aria-label={`Appeler ${f.societe}`}
-                                    title={`Appeler ${f.telephone}`}
-                                    className="p-1 rounded hover:bg-stone-100 text-stone-600 hover:text-stone-900"
+                                    title={`Appeler ${f.telephone}${preferredContactChannel === 'phone' ? ' (Canal prioritaire)' : ''}`}
+                                    className={`p-1 rounded ${
+                                      preferredContactChannel === 'phone'
+                                        ? 'bg-orange-100 text-orange-800 ring-1 ring-orange-300'
+                                        : 'hover:bg-stone-100 text-stone-600 hover:text-stone-900'
+                                    }`}
                                   >
                                     <Phone className="w-3.5 h-3.5" />
                                   </a>
@@ -482,8 +497,12 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
                                     target="_blank"
                                     rel="noopener noreferrer"
                                     aria-label={`WhatsApp ${f.societe}`}
-                                    title="WhatsApp Pro"
-                                    className="p-1 rounded hover:bg-emerald-50 text-emerald-700"
+                                    title={`WhatsApp Pro${preferredContactChannel === 'whatsapp' ? ' (Canal prioritaire)' : ''}`}
+                                    className={`p-1 rounded ${
+                                      preferredContactChannel === 'whatsapp'
+                                        ? 'bg-emerald-100 text-emerald-800 ring-1 ring-emerald-300'
+                                        : 'hover:bg-emerald-50 text-emerald-700'
+                                    }`}
                                   >
                                     <MessageSquare className="w-3.5 h-3.5" />
                                   </a>
@@ -492,8 +511,12 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
                                   type="button"
                                   onClick={() => onOpenEmail(f)}
                                   aria-label={`Studio Email ${f.societe}`}
-                                  title="Studio Email IA"
-                                  className="p-1 rounded hover:bg-sky-50 text-sky-700"
+                                  title={`Studio Email IA${preferredContactChannel === 'email' ? ' (Canal prioritaire)' : ''}`}
+                                  className={`p-1 rounded ${
+                                    preferredContactChannel === 'email'
+                                      ? 'bg-sky-100 text-sky-800 ring-1 ring-sky-300'
+                                      : 'hover:bg-sky-50 text-sky-700'
+                                  }`}
                                 >
                                   <Mail className="w-3.5 h-3.5" />
                                 </button>

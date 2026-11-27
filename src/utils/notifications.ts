@@ -381,14 +381,20 @@ export function countUnreadNotifications(list: AppNotification[]): number {
 
 export function filterNotificationsForRole(
   list: AppNotification[],
-  role: string | null | undefined
+  _role: string | null | undefined
 ): AppNotification[] {
-  if (isSupervisorRole(role)) return list;
-  return list.filter((n) => n.kind !== 'coaching_invite');
+  return list;
 }
 
 export function markAllNotificationsRead(list: AppNotification[]): AppNotification[] {
   return list.map((n) => (n.read ? n : { ...n, read: true }));
+}
+
+export function markSingleNotificationRead(
+  list: AppNotification[],
+  notificationId: string
+): AppNotification[] {
+  return list.map((n) => (n.id === notificationId && !n.read ? { ...n, read: true } : n));
 }
 
 export interface NotificationSoundProfile {
@@ -555,17 +561,31 @@ export function getNotificationSoundProfile(
   }
 }
 
+let sharedNotificationAudioCtx: AudioContext | null = null;
+
+function getSharedNotificationAudioContext(): AudioContext | null {
+  if (typeof window === 'undefined') return null;
+  const AudioCtx =
+    window.AudioContext ||
+    (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+  if (!AudioCtx) return null;
+  if (!sharedNotificationAudioCtx || sharedNotificationAudioCtx.state === 'closed') {
+    sharedNotificationAudioCtx = new AudioCtx();
+  }
+  if (sharedNotificationAudioCtx.state === 'suspended') {
+    void sharedNotificationAudioCtx.resume().catch(() => {});
+  }
+  return sharedNotificationAudioCtx;
+}
+
 export function playNotificationSound(
   kind: NotificationKind,
   payoutStatus?: PayoutStatus
 ): void {
   if (typeof window === 'undefined') return;
   try {
-    const AudioCtx =
-      window.AudioContext ||
-      (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
-    if (!AudioCtx) return;
-    const ctx = new AudioCtx();
+    const ctx = getSharedNotificationAudioContext();
+    if (!ctx) return;
     const profile = getNotificationSoundProfile(kind, payoutStatus);
 
     profile.notesHz.forEach((freq, idx) => {

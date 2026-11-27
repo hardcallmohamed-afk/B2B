@@ -234,7 +234,7 @@ test('getAnyAvailableLlmKeys and mergeHubAndCloudKeys let any available AI handl
   assert.deepEqual(emailOrder, ['cloud_vault_mistral', 'cloud_vault_anthropic', '2', '3']);
 });
 
-test('CollaboratorChatWidget and audio supervision subcomponents return null in DOM for non-supervisors', () => {
+test('CollaboratorChatWidget hides audio controls by default for non-supervisors until an explicit invite or active session exists', () => {
   for (const role of ['commercial', 'grand_compte', 'team_lead', 'unknown']) {
     const widgetHtml = renderToStaticMarkup(
       React.createElement(CollaboratorChatWidget, {
@@ -248,16 +248,18 @@ test('CollaboratorChatWidget and audio supervision subcomponents return null in 
       })
     );
     assert.ok(widgetHtml.includes('Discussion Direction'), `Chat drawer should render for ${role}`);
-    assert.equal(widgetHtml.includes('Audio Direction'), false, `Audio Direction must not be in DOM for ${role}`);
-    assert.equal(widgetHtml.includes('Autoriser micro'), false, `Autoriser micro must not be in DOM for ${role}`);
+    assert.equal(widgetHtml.includes('Audio Direction'), false, `Audio Direction must not be in DOM by default for ${role}`);
+    assert.equal(widgetHtml.includes('Autoriser micro'), false, `Autoriser micro must not be in DOM without invite for ${role}`);
     assert.equal(widgetHtml.includes('supervisor-audio-controls-container'), false);
     assert.equal(widgetHtml.includes('coaching-ptt-live-pill'), false);
-    assert.equal(widgetHtml.includes('<audio'), false, `No <audio> element in DOM for ${role}`);
+    assert.equal(widgetHtml.includes('<audio'), false, `No <audio> element in DOM when idle for ${role}`);
 
+    // Without invite or active session, subcomponents return null for non-supervisors
     assert.equal(
       renderToStaticMarkup(
         React.createElement(SupervisorAudioControlsContainer, {
           currentUserRole: role,
+          hasCoachingInvite: false,
           isListeningOrActive: false,
           coachingBusy: false,
           coachingError: 'Err',
@@ -270,7 +272,7 @@ test('CollaboratorChatWidget and audio supervision subcomponents return null in 
       renderToStaticMarkup(
         React.createElement(SupervisorCoachingPttPill, {
           currentUserRole: role,
-          coachingActive: true,
+          coachingActive: false,
           adminPttActive: true,
         })
       ),
@@ -280,12 +282,26 @@ test('CollaboratorChatWidget and audio supervision subcomponents return null in 
       renderToStaticMarkup(
         React.createElement(SupervisorCoachingHeaderStopButton, {
           currentUserRole: role,
-          coachingActive: true,
+          coachingActive: false,
           onStop: () => {},
         })
       ),
       ''
     );
+
+    // When an explicit invite is sent by supervision, the collaborator sees the explicit opt-in consent button
+    const invitedHtml = renderToStaticMarkup(
+      React.createElement(SupervisorAudioControlsContainer, {
+        currentUserRole: role,
+        hasCoachingInvite: true,
+        isListeningOrActive: false,
+        coachingBusy: false,
+        coachingError: '',
+        onStart: () => {},
+      })
+    );
+    assert.ok(invitedHtml.includes('Autoriser micro'));
+    assert.ok(invitedHtml.includes('Invitation Audio Direction'));
   }
 
   for (const supervisorRole of ['manager', 'super_admin', 'admin', 'superviseur']) {
@@ -314,7 +330,7 @@ test('CollaboratorChatWidget and audio supervision subcomponents return null in 
   }
 });
 
-test('NotificationBell and AchievementToast hide coaching_invite and supervision labels from non-supervisors', () => {
+test('NotificationBell and AchievementToast deliver coaching_invite to collaborators for explicit opt-in consent and keep direct_message clean', () => {
   const coachingNotif: AppNotification = {
     id: 'cloud_ntf_coach_1',
     kind: 'coaching_invite',
@@ -340,10 +356,10 @@ test('NotificationBell and AchievementToast hide coaching_invite and supervision
     targetTab: 'crm',
   };
 
-  assert.equal(filterNotificationsForRole([coachingNotif, directMsgNotif], 'commercial').length, 1);
+  assert.equal(filterNotificationsForRole([coachingNotif, directMsgNotif], 'commercial').length, 2);
   assert.equal(filterNotificationsForRole([coachingNotif, directMsgNotif], 'manager').length, 2);
 
-  // Non-supervisor NotificationBell unread count excludes coaching_invite
+  // Collaborator NotificationBell receives both direct_message and coaching_invite so they can explicitly authorize mic
   const bellCollabHtml = renderToStaticMarkup(
     React.createElement(NotificationBell, {
       notifications: [coachingNotif, directMsgNotif],
@@ -352,20 +368,8 @@ test('NotificationBell and AchievementToast hide coaching_invite and supervision
       onOpenBadges: () => {},
     })
   );
-  assert.ok(bellCollabHtml.includes('Notifications (1 non lues)'));
+  assert.ok(bellCollabHtml.includes('Notifications (2 non lues)'));
 
-  // Non-supervisor AchievementToast returns null on coaching_invite and avoids "Coaching" copy on direct_message
-  assert.equal(
-    renderToStaticMarkup(
-      React.createElement(AchievementToast, {
-        notification: coachingNotif,
-        currentUserRole: 'commercial',
-        onDismiss: () => {},
-        onOpenBadges: () => {},
-      })
-    ),
-    ''
-  );
   const toastDirectCollabHtml = renderToStaticMarkup(
     React.createElement(AchievementToast, {
       notification: directMsgNotif,
@@ -377,12 +381,12 @@ test('NotificationBell and AchievementToast hide coaching_invite and supervision
   assert.equal(toastDirectCollabHtml.includes('Coaching'), false);
   assert.ok(toastDirectCollabHtml.includes('Ouvrir la discussion'));
 
-  // Supervisor sees coaching toast normally
+  // Both collaborator and supervisor see coaching invitation toast to allow explicit opt-in
   assert.ok(
     renderToStaticMarkup(
       React.createElement(AchievementToast, {
         notification: coachingNotif,
-        currentUserRole: 'manager',
+        currentUserRole: 'commercial',
         onDismiss: () => {},
         onOpenBadges: () => {},
       })

@@ -327,7 +327,11 @@ export function getOwnUserPresenceDocRef(uid: string) {
 }
 
 export function getUserSessionsQuery(uid: string) {
-  return query(collection(db, 'user_presence', uid, 'sessions'), where('orgScope', '==', 'orange_pro_team'));
+  return query(
+    collection(db, 'user_presence', uid, 'sessions'),
+    where('orgScope', '==', 'orange_pro_team'),
+    where('ownerId', '==', uid)
+  );
 }
 
 export interface CloudApiKeyRecord {
@@ -337,57 +341,6 @@ export interface CloudApiKeyRecord {
   active: boolean;
   updatedBy: string;
   updatedAt?: string;
-}
-
-export function getAdminApiKeysQuery(adminUid: string) {
-  return query(collection(db, 'api_keys'), where('updatedBy', '==', adminUid));
-}
-
-export async function adminUpsertApiKey(
-  adminUid: string,
-  input: Omit<ApiKeyConfigLike, 'updatedBy'>
-): Promise<CloudApiKeyRecord> {
-  const clean = sanitizeApiKeyConfigPayload({
-    ...input,
-    updatedBy: adminUid,
-  });
-  const path = `api_keys/${clean.provider}`;
-  const ref = doc(db, 'api_keys', clean.provider);
-
-  try {
-    const snap = await getDoc(ref);
-    if (!snap.exists()) {
-      await setDoc(ref, {
-        ...clean,
-        createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
-      });
-    } else {
-      await updateDoc(ref, {
-        label: clean.label,
-        key: clean.key,
-        active: clean.active,
-        updatedBy: clean.updatedBy,
-        updatedAt: serverTimestamp(),
-      });
-    }
-    return {
-      ...clean,
-      updatedAt: new Date().toISOString(),
-    };
-  } catch (error) {
-    handleFirestoreError(error, OperationType.WRITE, path);
-  }
-}
-
-export async function adminDeleteApiKey(provider: string): Promise<void> {
-  const cleanProvider = sanitizeProviderId(provider);
-  const path = `api_keys/${cleanProvider}`;
-  try {
-    await deleteDoc(doc(db, 'api_keys', cleanProvider));
-  } catch (error) {
-    handleFirestoreError(error, OperationType.DELETE, path);
-  }
 }
 
 /**
@@ -740,6 +693,11 @@ export async function syncMyTeamStat(
         const collabPayload: DocumentData = {
           displayName: clean.displayName,
           zone: clean.zone,
+          totalProspects: clean.totalProspects,
+          totalQualified: clean.totalQualified,
+          xp: clean.xp,
+          unlockedCount: clean.unlockedCount,
+          monthlyHistory: clean.monthlyHistory,
           updatedAt: serverTimestamp(),
         };
         if (typeof clean.avatarDataUrl === 'string') {
@@ -826,11 +784,16 @@ export async function syncMyTeamStat(
         }
       }
 
-      // Phase 3 Rules: Collaborator can only update displayName, zone, and avatarDataUrl on /team_stats
+      // Collaborator updates own profile & non-financial progression stats on /team_stats
       diagStep = 'collab_update';
       const payload: DocumentData = {
         displayName: clean.displayName,
         zone: clean.zone,
+        totalProspects: clean.totalProspects,
+        totalQualified: clean.totalQualified,
+        xp: clean.xp,
+        unlockedCount: clean.unlockedCount,
+        monthlyHistory: clean.monthlyHistory,
         updatedAt: serverTimestamp(),
       };
       if (typeof clean.avatarDataUrl === 'string') {
@@ -2933,8 +2896,26 @@ export async function transferFicheToCollaborator(params: {
     }
   }
 
-  // 4. Delete from source portfolio if moved to another collaborator
+  // 4. Delete from source portfolio (including subcollections) if moved to another collaborator
   if (params.sourceOwnerUid !== params.targetOwnerUid) {
+    for (const act of sourceActivities) {
+      try {
+        await deleteDoc(
+          doc(db, 'users', params.sourceOwnerUid, 'fiches', params.fiche.id, 'activites', act.id)
+        );
+      } catch {
+        // Non-fatal
+      }
+    }
+    for (const aud of sourceAuditLogs) {
+      try {
+        await deleteDoc(
+          doc(db, 'users', params.sourceOwnerUid, 'fiches', params.fiche.id, 'audit_logs', aud.id)
+        );
+      } catch {
+        // Non-fatal
+      }
+    }
     try {
       await deleteDoc(doc(db, 'users', params.sourceOwnerUid, 'fiches', params.fiche.id));
     } catch {
@@ -3249,7 +3230,7 @@ export async function sendDirectChatMessage(params: {
       }
       const freshData = freshSnap.data();
       const repairedDoc = buildChannelDoc(freshData);
-      if (isFirestoreTimestampValue(freshData.createdAt)) {
+      if (isFirestoreTimestampValue(freshData.createdAt) || !params.isSenderSuperAdmin) {
         await updateDoc(channelRef, {
           collabName: repairedDoc.collabName,
           ...(repairedDoc.collabEmail !== undefined ? { collabEmail: repairedDoc.collabEmail } : {}),
@@ -3417,10 +3398,11 @@ export async function setCollaboratorCoachingState(
   collabUid: string,
   input: Omit<CoachingSessionLike, 'collabUid'>
 ): Promise<SanitizedCoachingSessionDoc> {
+  const nowIso = new Date().toISOString();
   const clean = sanitizeCoachingSessionPayload({
     ...input,
     collabUid,
-    updatedAtIso: new Date().toISOString(),
+    updatedAtIso: nowIso,
   });
   const ref = doc(db, 'coaching_sessions', collabUid);
   try {

@@ -116,6 +116,7 @@ const CLOUD_API_PROVIDERS = [
   { id: 'openai', label: 'OpenAI' },
   { id: 'anthropic', label: 'Anthropic Claude' },
   { id: 'deepseek', label: 'DeepSeek' },
+  { id: 'tavily', label: 'Tavily Search B2B' },
 ] as const;
 
 function maskApiKey(raw: string): string {
@@ -279,6 +280,19 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
     }
     window.addEventListener('resize', updateSize);
     return () => window.removeEventListener('resize', updateSize);
+  }, [showAttendanceSection, showLiveGoogleEmbed]);
+
+  // Écouteur wheel non-passif sur le canvas carte pour permettre e.preventDefault() sans erreur console
+  useEffect(() => {
+    const el = mapCanvasRef.current;
+    if (!el) return;
+    const handleWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      const delta = e.deltaY < 0 ? 1 : -1;
+      setMapZoom((z) => Math.max(6, Math.min(18, z + delta)));
+    };
+    el.addEventListener('wheel', handleWheel, { passive: false });
+    return () => el.removeEventListener('wheel', handleWheel);
   }, [showAttendanceSection, showLiveGoogleEmbed]);
 
   // Mise à jour temps réel toutes les 3 secondes (3000 ms) sur la carte
@@ -510,7 +524,7 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
       (r) => r.fieldStatus === 'en_deplacement'
     ).length;
     const workingCount = consolidatedTeamTracking.filter(
-      (r) => r.fieldStatus === 'au_travail' || r.fieldStatus === 'en_rdv_client' || r.fieldStatus === 'en_deplacement'
+      (r) => r.fieldStatus === 'au_travail'
     ).length;
     const totalTodaySec = consolidatedTeamTracking.reduce((s, r) => s + r.todayWorkedSeconds, 0);
     const totalWorkDisconnects = consolidatedTeamTracking.reduce(
@@ -920,6 +934,7 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
           'openai',
           'anthropic',
           'deepseek',
+          'tavily',
         ]);
         if (
           probed.provider &&
@@ -1183,6 +1198,32 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
       }
 
       const idToken = await getCurrentUserIdToken();
+      if (providerId === 'tavily') {
+        const res = await fetch('/api/ai/tavily-search', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Accept: 'application/json',
+            Authorization: `Bearer ${idToken}`,
+          },
+          body: JSON.stringify({
+            query: 'Orange Maroc B2B Entreprises Meknes',
+          }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          const errMsg = data?.error || `Service Tavily indisponible (HTTP ${res.status}).`;
+          setProxyTestResult({ ok: false, provider: providerId, message: errMsg });
+          onNotify(errMsg, 'err');
+          return;
+        }
+        const count = Array.isArray(data?.results) ? data.results.length : 0;
+        const okMsg = `Recherche Tavily B2B opérationnelle (${count} résultat${count > 1 ? 's' : ''} vérifié${count > 1 ? 's' : ''}).`;
+        setProxyTestResult({ ok: true, provider: providerId, message: okMsg });
+        onNotify(okMsg);
+        return;
+      }
+
       const res = await fetch('/api/ai/groq-secure', {
         method: 'POST',
         headers: {
@@ -1945,7 +1986,7 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
                             <MessageCircle className="w-3 h-3" />
                             Profil & Chat
                             {(unreadChatByUid[u.uid] || 0) > 0 && (
-                              <span className="px-1 py-0.2 rounded-full bg-indigo-600 text-white text-[9px] font-bold">
+                              <span className="px-1 py-0.5 rounded-full bg-indigo-600 text-white text-[9px] font-bold">
                                 {unreadChatByUid[u.uid]}
                               </span>
                             )}
@@ -2637,11 +2678,6 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
                 setIsDraggingMap(false);
                 pinchStartDistRef.current = null;
               }}
-              onWheel={(e) => {
-                e.preventDefault();
-                const delta = e.deltaY < 0 ? 1 : -1;
-                setMapZoom((z) => Math.max(6, Math.min(18, z + delta)));
-              }}
             >
               {showLiveGoogleEmbed && activeRadarMember ? (
                 <div className="relative w-full h-full">
@@ -2730,17 +2766,9 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
 
                   {/* Couche 2 : Marqueurs GPS Exact Web Mercator & Petits Pop-ups Collaborateurs (compacts lors du zoom) */}
                   <div className="absolute inset-0 pointer-events-none">
-                    {consolidatedTeamTracking.map((m, idx) => {
-                      // En déplacement actif, micro-avancement réaliste à l'échelle de la rue (~3 mètres = 0.000028°)
-                      // À l'arrêt ou sur point GPS fixe : 0 décalage artificiel pour une précision maximale.
-                      const isMovingOnRoad =
-                        m.isOnline && m.fieldStatus === 'en_deplacement';
-                      const phase = liveTick3s * 0.75 + idx * 1.3;
-                      const microLatOffset = isMovingOnRoad ? Math.sin(phase) * 0.000028 : 0;
-                      const microLngOffset = isMovingOnRoad ? Math.cos(phase) * 0.000028 : 0;
-
-                      const exactLat = Number((m.coords.lat + microLatOffset).toFixed(6));
-                      const exactLng = Number((m.coords.lng + microLngOffset).toFixed(6));
+                    {consolidatedTeamTracking.map((m) => {
+                      const exactLat = Number(m.coords.lat.toFixed(6));
+                      const exactLng = Number(m.coords.lng.toFixed(6));
 
                       const mercatorPos = computeMercatorMarkerPosition({
                         lat: exactLat,
@@ -2764,10 +2792,9 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
                       const shortName =
                         m.firstName || m.displayName.split(/\s+/)[0] || m.displayName;
                       const liveSpeedKmh =
-                        m.telemetry.speedKmh ??
-                        (m.fieldStatus === 'en_deplacement'
-                          ? 34 + ((liveTick3s + idx * 3) % 18)
-                          : 0);
+                        typeof m.telemetry.speedKmh === 'number' && Number.isFinite(m.telemetry.speedKmh)
+                          ? Math.max(0, Math.round(m.telemetry.speedKmh))
+                          : 0;
 
                       return (
                         <div
@@ -3024,8 +3051,12 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
                       </div>
                       <div className="text-[10px] text-emerald-400 mt-0.5 tabular-nums">
                         {activeRadarMember.coords.source === 'gps_live'
-                          ? `GPS Auto Direct 3s (±${activeRadarMember.telemetry.accuracyMeters ?? 15}m · ${activeRadarMember.telemetry.speedKmh ?? 0} km/h)`
-                          : `Auto Réseau/Zone · ${activeRadarMember.coords.cityLabel}`}
+                          ? `GPS Direct (±${activeRadarMember.telemetry.accuracyMeters ?? 15}m${
+                              (activeRadarMember.telemetry.speedKmh ?? 0) > 0
+                                ? ` · ${activeRadarMember.telemetry.speedKmh} km/h`
+                                : ''
+                            })`
+                          : `Position GPS non partagée (Zone : ${activeRadarMember.coords.cityLabel})`}
                       </div>
                     </div>
 
@@ -3053,7 +3084,7 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
                         <MessageCircle className="w-3.5 h-3.5" />
                         Profil & Chat
                         {(unreadChatByUid[activeRadarMember.uid] || 0) > 0 && (
-                          <span className="px-1.5 py-0.2 rounded-full bg-white text-indigo-700 text-[9px] font-extrabold">
+                          <span className="px-1.5 py-0.5 rounded-full bg-white text-indigo-700 text-[9px] font-extrabold">
                             {unreadChatByUid[activeRadarMember.uid]}
                           </span>
                         )}
@@ -3217,7 +3248,7 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
                             >
                               {member.coords.lat.toFixed(6)}, {member.coords.lng.toFixed(6)}
                             </a>{' '}
-                            ({member.coords.source === 'gps_live' ? 'GPS Auto Direct' : member.coords.cityLabel})
+                            ({member.coords.source === 'gps_live' ? 'GPS Direct' : `Position GPS non partagée · ${member.coords.cityLabel}`})
                           </span>
                         </div>
 
@@ -3272,7 +3303,7 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
                             <MessageCircle className="w-3.5 h-3.5 text-indigo-600" />
                             Profil / Chat
                             {(unreadChatByUid[member.uid] || 0) > 0 && (
-                              <span className="px-1.5 py-0.2 rounded-full bg-indigo-600 text-white text-[9px] font-bold">
+                              <span className="px-1.5 py-0.5 rounded-full bg-indigo-600 text-white text-[9px] font-bold">
                                 {unreadChatByUid[member.uid]}
                               </span>
                             )}
@@ -3552,13 +3583,10 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
 
         {showVaultRulesPreview && (
           <pre className="rounded-lg border border-stone-200 bg-stone-950 text-stone-100 p-3 text-[11px] font-mono overflow-x-auto leading-relaxed">{`match /api_keys/{provider} {
-  allow get: if isSuperAdmin() && isValidProviderId(provider);
-  allow list: if isSuperAdmin() && resource.data.updatedBy == request.auth.uid;
-  allow create: if isSuperAdmin() && isValidApiKeyConfig(incoming(), provider)
-    && incoming().createdAt == request.time && incoming().updatedAt == request.time;
-  allow update: if isSuperAdmin() && isValidApiKeyConfig(incoming(), provider)
-    && incoming().updatedAt == request.time;
-  allow delete: if isSuperAdmin() && isValidProviderId(provider);
+  // Accès client direct strictement interdit : lecture/écriture exclusivement
+  // côté serveur via Firebase Admin SDK (/api/admin/api-keys & /api/ai/groq-secure)
+  // après vérification cryptographique du JWT Bearer Super-Admin.
+  allow read, write: if false;
 }`}</pre>
         )}
 
@@ -3646,7 +3674,7 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
                     </div>
                   </div>
                   <div className="flex items-center gap-1 shrink-0">
-                    {['groq', 'mistral', 'gemini', 'openrouter', 'openai', 'deepseek', 'anthropic'].includes(item.provider) && (
+                    {['groq', 'mistral', 'gemini', 'openrouter', 'openai', 'deepseek', 'anthropic', 'tavily'].includes(item.provider) && (
                       <button
                         type="button"
                         disabled={proxyTestBusy !== null}
@@ -3715,7 +3743,7 @@ export const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({
             disabled={proxyTestBusy !== null}
             onClick={() =>
               void handleTestSecureProxy(
-                ['groq', 'mistral', 'gemini', 'openrouter', 'openai', 'deepseek', 'anthropic'].includes(
+                ['groq', 'mistral', 'gemini', 'openrouter', 'openai', 'deepseek', 'anthropic', 'tavily'].includes(
                   apiProvider
                 )
                   ? apiProvider

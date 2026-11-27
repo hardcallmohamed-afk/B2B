@@ -20,11 +20,14 @@ export interface SignContractTarget {
   effectif: string;
   suggestedTier: OrangeProTier;
   suggestedProduit: string;
+  ownerUid?: string;
+  ownerDisplayName?: string;
 }
 
 interface SignContractModalProps {
   target: SignContractTarget | null;
   isSuperAdmin: boolean;
+  canSetInitialPayout?: boolean;
   submitting: boolean;
   onClose: () => void;
   onConfirm: (payload: {
@@ -39,10 +42,12 @@ interface SignContractModalProps {
 export const SignContractModal: React.FC<SignContractModalProps> = ({
   target,
   isSuperAdmin,
+  canSetInitialPayout,
   submitting,
   onClose,
   onConfirm,
 }) => {
+  const allowsInitialPayout = canSetInitialPayout ?? isSuperAdmin;
   const [selectedProduit, setSelectedProduit] = useState('');
   const [tier, setTier] = useState<OrangeProTier>('PME');
   const [payoutMad, setPayoutMad] = useState<number>(1500);
@@ -157,6 +162,7 @@ export const SignContractModal: React.FC<SignContractModalProps> = ({
               <p className="text-xs text-stone-600">
                 {target.numeroFiche ? `${target.numeroFiche} · ` : ''}
                 {target.societe} ({target.ville || 'Maroc'})
+                {target.ownerDisplayName ? ` · Portefeuille : ${target.ownerDisplayName}` : ''}
               </p>
             </div>
           </div>
@@ -420,9 +426,9 @@ export const SignContractModal: React.FC<SignContractModalProps> = ({
 
             <div>
               <label htmlFor="contract-payout-input" className="mb-1.5 block text-xs font-semibold text-stone-700">
-                Payout commission retenu (MAD)
+                {allowsInitialPayout ? 'Payout commission retenu (MAD)' : 'Payout commission prévisionnel (MAD)'}
               </label>
-              {isSuperAdmin ? (
+              {allowsInitialPayout ? (
                 <input
                   id="contract-payout-input"
                   type="number"
@@ -440,29 +446,28 @@ export const SignContractModal: React.FC<SignContractModalProps> = ({
               ) : (
                 <div className="flex h-[42px] items-center justify-between rounded-xl border border-emerald-200 bg-emerald-50 px-3 text-sm font-bold text-emerald-800 tabular-nums">
                   <span>{formatMad(payoutMad)}</span>
-                  <span className="text-[11px] font-medium text-emerald-700">Prévisionnel DIVERSIFIA</span>
+                  <span className="text-[11px] font-medium text-emerald-700">Soumis à validation (0 MAD initial)</span>
                 </div>
               )}
             </div>
           </div>
 
-          {!isSuperAdmin ? (
+          {!allowsInitialPayout ? (
             <div className="flex items-start gap-2.5 rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900">
               <Lock className="mt-0.5 h-4 w-4 shrink-0 text-amber-700" />
               <p className="leading-relaxed">
-                <strong>Verrouillage après signature :</strong> dès validation, la fiche client est
-                automatiquement retirée de votre portefeuille et verrouillée pour la confidentialité.
-                Vous continuerez à voir votre <strong>payout ({formatMad(payoutMad)})</strong>, votre
-                <strong> nombre de contrats</strong> et le <strong>produit Orange Pro</strong> dans
-                l’onglet <em>Équipe &amp; Payouts</em>.
+                <strong>Validation &amp; verrouillage après signature :</strong> dès confirmation, la fiche client est
+                verrouillée pour la confidentialité et le contrat est créé au statut{' '}
+                <strong>« En attente » (0 MAD initial jusqu&apos;à validation de la commission prévisionnelle de {formatMad(payoutMad)} par votre Manager / Direction)</strong>.
+                Vous suivez l&apos;état de validation et le versement en direct dans l’onglet <em>Équipe &amp; Payouts</em>.
               </p>
             </div>
           ) : (
             <div className="flex items-start gap-2.5 rounded-xl border border-emerald-200 bg-emerald-50 p-3 text-xs text-emerald-900">
               <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 text-emerald-700" />
               <p className="leading-relaxed">
-                En tant que <strong>Super-Admin</strong>, le contrat sera enregistré dans le registre
-                des payouts et restera consultable et modifiable à tout moment.
+                En tant que <strong>{isSuperAdmin ? 'Super-Admin' : 'Superviseur (Manager / Chef d’équipe)'}</strong>, la commission initiale de{' '}
+                <strong>{formatMad(payoutMad)}</strong> sera directement enregistrée dans le registre des payouts{target.ownerDisplayName ? ` au bénéfice de ${target.ownerDisplayName}` : ''}.
               </p>
             </div>
           )}

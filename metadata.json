@@ -2,7 +2,8 @@
   "name": "CRM DIVERSIFIA — Prospection, Pipeline, Payouts & Studio Email IA",
   "description": "CRM DIVERSIFIA : plateforme B2B de prospection, qualification, suivi d'équipe, calcul de commissions payouts et Studio Email IA.",
   "requestFramePermissions": [
-    "geolocation"
+    "geolocation",
+    "microphone"
   ],
   "majorCapabilities": [
     "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"

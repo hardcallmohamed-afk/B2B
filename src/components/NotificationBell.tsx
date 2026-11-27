@@ -28,6 +28,7 @@ interface NotificationBellProps {
   notifications: AppNotification[];
   currentUserRole?: string;
   onMarkAllRead: () => void;
+  onMarkOneRead?: (notificationId: string) => void;
   onOpenBadges: () => void;
   onOpenTeam?: () => void;
   onOpenCrm?: () => void;
@@ -120,6 +121,7 @@ export const NotificationBell: React.FC<NotificationBellProps> = ({
   notifications,
   currentUserRole,
   onMarkAllRead,
+  onMarkOneRead,
   onOpenBadges,
   onOpenTeam,
   onOpenCrm,
@@ -127,7 +129,6 @@ export const NotificationBell: React.FC<NotificationBellProps> = ({
 }) => {
   const [open, setOpen] = useState(false);
   const containerRef = useRef<HTMLDivElement | null>(null);
-  const canViewSupervision = isSupervisorRole(currentUserRole);
   const visibleNotifications = filterNotificationsForRole(notifications, currentUserRole);
   const unread = countUnreadNotifications(visibleNotifications);
 
@@ -261,8 +262,7 @@ export const NotificationBell: React.FC<NotificationBellProps> = ({
                         : 'text-amber-700';
 
                 const isDirectComm =
-                  n.kind === 'direct_message' ||
-                  (canViewSupervision && n.kind === 'coaching_invite');
+                  n.kind === 'direct_message' || n.kind === 'coaching_invite';
                 const soundProfile = getNotificationSoundProfile(n.kind, status);
 
                 return (
@@ -271,7 +271,11 @@ export const NotificationBell: React.FC<NotificationBellProps> = ({
                     type="button"
                     title={soundProfile.label}
                     onClick={() => {
-                      onMarkAllRead();
+                      if (onMarkOneRead) {
+                        onMarkOneRead(n.id);
+                      } else {
+                        onMarkAllRead();
+                      }
                       setOpen(false);
                       if (onSelectNotification) {
                         onSelectNotification(n);
@@ -303,7 +307,7 @@ export const NotificationBell: React.FC<NotificationBellProps> = ({
                           </span>
                         ) : isDirectComm ? (
                           <span className="text-[10px] font-bold shrink-0 text-sky-700">
-                            {canViewSupervision && n.kind === 'coaching_invite' ? 'Coaching Live' : 'Message'}
+                            {n.kind === 'coaching_invite' ? 'Coaching Live' : 'Message'}
                           </span>
                         ) : (
                           <span className="text-[10px] font-bold text-orange-700 shrink-0 tabular-nums">
@@ -322,7 +326,7 @@ export const NotificationBell: React.FC<NotificationBellProps> = ({
                         ) : isFicheNotif ? (
                           <span className={`font-bold ${ficheTagCls}`}>{ficheTagLabel}</span>
                         ) : (
-                          <span className={`px-1.5 py-0.2 rounded font-bold ${meta.pillBg} ${meta.pillText}`}>
+                          <span className={`px-1.5 py-0.5 rounded font-bold ${meta.pillBg} ${meta.pillText}`}>
                             {meta.label}
                           </span>
                         )}

@@ -100,12 +100,24 @@ import {
   mapCloudNotificationDocToAppNotification,
   mergeNotificationsFeed,
   markAllNotificationsRead,
+  markSingleNotificationRead,
   playNotificationSound,
   triggerBrowserPushNotification,
   type AppNotification,
   type BadgeBaselineSnapshot,
   type ContractBaselineSnapshot,
 } from './utils/notifications';
+import { isVaultOrMaskedApiKey } from './utils/aiRateLimiter';
+import {
+  extractPersistedFicheFields,
+  loadAdvancedAccountPrefs,
+  formatFicheNumeroWithPrefix,
+  getFollowUpAlertDelayMs,
+  formatEmailBodyWithOptionalPhone,
+  computeCurrentMonthContractsAndPayout,
+  type AdvancedAccountPreferences,
+  type WorkspaceLegalInfo,
+} from './utils/accountPreferences';
 import { buildMemberContractSyncSummary } from './utils/clientProfiles';
 import {
   moveFicheToStatut,
@@ -1539,12 +1551,14 @@ export function createInitialPortfolio(): FicheEntreprise[] {
   ];
 }
 
-export function buildStrictCsv(fiches: FicheEntreprise[]): string {
-  const header = 'societe;secteur;ville;telephone;email;contact;role;source;effectif';
+export function buildStrictCsv(fiches: FicheEntreprise[], delimiter: ';' | ',' = ';'): string {
+  const cols = ['societe', 'secteur', 'ville', 'telephone', 'email', 'contact', 'role', 'source', 'effectif'];
+  const header = cols.join(delimiter);
+  const altSep = delimiter === ';' ? ',' : ';';
   const rows = fiches.map((f) =>
     [f.societe, f.secteur, f.ville, f.telephone, f.email, f.contact, f.role, f.source, f.effectif]
-      .map((v) => String(v ?? '').replace(/;/g, ',').replace(/\r?\n/g, ' ').trim())
-      .join(';')
+      .map((v) => String(v ?? '').split(delimiter).join(altSep).replace(/\r?\n/g, ' ').trim())
+      .join(delimiter)
   );
   return '\uFEFF' + [header, ...rows].join('\n');
 }
@@ -1648,6 +1662,35 @@ async function fetchTimed(
   }
 }
 
+async function tryServerCrawlProxy(
+  cleanUrl: string,
+  signal: AbortSignal,
+  timeoutMs: number
+): Promise<{ text: string; usedStrategy: string } | null> {
+  if (isStaticHostingEnvironment() || !auth.currentUser) return null;
+  try {
+    const idToken = await getCurrentUserIdToken();
+    if (!idToken || signal.aborted) return null;
+    const res = await fetchTimed('/api/crawl', signal, timeoutMs, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${idToken}`,
+      },
+      body: JSON.stringify({ url: cleanUrl }),
+    });
+    if (!res.ok) return null;
+    const data = (await res.json().catch(() => null)) as { html?: string } | null;
+    const text = typeof data?.html === 'string' ? data.html : '';
+    if (text && text.trim().length > 60) {
+      return { text, usedStrategy: 'server-crawl' };
+    }
+  } catch {
+    // Fallback to client CORS proxies
+  }
+  return null;
+}
+
 async function fetchWithFallback(
   url: string,
   strategy: ProxyStrategy,
@@ -1655,6 +1698,11 @@ async function fetchWithFallback(
   timeoutMs = 6500
 ): Promise<{ text: string; usedStrategy: string }> {
   const cleanUrl = url.trim();
+  if (strategy === 'auto') {
+    const serverRes = await tryServerCrawlProxy(cleanUrl, signal, timeoutMs);
+    if (serverRes) return serverRes;
+  }
+
   const builders: Record<Exclude<ProxyStrategy, 'auto'>, (u: string) => string> = {
     allorigins: (u) => `https://api.allorigins.win/raw?url=${encodeURIComponent(u)}`,
     corsproxy: (u) => `https://corsproxy.io/?${encodeURIComponent(u)}`,
@@ -1704,6 +1752,9 @@ async function fetchFastest(
   if (strategy !== 'auto') {
     return fetchWithFallback(cleanUrl, strategy, signal, timeoutMs);
   }
+
+  const serverRes = await tryServerCrawlProxy(cleanUrl, signal, timeoutMs);
+  if (serverRes) return serverRes;
 
   const tryOne = async (mode: Exclude<ProxyStrategy, 'auto'>) => {
     const res = await fetchTimed(builders[mode](cleanUrl), signal, timeoutMs);
@@ -1845,6 +1896,8 @@ export const TASK_PROVIDER_ORDER: Record<ApiTask, ApiProvider[]> = {
   email: ['mistral', 'openrouter', 'gemini', 'groq', 'openai', 'deepseek', 'anthropic'],
 };
 
+let currentPreferredAiProvider: ApiProvider | 'auto' = 'auto';
+
 export function getOrderedKeysForTask(
   keys: ApiKeyEntry[],
   task: ApiTask,
@@ -1861,6 +1914,11 @@ export function getOrderedKeysForTask(
   });
 
   return [...eligible].sort((a, b) => {
+    if (!options?.onlyProvider && currentPreferredAiProvider !== 'auto') {
+      const aPref = a.provider === currentPreferredAiProvider ? 0 : 1;
+      const bPref = b.provider === currentPreferredAiProvider ? 0 : 1;
+      if (aPref !== bPref) return aPref - bPref;
+    }
     if (a.priority !== b.priority) return a.priority - b.priority;
     const rankA = allowedProviders.indexOf(a.provider);
     const rankB = allowedProviders.indexOf(b.provider);
@@ -1870,7 +1928,7 @@ export function getOrderedKeysForTask(
 }
 
 /**
- * Retourne TOUTES les clés LLM disponibles (Groq, OpenRouter, Mistral, Gemini, OpenAI, DeepSeek),
+ * Retourne TOUTES les clés LLM disponibles (Groq, OpenRouter, Mistral, Gemini, OpenAI, DeepSeek, Anthropic),
  * en commençant par celles configurées pour la tâche puis toutes les autres clés LLM actives
  * quelle que soit leur portée (afin que n'importe quelle IA disponible prenne le relais).
  */
@@ -1913,6 +1971,7 @@ export function mergeHubAndCloudKeys(
   cloudKeys: CloudApiKeyRecord[]
 ): ApiKeyEntry[] {
   const validProviders = new Set<ApiProvider>([
+    'tavily',
     'groq',
     'openrouter',
     'mistral',
@@ -1921,7 +1980,11 @@ export function mergeHubAndCloudKeys(
     'deepseek',
     'anthropic',
   ]);
-  const existingSecrets = new Set(localKeys.map((k) => k.apiKey.trim()));
+  const existingSecrets = new Set(
+    localKeys
+      .map((k) => k.apiKey.trim())
+      .filter((s) => s.length > 0 && !isVaultOrMaskedApiKey('', s))
+  );
   const cloudEntries: ApiKeyEntry[] = [];
   let idx = 0;
   for (const c of cloudKeys) {
@@ -1936,7 +1999,7 @@ export function mergeHubAndCloudKeys(
       label: `${c.label || PROVIDER_META[prov].name} (Coffre Cloud)`,
       apiKey: secret,
       model: PROVIDER_META[prov].defaultModel,
-      taskScope: 'all',
+      taskScope: prov === 'tavily' ? 'search' : 'all',
       priority: 100 + idx++,
       enabled: true,
       status: 'idle',
@@ -2072,6 +2135,64 @@ async function callSingleLLMKey(
   signal?: AbortSignal
 ): Promise<{ ok: boolean; text: string; usedModel: string; status: number; error: string }> {
   const key = entry.apiKey.trim();
+
+  // Si la clé provient du Coffre Cloud (/api_keys) ou est masquée ('••••••••'),
+  // router l'appel via le proxy serveur sécurisé (/api/ai/groq-secure) avec le jeton Firebase ID.
+  if (isVaultOrMaskedApiKey(entry.id, key)) {
+    if (isStaticHostingEnvironment()) {
+      return {
+        ok: false,
+        text: '',
+        usedModel: entry.model,
+        status: 503,
+        error: 'Coffre Cloud indisponible en hébergement statique sans backend.',
+      };
+    }
+    const idToken = await getCurrentUserIdToken();
+    if (!idToken) {
+      return {
+        ok: false,
+        text: '',
+        usedModel: entry.model,
+        status: 401,
+        error: 'Session non authentifiée pour accéder au Coffre Cloud.',
+      };
+    }
+    const res = await fetch('/api/ai/groq-secure', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${idToken}`,
+      },
+      signal,
+      body: JSON.stringify({
+        provider: entry.provider,
+        prompt,
+      }),
+    });
+    const data = (await res.json().catch(() => ({}))) as {
+      reply?: string;
+      model?: string;
+      error?: string;
+    };
+    if (!res.ok) {
+      return {
+        ok: false,
+        text: '',
+        usedModel: data?.model || entry.model,
+        status: res.status,
+        error: data?.error || `HTTP ${res.status}`,
+      };
+    }
+    const text = String(data?.reply || '').trim();
+    return {
+      ok: Boolean(text),
+      text,
+      usedModel: String(data?.model || entry.model),
+      status: 200,
+      error: text ? '' : 'Réponse vide du Coffre Cloud',
+    };
+  }
 
   if (entry.provider === 'gemini') {
     const res = await callGeminiAutoModel(
@@ -2372,25 +2493,54 @@ export async function callTavilySearchPool(
   for (const entry of tavilyKeys) {
     if (signal?.aborted) break;
     try {
-      const res = await fetch('https://api.tavily.com/search', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        signal,
-        body: JSON.stringify({
-          api_key: entry.apiKey.trim(),
-          query,
-          search_depth: entry.model === 'advanced' ? 'advanced' : 'basic',
-          max_results: 5,
-          include_answer: true,
-        }),
-      });
+      const isVaultEntry = isVaultOrMaskedApiKey(entry.id, entry.apiKey);
+      let res: Response;
+      if (isVaultEntry) {
+        if (isStaticHostingEnvironment()) {
+          lastErr = 'Proxy Tavily Coffre Cloud indisponible en mode statique.';
+          continue;
+        }
+        const idToken = await getCurrentUserIdToken();
+        if (!idToken) {
+          lastErr = 'Authentification requise pour Tavily Coffre Cloud.';
+          continue;
+        }
+        res = await fetch('/api/ai/tavily-search', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${idToken}`,
+          },
+          signal,
+          body: JSON.stringify({
+            query,
+            searchDepth: entry.model === 'advanced' ? 'advanced' : 'basic',
+            maxResults: 5,
+          }),
+        });
+      } else {
+        res = await fetch('https://api.tavily.com/search', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          signal,
+          body: JSON.stringify({
+            api_key: entry.apiKey.trim(),
+            query,
+            search_depth: entry.model === 'advanced' ? 'advanced' : 'basic',
+            max_results: 5,
+            include_answer: true,
+          }),
+        });
+      }
       if (!res.ok) {
         const errJson = await res.json().catch(() => ({}));
         lastErr = errJson?.detail || errJson?.error || `HTTP ${res.status}`;
-        if (isQuotaError(res.status, String(lastErr))) {
-          onStatus?.(entry.id, 'quota', 'Quota (rotation auto)');
-        } else {
-          onStatus?.(entry.id, 'error', `Erreur: ${String(lastErr).slice(0, 70)}`);
+        if (!isVaultEntry) {
+          if (isQuotaError(res.status, String(lastErr))) {
+            onStatus?.(entry.id, 'quota', 'Quota (rotation auto)');
+          } else {
+            onStatus?.(entry.id, 'error', `Erreur: ${String(lastErr).slice(0, 70)}`);
+          }
         }
         continue;
       }
@@ -2403,12 +2553,16 @@ export async function callTavilySearchPool(
         data?.answer ? `Synthèse: ${data.answer}` : '',
         ...results.map((r) => `${r.title || ''}\n${r.url || ''}\n${r.content || ''}`),
       ].filter(Boolean);
-      onStatus?.(entry.id, 'ok', `Actif (${entry.model || 'basic'})`);
+      if (!isVaultEntry) {
+        onStatus?.(entry.id, 'ok', `Actif (${entry.model || 'basic'})`);
+      }
       return { ok: true, combinedText: parts.join('\n\n'), urls, usedLabel: entry.label, error: '' };
     } catch (err: unknown) {
       if (signal?.aborted) break;
       lastErr = err instanceof Error ? err.message : String(err);
-      onStatus?.(entry.id, 'error', `Erreur: ${lastErr.slice(0, 60)}`);
+      if (!isVaultOrMaskedApiKey(entry.id, entry.apiKey)) {
+        onStatus?.(entry.id, 'error', `Erreur: ${lastErr.slice(0, 60)}`);
+      }
     }
   }
   return { ok: false, combinedText: '', urls: [], usedLabel: '', error: lastErr || 'Pool Tavily indisponible.' };
@@ -2426,9 +2580,11 @@ export async function callGeminiGroundingPool(
   usedLabel: string;
   error: string;
 }> {
-  const geminiKeys = getOrderedKeysForTask(keys, 'search', { onlyProvider: 'gemini' });
+  const geminiKeys = getOrderedKeysForTask(keys, 'search', { onlyProvider: 'gemini' }).filter(
+    (k) => !isVaultOrMaskedApiKey(k.id, k.apiKey)
+  );
   if (geminiKeys.length === 0) {
-    return { ok: false, rawText: '', chunkUrls: [], usedLabel: '', error: 'Aucune clé Gemini active.' };
+    return { ok: false, rawText: '', chunkUrls: [], usedLabel: '', error: 'Aucune clé Gemini locale active.' };
   }
 
   let lastErr = '';
@@ -2475,6 +2631,26 @@ export async function testApiKeyEntry(entry: ApiKeyEntry): Promise<{ ok: boolean
   }
   try {
     if (entry.provider === 'tavily') {
+      if (isVaultOrMaskedApiKey(entry.id, entry.apiKey)) {
+        const idToken = await getCurrentUserIdToken();
+        if (!idToken) return { ok: false, status: 'error', msg: 'Session non authentifiée.' };
+        const res = await fetch('/api/ai/tavily-search', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${idToken}`,
+          },
+          body: JSON.stringify({
+            query: 'Orange Maroc entreprise',
+            searchDepth: entry.model === 'advanced' ? 'advanced' : 'basic',
+            maxResults: 1,
+          }),
+        });
+        if (res.ok) return { ok: true, status: 'ok', msg: `Tavily Coffre Cloud connecté (${entry.model || 'basic'})` };
+        const errJson = await res.json().catch(() => ({}));
+        const msg = String(errJson?.error || `HTTP ${res.status}`);
+        return { ok: false, status: 'error', msg: msg.slice(0, 90) };
+      }
       const res = await fetch('https://api.tavily.com/search', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -2492,7 +2668,7 @@ export async function testApiKeyEntry(entry: ApiKeyEntry): Promise<{ ok: boolean
       return { ok: false, status: 'error', msg: msg.slice(0, 90) };
     }
 
-    if (entry.provider === 'gemini') {
+    if (entry.provider === 'gemini' && !isVaultOrMaskedApiKey(entry.id, entry.apiKey)) {
       const gRes = await callGeminiAutoModel(
         entry.apiKey,
         { contents: [{ parts: [{ text: 'Réponds OK.' }] }], tools: [{ google_search: {} }] },
@@ -2808,12 +2984,52 @@ export const DEFAULT_USER_PROFILE: UserProfileSettings = {
   notifyBadges: true,
   notifySound: true,
   compactUi: false,
+  legalRaisonSociale: '',
+  legalIce: '',
+  legalAdresse: '',
+  legalTelephone: '',
 };
 
 export default function App() {
   // 1. Portefeuille CRM persistant (démarre vide pour tout nouveau compte ; hydraté depuis Firestore)
   const [fiches, setFiches] = useState<FicheEntreprise[]>([]);
   const [userProfile, setUserProfile] = useState<UserProfileSettings>(DEFAULT_USER_PROFILE);
+  const [advPrefs, setAdvPrefs] = useState<AdvancedAccountPreferences>(() => loadAdvancedAccountPrefs());
+  currentPreferredAiProvider = advPrefs.preferredAiProvider;
+  const [smtpStatus, setSmtpStatus] = useState<{ configured: boolean; fromEmail: string }>({
+    configured: false,
+    fromEmail: '',
+  });
+  const [sendingSmtpEmail, setSendingSmtpEmail] = useState(false);
+
+  useEffect(() => {
+    const onAdvPrefsChanged = (ev: Event) => {
+      const detail = (ev as CustomEvent<AdvancedAccountPreferences>).detail;
+      if (detail) {
+        setAdvPrefs(detail);
+        currentPreferredAiProvider = detail.preferredAiProvider;
+      } else {
+        const next = loadAdvancedAccountPrefs();
+        setAdvPrefs(next);
+        currentPreferredAiProvider = next.preferredAiProvider;
+      }
+    };
+    window.addEventListener('op-advanced-prefs-changed', onAdvPrefsChanged);
+    return () => window.removeEventListener('op-advanced-prefs-changed', onAdvPrefsChanged);
+  }, []);
+
+  useEffect(() => {
+    if (isStaticHostingEnvironment()) return;
+    fetch('/api/email/status')
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d: { configured?: boolean; fromEmail?: string } | null) => {
+        if (d && typeof d.configured === 'boolean') {
+          setSmtpStatus({ configured: d.configured, fromEmail: String(d.fromEmail || '') });
+        }
+      })
+      .catch(() => {});
+  }, []);
+
   const [profileMenuOpen, setProfileMenuOpen] = useState(false);
   const profileMenuRef = useRef<HTMLDivElement | null>(null);
   const [notifications, setNotifications] = useState<AppNotification[]>([]);
@@ -2848,6 +3064,7 @@ export default function App() {
   const cloudNotifsHydratedRef = useRef<boolean>(false);
   const seenCloudNotifIdsRef = useRef<Set<string>>(new Set());
   const cloudContractNotifKeysRef = useRef<Set<string>>(new Set());
+  const seenRelanceAlertKeysRef = useRef<Set<string>>(new Set());
   const accessNotifCooldownRef = useRef<Map<string, number>>(new Map());
   const notifyBadgesPrefRef = useRef<boolean>(true);
   const notifySoundPrefRef = useRef<boolean>(true);
@@ -4288,6 +4505,7 @@ export default function App() {
             defaultVille: geo.nearestMajorCity,
           }));
           setUserProfile((prev) => {
+            if (prev.zone && prev.zone !== 'Meknès') return prev;
             if (prev.zone === geo.collaboratorPublicZoneLabel) return prev;
             return { ...prev, zone: geo.collaboratorPublicZoneLabel };
           });
@@ -4377,7 +4595,7 @@ export default function App() {
       const cur = activeAttendanceRef.current;
       if (!cur || cur.closed || cur.uid !== uid) return;
       const offMs = Date.now();
-      const wh = isDuringWorkHours(new Date(offMs));
+      const wh = isDuringWorkHours(new Date(offMs), loadAdvancedAccountPrefs().workHoursSchedule);
       if (!wh.duringWorkHours) return;
       try {
         if (!window.localStorage.getItem(`op_offline_disconnect_${uid}`)) {
@@ -4481,7 +4699,7 @@ export default function App() {
         cur.sessionSeconds += delta;
       }
       cur.lastTickMs = closeMs;
-      const wh = isDuringWorkHours(new Date(closeMs));
+      const wh = isDuringWorkHours(new Date(closeMs), loadAdvancedAccountPrefs().workHoursSchedule);
       const closeIso = new Date(closeMs).toISOString();
       try {
         window.localStorage.setItem(
@@ -4895,6 +5113,11 @@ export default function App() {
         notifyBadges: typeof data.notifyBadges === 'boolean' ? data.notifyBadges : undefined,
         notifySound: typeof data.notifySound === 'boolean' ? data.notifySound : undefined,
         compactUi: typeof data.compactUi === 'boolean' ? data.compactUi : undefined,
+        legalRaisonSociale:
+          typeof data.legalRaisonSociale === 'string' ? data.legalRaisonSociale : undefined,
+        legalIce: typeof data.legalIce === 'string' ? data.legalIce : undefined,
+        legalAdresse: typeof data.legalAdresse === 'string' ? data.legalAdresse : undefined,
+        legalTelephone: typeof data.legalTelephone === 'string' ? data.legalTelephone : undefined,
         dismissedDedupKeys: Array.isArray(data.dismissedDedupKeys)
           ? (data.dismissedDedupKeys as string[])
           : undefined,
@@ -4921,6 +5144,10 @@ export default function App() {
           notifyBadges: cleanWs.notifyBadges ?? true,
           notifySound: cleanWs.notifySound ?? true,
           compactUi: cleanWs.compactUi ?? false,
+          legalRaisonSociale: cleanWs.legalRaisonSociale ?? '',
+          legalIce: cleanWs.legalIce ?? '',
+          legalAdresse: cleanWs.legalAdresse ?? '',
+          legalTelephone: cleanWs.legalTelephone ?? '',
         });
         setDismissedDedupKeys(cleanWs.dismissedDedupKeys ?? []);
         setIncludePhoneOnlyDedup(cleanWs.includePhoneOnlyDedup ?? false);
@@ -4933,6 +5160,7 @@ export default function App() {
 
       snap.forEach((docSnap) => {
         const d = docSnap.data();
+        const extraFields = extractPersistedFicheFields(d);
         const clean = sanitizeFichePayload(uid, {
           id: docSnap.id,
           numeroFiche: typeof d.numeroFiche === 'string' ? d.numeroFiche : undefined,
@@ -4959,6 +5187,7 @@ export default function App() {
             : undefined,
           dateAjout: typeof d.dateAjout === 'string' ? d.dateAjout : new Date().toISOString(),
           statutUpdatedAt: typeof d.statutUpdatedAt === 'string' ? d.statutUpdatedAt : undefined,
+          ...extraFields,
         });
         nextKnown.set(clean.id, {
           hash: serializeDocCanonical(clean as unknown as Record<string, unknown>),
@@ -4992,6 +5221,7 @@ export default function App() {
           ...(clean.statutUpdatedAt !== undefined
             ? { statutUpdatedAt: clean.statutUpdatedAt }
             : {}),
+          ...extractPersistedFicheFields(clean as unknown as Record<string, unknown>),
         });
       });
 
@@ -5025,6 +5255,7 @@ export default function App() {
           role: clean.role,
           regles: clean.regles,
           ctaStyle: clean.ctaStyle,
+          builtin: Boolean(clean.isBuiltin ?? d.builtin),
           ...(clean.isBuiltin !== undefined ? { isBuiltin: clean.isBuiltin } : {}),
         });
       });
@@ -5083,6 +5314,10 @@ export default function App() {
             notifyBadges: initialProfileSeed.notifyBadges,
             notifySound: initialProfileSeed.notifySound,
             compactUi: initialProfileSeed.compactUi,
+            legalRaisonSociale: initialProfileSeed.legalRaisonSociale,
+            legalIce: initialProfileSeed.legalIce,
+            legalAdresse: initialProfileSeed.legalAdresse,
+            legalTelephone: initialProfileSeed.legalTelephone,
             dismissedDedupKeys: snapshotLocal.dismissedDedupKeys,
             includePhoneOnlyDedup: snapshotLocal.includePhoneOnlyDedup,
           },
@@ -5109,6 +5344,10 @@ export default function App() {
             notifyBadges: initialProfileSeed.notifyBadges,
             notifySound: initialProfileSeed.notifySound,
             compactUi: initialProfileSeed.compactUi,
+            legalRaisonSociale: initialProfileSeed.legalRaisonSociale,
+            legalIce: initialProfileSeed.legalIce,
+            legalAdresse: initialProfileSeed.legalAdresse,
+            legalTelephone: initialProfileSeed.legalTelephone,
             dismissedDedupKeys: snapshotLocal.dismissedDedupKeys,
             includePhoneOnlyDedup: snapshotLocal.includePhoneOnlyDedup,
           });
@@ -5350,6 +5589,10 @@ export default function App() {
       notifyBadges: userProfile.notifyBadges,
       notifySound: userProfile.notifySound,
       compactUi: userProfile.compactUi,
+      legalRaisonSociale: userProfile.legalRaisonSociale,
+      legalIce: userProfile.legalIce,
+      legalAdresse: userProfile.legalAdresse,
+      legalTelephone: userProfile.legalTelephone,
       dismissedDedupKeys,
       includePhoneOnlyDedup,
     });
@@ -5379,6 +5622,26 @@ export default function App() {
     if (!cloudUser) return [];
     return signedContracts.filter((c) => c.ownerId === cloudUser.uid);
   }, [signedContracts, cloudUser]);
+
+  const myCurrentMonthStats = useMemo(
+    () => computeCurrentMonthContractsAndPayout(mySignedContracts),
+    [mySignedContracts]
+  );
+
+  const workspaceLegal = useMemo<WorkspaceLegalInfo>(
+    () => ({
+      raisonSociale: userProfile.legalRaisonSociale,
+      ice: userProfile.legalIce,
+      adresse: userProfile.legalAdresse,
+      telephone: userProfile.legalTelephone,
+    }),
+    [
+      userProfile.legalRaisonSociale,
+      userProfile.legalIce,
+      userProfile.legalAdresse,
+      userProfile.legalTelephone,
+    ]
+  );
 
   const myTeamStatRecord = useMemo(() => {
     if (!cloudUser) return null;
@@ -5644,6 +5907,24 @@ export default function App() {
     });
   };
 
+  const handleMarkOneNotificationRead = (notifId: string) => {
+    setNotifications((prev) => {
+      const target = prev.find((n) => n.id === notifId);
+      if (target && !target.read && target.cloudDocId) {
+        void markAllCloudNotificationsRead([target.cloudDocId]);
+      }
+      const next = markSingleNotificationRead(prev, notifId);
+      if (cloudUser) {
+        try {
+          window.localStorage.setItem(`op_notifications_${cloudUser.uid}`, JSON.stringify(next));
+        } catch {
+          // Ignore quota
+        }
+      }
+      return next;
+    });
+  };
+
   const handleSaveUserProfile = (nextProfile: UserProfileSettings, nextSignature: string) => {
     setUserProfile(nextProfile);
     setEmailSignature(nextSignature);
@@ -5746,7 +6027,7 @@ export default function App() {
         } catch {
           // Ignore
         }
-        const wh = isDuringWorkHours(new Date(outMs));
+        const wh = isDuringWorkHours(new Date(outMs), advPrefs.workHoursSchedule);
         await closeAttendanceSession({
           uid: cur.uid,
           sessionId: cur.sessionId,
@@ -6124,25 +6405,81 @@ export default function App() {
       'Signé Orange Pro': 0,
       'Pas intéressé': 0,
     };
-    fiches.forEach((f) => {
+    accessibleFiches.forEach((f) => {
       map[f.statut] = (map[f.statut] || 0) + 1;
     });
     return map;
-  }, [fiches]);
+  }, [accessibleFiches]);
+
+  // Alertes automatiques de relance programmée (prochaineRelanceAt) selon le délai préféré
+  useEffect(() => {
+    if (!cloudUser || !cloudSynced || !canAccessWorkspace) return;
+    const leadDelayMs = getFollowUpAlertDelayMs(advPrefs.followUpAlertDelay);
+    if (!leadDelayMs) return;
+
+    const checkUpcomingRelances = () => {
+      const nowMs = Date.now();
+      for (const f of accessibleFiches) {
+        if (!f.prochaineRelanceAt) continue;
+        const relanceMs = Date.parse(f.prochaineRelanceAt);
+        if (Number.isNaN(relanceMs)) continue;
+        const diffMs = relanceMs - nowMs;
+        if (diffMs <= leadDelayMs && diffMs >= -30 * 60 * 1000) {
+          const alertKey = `${f.id}:${f.prochaineRelanceAt}`;
+          if (seenRelanceAlertKeysRef.current.has(alertKey)) continue;
+          seenRelanceAlertKeysRef.current.add(alertKey);
+          const relanceNotif: AppNotification = {
+            id: `relance_${f.id}_${relanceMs}`,
+            kind: 'fiche_updated',
+            badgeId: 'relance_prochaine',
+            title: `Relance à effectuer — ${f.societe}`,
+            message: `Relance planifiée pour « ${f.societe} » (${f.ville || 'Maroc'}) à ${new Date(relanceMs).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' })}.`,
+            rarity: 'rare',
+            xpBoost: 0,
+            createdAt: new Date().toISOString(),
+            read: false,
+            targetTab: 'crm',
+            ficheMeta: {
+              ficheId: f.id,
+              ficheOwnerId: cloudUser.uid,
+              numeroFiche: f.numeroFiche,
+              societe: f.societe,
+              actorName: currentUserDisplayName,
+            },
+          };
+          setNotifications((prev) => mergeNotificationsFeed(prev, [relanceNotif]));
+          if (userProfile.notifyBadges !== false) {
+            setAchievementToastQueue((prev) => [...prev, relanceNotif]);
+          }
+        }
+      }
+    };
+
+    checkUpcomingRelances();
+    const timer = window.setInterval(checkUpcomingRelances, 60_000);
+    return () => window.clearInterval(timer);
+  }, [
+    cloudUser,
+    cloudSynced,
+    canAccessWorkspace,
+    accessibleFiches,
+    advPrefs.followUpAlertDelay,
+    userProfile.notifyBadges,
+  ]);
 
   const availableVillesInData = useMemo(() => {
     const set = new Set<string>(allVilles);
-    fiches.forEach((f) => {
+    accessibleFiches.forEach((f) => {
       if (f.ville.trim()) set.add(f.ville.trim());
     });
     const list = Array.from(set).sort((a, b) => a.localeCompare(b));
     if (!regionFilter) return list;
     return list.filter((city) => doesCityBelongToRegion(city, regionFilter));
-  }, [fiches, allVilles, regionFilter]);
+  }, [accessibleFiches, allVilles, regionFilter]);
 
   const availableSourcesInData = useMemo(() => {
     const set = new Set<string>();
-    fiches.forEach((f) => {
+    accessibleFiches.forEach((f) => {
       const s = f.source.trim();
       if (!s) return;
       if (/^https?:\/\//i.test(s)) {
@@ -6156,7 +6493,7 @@ export default function App() {
       set.add(s.slice(0, 32));
     });
     return Array.from(set).sort((a, b) => a.localeCompare(b));
-  }, [fiches]);
+  }, [accessibleFiches]);
 
   const velocityReport = useMemo(
     () => computePortfolioVelocity(accessibleFiches),
@@ -6260,7 +6597,7 @@ export default function App() {
     });
     return list;
   }, [
-    accessibleFiches, search, couleurFilter, secteurFilter, villeFilter, tierFilter,
+    accessibleFiches, search, couleurFilter, secteurFilter, regionFilter, villeFilter, tierFilter,
     effectifFilter, completudeFilter, sourceFilter, statutFilter, onlyReadyToCall,
     onlyBottlenecks, velocityReport, sortField, sortDir,
   ]);
@@ -6826,7 +7163,16 @@ Réponds UNIQUEMENT en JSON strict : {"telephone":"","email":"","contact":"","ro
   };
 
   const handleBatchAudit = async (target: 'portfolio' | 'crawlPreview' | 'pastePreview') => {
-    const sourceRows = target === 'portfolio' ? fiches : target === 'crawlPreview' ? crawlPreview : pastePreview;
+    const lockedSignedFiches =
+      target === 'portfolio' && !isSuperAdmin
+        ? fiches.filter((f) => f.statut === 'Signé Orange Pro')
+        : [];
+    const sourceRows =
+      target === 'portfolio'
+        ? accessibleFiches
+        : target === 'crawlPreview'
+          ? crawlPreview
+          : pastePreview;
     if (sourceRows.length === 0) {
       notify('Aucune fiche à vérifier.', 'warn');
       return;
@@ -6845,13 +7191,14 @@ Réponds UNIQUEMENT en JSON strict : {"telephone":"","email":"","contact":"","ro
     });
 
     const applyUpdate = (rows: FicheEntreprise[]) => {
-      if (target === 'portfolio') setFiches(rows);
+      if (target === 'portfolio') setFiches([...rows, ...lockedSignedFiches]);
       else if (target === 'crawlPreview') setCrawlPreview(rows);
       else setPastePreview(rows);
     };
 
     try {
-      const baseRes = await auditAndCleanAllRowsWithAI(sourceRows, apiKeysRef.current, updateApiKeyStatus);
+      const combinedPool = mergeHubAndCloudKeys(apiKeysRef.current, cloudApiKeys);
+      const baseRes = await auditAndCleanAllRowsWithAI(sourceRows, combinedPool, updateApiKeyStatus);
       let enrichedCount = 0;
       const working: FicheEntreprise[] = baseRes.cleaned.map((f) => {
         const next = { ...f };
@@ -6937,24 +7284,47 @@ Réponds UNIQUEMENT en JSON strict : {"telephone":"","email":"","contact":"","ro
     try {
       const { patch, pistes } = await enrichFicheMultiPistes(f, controller.signal);
       if (Object.keys(patch).length > 0) {
-        setFiches((prev) =>
-          prev.map((item) =>
-            item.id === f.id
-              ? {
-                  ...item,
-                  ...patch,
-                  verifieWeb: true,
-                  pistesEnrichissement: Array.from(new Set([...(item.pistesEnrichissement || []), ...pistes])),
-                }
-              : item
-          )
-        );
+        const updatedCollabFiche: FicheEntreprise = {
+          ...f,
+          ...patch,
+          verifieWeb: true,
+          pistesEnrichissement: Array.from(new Set([...(f.pistesEnrichissement || []), ...pistes])),
+        };
+        if (
+          detailModalExternalTarget &&
+          detailModalExternalTarget.ownerUid !== cloudUser?.uid &&
+          detailModalExternalTarget.fiche.id === f.id
+        ) {
+          setDetailModalExternalTarget({
+            ...detailModalExternalTarget,
+            fiche: updatedCollabFiche,
+          });
+          await updateTeamMemberFiche(detailModalExternalTarget.ownerUid, updatedCollabFiche);
+          setPortfolioRefreshKey((k) => k + 1);
+        } else {
+          setFiches((prev) =>
+            prev.map((item) => (item.id === f.id ? updatedCollabFiche : item))
+          );
+        }
         notify(`${f.societe} enrichie via ${pistes.join(' + ')}.`);
       } else {
-        setFiches((prev) => prev.map((item) => (item.id === f.id ? { ...item, verifieWeb: true } : item)));
+        if (
+          detailModalExternalTarget &&
+          detailModalExternalTarget.ownerUid !== cloudUser?.uid &&
+          detailModalExternalTarget.fiche.id === f.id
+        ) {
+          const verifiedExternal = { ...f, verifieWeb: true };
+          setDetailModalExternalTarget({
+            ...detailModalExternalTarget,
+            fiche: verifiedExternal,
+          });
+          void updateTeamMemberFiche(detailModalExternalTarget.ownerUid, verifiedExternal);
+        } else {
+          setFiches((prev) => prev.map((item) => (item.id === f.id ? { ...item, verifieWeb: true } : item)));
+        }
         setAssistModalFiche(f);
         setAssistPasteText('');
-        if (activeApiCount === 0) {
+        if (activeApiCount === 0 && cloudApiKeys.length === 0) {
           setLastVerifyDiag(
             'Aucune clé active dans le Hub API et proxies publics limités. Utilise les 4 pistes rapides + Ctrl+V ci-dessous, ou ajoute une clé Tavily / Gemini dans le Hub API.'
           );
@@ -7472,6 +7842,10 @@ ${assistPasteText.slice(0, 6000)}`;
       notifyBadges: snap.userProfile.notifyBadges,
       notifySound: snap.userProfile.notifySound,
       compactUi: snap.userProfile.compactUi,
+      legalRaisonSociale: snap.userProfile.legalRaisonSociale,
+      legalIce: snap.userProfile.legalIce,
+      legalAdresse: snap.userProfile.legalAdresse,
+      legalTelephone: snap.userProfile.legalTelephone,
       dismissedDedupKeys: nextDismissed,
       includePhoneOnlyDedup: nextIncludePhoneOnly,
     });
@@ -7544,7 +7918,7 @@ ${assistPasteText.slice(0, 6000)}`;
 
   // Exports CSV (3 modes + Copier CSV) & Backup JSON (SANS les clés API)
   const handleExportCsv = (mode: 'filtre' | 'propre' | 'complet') => {
-    let target = fiches;
+    let target = accessibleFiches;
     let suffix = 'complet';
     if (mode === 'filtre') {
       target = filteredFiches;
@@ -7556,10 +7930,11 @@ ${assistPasteText.slice(0, 6000)}`;
         g.ids.forEach((id) => allDupIds.add(id));
         merged.push(mergeFicheGroup(g.fiches));
       });
-      target = [...merged, ...fiches.filter((f) => !allDupIds.has(f.id))];
+      target = [...merged, ...accessibleFiches.filter((f) => !allDupIds.has(f.id))];
       suffix = 'base-propre';
     }
-    const csv = buildStrictCsv(target);
+    const delim = advPrefs.csvDelimiter === ',' ? ',' : ';';
+    const csv = buildStrictCsv(target, delim);
     try {
       const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
       const url = URL.createObjectURL(blob);
@@ -7570,7 +7945,7 @@ ${assistPasteText.slice(0, 6000)}`;
       a.click();
       document.body.removeChild(a);
       URL.revokeObjectURL(url);
-      notify(`CSV ${suffix} téléchargé (${target.length} fiches, 9 colonnes, UTF-8 BOM ;).`);
+      notify(`CSV ${suffix} téléchargé (${target.length} fiches, 9 colonnes, UTF-8 BOM ${delim}).`);
     } catch {
       copyTextSafe(csv);
       notify(`Export CSV copié (${target.length} fiches).`);
@@ -7578,14 +7953,16 @@ ${assistPasteText.slice(0, 6000)}`;
   };
 
   const handleCopyCsvForBalise = async () => {
-    const csv = buildStrictCsv(filteredFiches).replace(/^\uFEFF/, '');
+    const delim = advPrefs.csvDelimiter === ',' ? ',' : ';';
+    const csv = buildStrictCsv(filteredFiches, delim).replace(/^\uFEFF/, '');
     await copyTextSafe(csv);
     notify(`${filteredFiches.length} fiche(s) copiées au format CSV 9 colonnes pour Balise.`);
   };
 
   const handleDownloadPreviewCsv = (items: FicheEntreprise[], label: string) => {
     if (items.length === 0) return;
-    const csv = buildStrictCsv(items);
+    const delim = advPrefs.csvDelimiter === ',' ? ',' : ';';
+    const csv = buildStrictCsv(items, delim);
     try {
       const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
       const url = URL.createObjectURL(blob);
@@ -7671,7 +8048,7 @@ ${assistPasteText.slice(0, 6000)}`;
   };
 
   // Saisie rapide & édition inline
-  const handleQuickAdd = (e: React.FormEvent) => {
+  const handleQuickAdd = async (e: React.FormEvent) => {
     e.preventDefault();
     const clean = cleanCompanyName(quickForm.societe);
     if (!isValidCompanyName(clean)) {
@@ -7695,7 +8072,10 @@ ${assistPasteText.slice(0, 6000)}`;
       [],
       extraEmailsIn
     );
-    const nextCode = generateNextNumeroFiche(fiches);
+    const rawNextCode = generateNextNumeroFiche(fiches);
+    const nextCode = formatFicheNumeroWithPrefix(rawNextCode, advPrefs.ficheNumberPrefix);
+    const safeInitialStatut: StatutCRM =
+      !isTeamSupervisor && quickAddStatut === 'Signé Orange Pro' ? 'À contacter' : quickAddStatut;
     const f: FicheEntreprise = {
       id: makeId(),
       numeroFiche: nextCode,
@@ -7710,25 +8090,12 @@ ${assistPasteText.slice(0, 6000)}`;
       role: quickForm.role.trim(),
       source: quickForm.source.trim() || 'Saisie manuelle',
       effectif: quickForm.effectif ? String(parseInt(quickForm.effectif, 10) || '') : '',
-      statut: quickAddStatut,
+      statut: safeInitialStatut,
       dateAjout: new Date().toISOString(),
       statutUpdatedAt: new Date().toISOString(),
     };
-    setFiches((prev) => ensureUniqueNumeroFiches([f, ...prev]));
-    if (cloudUser) {
-      void saveFicheAuditLog(cloudUser.uid, f.id, {
-        ficheId: f.id,
-        action: 'created',
-        field: 'fiche',
-        oldValue: '',
-        newValue: `${f.societe} (${f.statut})`,
-        summary: `Création de la fiche ${nextCode} « ${f.societe} » (${f.ville} · ${f.secteur}) par ${currentUserDisplayName}.`,
-        actorUid: cloudUser.uid,
-        actorName: currentUserDisplayName,
-        actorRole: currentUserRole,
-        createdAtIso: f.dateAjout,
-      });
-    }
+    const nextFiches = ensureUniqueNumeroFiches([f, ...fiches]);
+    setFiches(nextFiches);
     setQuickForm({
       societe: '',
       secteur: 'pme',
@@ -7745,6 +8112,24 @@ ${assistPasteText.slice(0, 6000)}`;
     setQuickAddStatut('À contacter');
     setShowQuickAdd(false);
     notify(`Fiche ${nextCode} « ${f.societe} » ajoutée au portefeuille.`);
+
+    if (cloudUser) {
+      if (cloudSynced) {
+        await persistFichesImmediate(cloudUser.uid, nextFiches);
+      }
+      void saveFicheAuditLog(cloudUser.uid, f.id, {
+        ficheId: f.id,
+        action: 'created',
+        field: 'fiche',
+        oldValue: '',
+        newValue: `${f.societe} (${f.statut})`,
+        summary: `Création de la fiche ${nextCode} « ${f.societe} » (${f.ville} · ${f.secteur}) par ${currentUserDisplayName}.`,
+        actorUid: cloudUser.uid,
+        actorName: currentUserDisplayName,
+        actorRole: currentUserRole,
+        createdAtIso: f.dateAjout,
+      });
+    }
   };
 
   const startEdit = (f: FicheEntreprise, field: keyof FicheEntreprise) => {
@@ -8193,7 +8578,7 @@ ${assistPasteText.slice(0, 6000)}`;
 
   // Studio Email IA & Skills
   const openEmailStudio = (f: FicheEntreprise) => {
-    const defaultCycle: CycleContrat =
+    const inferredCycle: CycleContrat =
       f.statut === 'Devis envoyé'
         ? 'relance_devis'
         : f.statut === 'RDV pris' || f.statut === 'Appel en cours'
@@ -8203,15 +8588,27 @@ ${assistPasteText.slice(0, 6000)}`;
         : f.statut === 'Pas intéressé'
         ? 'reactivation'
         : 'premier_contact';
+    const defaultCycle: CycleContrat =
+      advPrefs.defaultEmailCycle !== 'auto'
+        ? (advPrefs.defaultEmailCycle as CycleContrat)
+        : inferredCycle;
+    const initialTon: TonEmail = advPrefs.defaultEmailTone || emailTon;
     setEmailModalFiche(f);
     setEmailCycle(defaultCycle);
+    setEmailTon(initialTon);
     setEmailCustomPrompt('');
     setEmailProviderUsed('Moteur local instantané');
     setShowSkillEditor(false);
     setEditingSkill(null);
-    const draft = generatePersonalizedEmail(f, defaultCycle, emailTon, emailSignature, activeSkill);
+    const draft = generatePersonalizedEmail(f, defaultCycle, initialTon, emailSignature, activeSkill);
     setEmailObjet(draft.objet);
-    setEmailCorps(draft.corps);
+    setEmailCorps(
+      formatEmailBodyWithOptionalPhone(
+        draft.corps,
+        userProfile.phonePro,
+        advPrefs.autoAppendPhoneInEmail
+      )
+    );
     recordLiveClientActivity(f.societe, f.ville, 'Studio Email IA');
   };
 
@@ -8224,8 +8621,72 @@ ${assistPasteText.slice(0, 6000)}`;
   ) => {
     const draft = generatePersonalizedEmail(f, nextCycle, nextTon, nextSig, nextSkill || activeSkill);
     setEmailObjet(draft.objet);
-    setEmailCorps(draft.corps);
+    setEmailCorps(
+      formatEmailBodyWithOptionalPhone(
+        draft.corps,
+        userProfile.phonePro,
+        advPrefs.autoAppendPhoneInEmail
+      )
+    );
     setEmailProviderUsed('Moteur local instantané');
+  };
+
+  const handleSendEmailViaSmtp = async () => {
+    if (!emailModalFiche || !emailModalFiche.email) {
+      notify('Aucun email destinataire renseigné sur cette fiche.', 'warn');
+      return;
+    }
+    setSendingSmtpEmail(true);
+    try {
+      const idToken = await getCurrentUserIdToken();
+      const res = await fetch('/api/email/send', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(idToken ? { Authorization: `Bearer ${idToken}` } : {}),
+        },
+        body: JSON.stringify({
+          to: emailModalFiche.email,
+          subject: emailObjet,
+          text: emailCorps,
+          replyTo: cloudUser?.email || undefined,
+        }),
+      });
+      const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string };
+      if (!res.ok) {
+        notify(data.error || `Échec d'envoi SMTP (HTTP ${res.status}).`, 'err');
+        return;
+      }
+      const nextStatut: StatutCRM =
+        emailCycle === 'relance_devis' ? 'Devis envoyé' : 'Appel en cours';
+      setFiches((prev) =>
+        prev.map((x) =>
+          x.id === emailModalFiche.id && x.statut !== nextStatut
+            ? { ...x, statut: nextStatut, statutUpdatedAt: new Date().toISOString() }
+            : x
+        )
+      );
+      if (cloudUser) {
+        void logFicheAuditAction(
+          cloudUser.uid,
+          emailModalFiche.id,
+          'email',
+          `Email envoyé via SMTP à ${emailModalFiche.email} — Objet : « ${emailObjet} ».`,
+          {
+            action: 'activity_logged',
+            field: 'email',
+            oldValue: emailModalFiche.statut,
+            newValue: nextStatut,
+          }
+        );
+      }
+      notify(`Email envoyé via SMTP à ${emailModalFiche.email} (${nextStatut}).`);
+      setEmailModalFiche(null);
+    } catch {
+      notify('Erreur réseau lors de l’envoi SMTP.', 'err');
+    } finally {
+      setSendingSmtpEmail(false);
+    }
   };
 
   const handleSaveSkill = () => {
@@ -8289,7 +8750,11 @@ ${assistPasteText.slice(0, 6000)}`;
     e.target.value = '';
   };
 
-  const openSignContractModal = (f: FicheEntreprise) => {
+  const openSignContractModal = (
+    f: FicheEntreprise,
+    ownerUid?: string,
+    ownerDisplayName?: string
+  ) => {
     const reco = getOrangeProRecommendation(f);
     setSignContractTarget({
       id: f.id,
@@ -8300,6 +8765,8 @@ ${assistPasteText.slice(0, 6000)}`;
       effectif: f.effectif,
       suggestedTier: reco.tier,
       suggestedProduit: reco.offre,
+      ownerUid: ownerUid || cloudUser?.uid,
+      ownerDisplayName: ownerDisplayName || currentUserDisplayName,
     });
     recordLiveClientActivity(f.societe, f.ville, 'Signature contrat');
   };
@@ -8314,6 +8781,8 @@ ${assistPasteText.slice(0, 6000)}`;
     if (!signContractTarget || !cloudUser) return;
     setSigningContractBusy(true);
     try {
+      const targetOwnerUid = signContractTarget.ownerUid || cloudUser.uid;
+      const targetOwnerName = signContractTarget.ownerDisplayName || currentUserDisplayName;
       const contractId = `ctr_${signContractTarget.id}_${Date.now().toString(36)}`;
       const resolvedSecteur =
         payload.secteur && payload.secteur in SECTEURS_META
@@ -8325,8 +8794,8 @@ ${assistPasteText.slice(0, 6000)}`;
       const createdContract = await createSignedContract(
         {
           id: contractId,
-          ownerId: cloudUser.uid,
-          ownerName: currentUserDisplayName,
+          ownerId: targetOwnerUid,
+          ownerName: targetOwnerName,
           ficheId: signContractTarget.id,
           numeroFiche: signContractTarget.numeroFiche || '',
           societe: signContractTarget.societe,
@@ -8344,35 +8813,60 @@ ${assistPasteText.slice(0, 6000)}`;
 
       if (isSuperAdmin) {
         const nextOwnerContracts: SignedContractRecord[] = [
-          ...signedContracts.filter((c) => c.ownerId === cloudUser.uid && c.id !== createdContract.id),
+          ...signedContracts.filter((c) => c.ownerId === targetOwnerUid && c.id !== createdContract.id),
           {
             ...createdContract,
             orgScope: 'orange_pro_team',
           },
         ];
         void adminSyncMemberContractStats(
-          cloudUser.uid,
+          targetOwnerUid,
           buildMemberContractSyncSummary(nextOwnerContracts)
         );
       }
 
       const prevFicheStatut =
-        fiches.find((x) => x.id === signContractTarget.id)?.statut || 'En cours';
-      setFiches((prev) =>
-        prev.map((x) =>
-          x.id === signContractTarget.id
-            ? {
-                ...x,
-                secteur: resolvedSecteur as SecteurCode,
-                effectif: resolvedEffectif,
-                statut: 'Signé Orange Pro',
-                statutUpdatedAt: new Date().toISOString(),
-              }
-            : x
-        )
-      );
+        (targetOwnerUid === cloudUser.uid
+          ? fiches.find((x) => x.id === signContractTarget.id)?.statut
+          : detailModalExternalTarget?.fiche.statut) || 'En cours';
+
+      const signedNowIso = new Date().toISOString();
+      if (targetOwnerUid === cloudUser.uid) {
+        setFiches((prev) =>
+          prev.map((x) =>
+            x.id === signContractTarget.id
+              ? {
+                  ...x,
+                  secteur: resolvedSecteur as SecteurCode,
+                  effectif: resolvedEffectif,
+                  statut: 'Signé Orange Pro',
+                  statutUpdatedAt: signedNowIso,
+                }
+              : x
+          )
+        );
+      } else {
+        const sourceFiche =
+          detailModalExternalTarget?.fiche.id === signContractTarget.id
+            ? detailModalExternalTarget.fiche
+            : null;
+        if (sourceFiche) {
+          const updatedCollabFiche: FicheEntreprise = {
+            ...sourceFiche,
+            secteur: resolvedSecteur as SecteurCode,
+            effectif: resolvedEffectif,
+            statut: 'Signé Orange Pro',
+            statutUpdatedAt: signedNowIso,
+          };
+          await updateTeamMemberFiche(targetOwnerUid, updatedCollabFiche);
+          setDetailModalExternalTarget((prev) =>
+            prev ? { ...prev, fiche: updatedCollabFiche } : null
+          );
+        }
+      }
+
       void logFicheAuditAction(
-        cloudUser.uid,
+        targetOwnerUid,
         signContractTarget.id,
         'signature',
         `Contrat Orange Pro signé (${payload.produitOrangePro} — ${payload.tier}${canSetInitialPayout ? ` · ${payload.payoutMad.toLocaleString('fr-FR')} MAD` : ' · En attente de validation supervision'}).`,
@@ -8384,10 +8878,12 @@ ${assistPasteText.slice(0, 6000)}`;
         }
       );
 
-      // Notification cloud persistante vers tous les superviseurs (Chef d'équipe, Manager, Super-Admin)
-      const signedNowIso = new Date().toISOString();
+      // Notification cloud persistante vers tous les superviseurs (Chef d'équipe, Manager, Super-Admin) et le propriétaire
       const initialStatus: PayoutStatus = canSetInitialPayout ? 'Validé' : 'En attente';
       const supervisorRecipients = new Set<string>();
+      if (targetOwnerUid !== cloudUser.uid) {
+        supervisorRecipients.add(targetOwnerUid);
+      }
       for (const m of teamStats) {
         if (
           m.active !== false &&
@@ -8407,7 +8903,7 @@ ${assistPasteText.slice(0, 6000)}`;
           title: `Nouveau contrat signé — ${signContractTarget.societe}`,
           message: `${currentUserDisplayName} a signé « ${signContractTarget.societe} » (${payload.produitOrangePro} · ${payload.tier}) — Statut : ${initialStatus}.`,
           ficheId: signContractTarget.id,
-          ficheOwnerId: cloudUser.uid,
+          ficheOwnerId: targetOwnerUid,
           numeroFiche: signContractTarget.numeroFiche,
           societe: signContractTarget.societe,
           payoutStatus: initialStatus,
@@ -9008,6 +9504,7 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
                   notifications={filterNotificationsForRole(notifications, currentUserRole)}
                   currentUserRole={currentUserRole}
                   onMarkAllRead={handleMarkAllNotificationsRead}
+                  onMarkOneRead={handleMarkOneNotificationRead}
                   onOpenBadges={() => navigateCrm('badges')}
                   onOpenTeam={() => navigateCrm('team')}
                   onOpenCrm={() => navigateCrm('portefeuille')}
@@ -10051,7 +10548,13 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
             </section>
 
             {/* Graphique de Tendance KPI & Dynamique Pipeline */}
-            <KpiTrendChart fiches={filteredFiches} totalUnfilteredCount={fiches.length} />
+            <KpiTrendChart
+              fiches={filteredFiches}
+              totalUnfilteredCount={accessibleFiches.length}
+              targetMaturityPct={advPrefs.targetMaturityPct}
+              monthlyGoalPayoutMad={advPrefs.monthlyGoalPayoutMad}
+              currentMonthPayoutMad={myCurrentMonthStats.currentMonthPayoutMad}
+            />
 
             {/* Barre Recherche, Filtres Avancés, Statuts CRM & Exports */}
             <section className="bg-white rounded-xl border border-stone-200 p-4 space-y-3">
@@ -10180,7 +10683,7 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
                         : 'bg-stone-100 text-stone-700 hover:bg-stone-200'
                     }`}
                   >
-                    Tous ({fiches.length})
+                    Tous ({accessibleFiches.length})
                   </button>
                   {STATUTS_CRM.map((st) => {
                     const isActive = statutFilter === st;
@@ -10260,7 +10763,7 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
                     </span>
                   </button>
                   <span className="text-stone-600 font-medium whitespace-nowrap" data-testid="portfolio-count">
-                    {filteredFiches.length} / {fiches.length} fiches
+                    {filteredFiches.length} / {accessibleFiches.length} fiches
                   </span>
                   {hasActiveFilters && (
                     <button
@@ -10408,6 +10911,8 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
                 velocityReport={velocityReport}
                 verifyingId={verifyingId}
                 canSuperviseTeam={isTeamSupervisor}
+                targetMaturityPct={advPrefs.targetMaturityPct}
+                preferredContactChannel={advPrefs.preferredContactChannel}
                 onMoveFiche={handleMoveFicheKanban}
                 onOpenEmail={openEmailStudio}
                 onVerifyOne={handleVerifyWeb}
@@ -10688,13 +11193,29 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
                                 <select
                                   aria-label={`Secteur de ${f.societe}`}
                                   value={f.secteur}
-                                  onChange={(e) =>
+                                  onChange={(e) => {
+                                    const nextSec = e.target.value as SecteurCode;
+                                    const prevSec = f.secteur;
                                     setFiches((prev) =>
                                       prev.map((x) =>
-                                        x.id === f.id ? { ...x, secteur: e.target.value as SecteurCode } : x
+                                        x.id === f.id ? { ...x, secteur: nextSec } : x
                                       )
-                                    )
-                                  }
+                                    );
+                                    if (cloudUser && prevSec !== nextSec) {
+                                      void logFicheAuditAction(
+                                        cloudUser.uid,
+                                        f.id,
+                                        'modification',
+                                        `Secteur modifié de « ${prevSec} » vers « ${nextSec} ».`,
+                                        {
+                                          action: 'field_updated',
+                                          field: 'secteur',
+                                          oldValue: prevSec,
+                                          newValue: nextSec,
+                                        }
+                                      );
+                                    }
+                                  }}
                                   className={`px-2 py-0.5 rounded-md text-[11px] font-semibold border cursor-pointer ${seg.badgeCls}`}
                                 >
                                   {(Object.keys(SECTEURS_META) as SecteurCode[]).map((code) => (
@@ -11988,6 +12509,7 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
             isSuperAdmin={isSuperAdmin}
             myMetrics={myCollaboratorMetrics}
             teamStats={teamStats}
+            signedContracts={signedContracts}
             initialSelectedUid={badgesFocusUid}
             onAdminToggleManualBadge={isSuperAdmin ? handleAdminToggleManualBadge : undefined}
           />
@@ -12014,6 +12536,8 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
             achievementSummary={myAchievementSummary}
             contractsCount={myCollaboratorMetrics.contractsCount}
             totalPayoutMad={myCollaboratorMetrics.totalPayoutMad}
+            currentMonthContractsCount={myCurrentMonthStats.currentMonthContractsCount}
+            currentMonthPayoutMad={myCurrentMonthStats.currentMonthPayoutMad}
             prospectsCount={myCollaboratorMetrics.totalProspects}
             onSaveProfile={handleSaveUserProfile}
             onExportBackup={handleExportFullBackup}
@@ -12800,6 +13324,18 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
             {/* Actions directes Envoi & CRM */}
             <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-stone-200">
               <div className="flex flex-wrap gap-2">
+                {smtpStatus.configured && emailModalFiche.email && (
+                  <button
+                    type="button"
+                    disabled={sendingSmtpEmail}
+                    onClick={() => void handleSendEmailViaSmtp()}
+                    data-testid="send-email-smtp-btn"
+                    className="px-3.5 py-2 rounded-lg bg-emerald-700 hover:bg-emerald-800 disabled:opacity-60 text-white text-xs font-semibold flex items-center gap-1.5"
+                  >
+                    <Mail className="w-3.5 h-3.5" />
+                    {sendingSmtpEmail ? 'Envoi SMTP...' : 'Envoyer via SMTP'}
+                  </button>
+                )}
                 <a
                   href={`https://mail.google.com/mail/?view=cm&fs=1&to=${encodeURIComponent(
                     emailModalFiche.email || ''
@@ -12845,6 +13381,20 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
                         : x
                     )
                   );
+                  if (cloudUser) {
+                    void logFicheAuditAction(
+                      cloudUser.uid,
+                      emailModalFiche.id,
+                      'email',
+                      `Email commercial envoyé (${emailCycle}) — Objet : « ${emailObjet} ».`,
+                      {
+                        action: 'activity_logged',
+                        field: 'email',
+                        oldValue: emailModalFiche.statut,
+                        newValue: nextStatut,
+                      }
+                    );
+                  }
                   notify(`Statut CRM mis à jour : ${nextStatut}`);
                   setEmailModalFiche(null);
                 }}
@@ -12872,7 +13422,7 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
               <div className="flex items-center gap-2">
                 <h2 className="text-base font-bold text-stone-900">Nouvelle fiche entreprise</h2>
                 <span className="px-2 py-0.5 rounded bg-orange-50 border border-orange-200 font-mono text-[11px] font-bold text-orange-800">
-                  {generateNextNumeroFiche(fiches)}
+                  {formatFicheNumeroWithPrefix(generateNextNumeroFiche(fiches), advPrefs.ficheNumberPrefix)}
                 </span>
               </div>
               <button
@@ -12924,7 +13474,10 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
                   onChange={(e) => setQuickAddStatut(e.target.value as StatutCRM)}
                   className="w-full px-3 py-2 rounded-lg border border-stone-300 bg-white"
                 >
-                  {STATUTS_CRM.map((s) => (
+                  {(isTeamSupervisor
+                    ? STATUTS_CRM
+                    : STATUTS_CRM.filter((s) => s !== 'Signé Orange Pro')
+                  ).map((s) => (
                     <option key={s} value={s}>
                       {s}
                     </option>
@@ -13148,6 +13701,14 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
           setDetailModalExternalTarget(null);
         }}
         onChangeStatut={(targetFiche, nextStatut) => {
+          if (nextStatut === 'Signé Orange Pro') {
+            openSignContractModal(
+              targetFiche,
+              detailModalExternalTarget?.ownerUid || cloudUser.uid,
+              detailModalExternalTarget?.ownerName || currentUserDisplayName
+            );
+            return;
+          }
           if (detailModalExternalTarget && detailModalExternalTarget.ownerUid !== cloudUser.uid) {
             const ownerUid = detailModalExternalTarget.ownerUid;
             const prevStatut = targetFiche.statut;
@@ -13178,10 +13739,6 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
                 notify(`Statut mis à jour vers « ${nextStatut} ».`);
               })
               .catch(() => notify('Impossible de modifier le statut de cette fiche.', 'err'));
-            return;
-          }
-          if (nextStatut === 'Signé Orange Pro') {
-            openSignContractModal(targetFiche);
             return;
           }
           handleMoveFicheKanban(targetFiche.id, nextStatut);
@@ -13265,7 +13822,13 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
           setAssistAiSummary('');
           setLastVerifyDiag('');
         }}
-        onOpenSignContract={(f) => openSignContractModal(f)}
+        onOpenSignContract={(f) =>
+          openSignContractModal(
+            f,
+            detailModalExternalTarget?.ownerUid || cloudUser.uid,
+            detailModalExternalTarget?.ownerName || currentUserDisplayName
+          )
+        }
         onOpenAssign={
           isTeamSupervisor
             ? (f, ownerUid) => {
@@ -13332,6 +13895,7 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
         actorRole={currentUserRole}
         commercialEmail={cloudUser.email || undefined}
         commercialPhone={userProfile.phonePro || undefined}
+        workspaceLegal={workspaceLegal}
         onFicheUpdated={(updatedFiche) => {
           const targetOwner = quoteModalOwnerUid || cloudUser.uid;
           if (targetOwner === cloudUser.uid) {
@@ -13416,6 +13980,7 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
       <SignContractModal
         target={signContractTarget}
         isSuperAdmin={isSuperAdmin}
+        canSetInitialPayout={isTeamSupervisor}
         submitting={signingContractBusy}
         onClose={() => setSignContractTarget(null)}
         onConfirm={handleConfirmSignContract}
@@ -13487,6 +14052,7 @@ Réponds UNIQUEMENT en JSON strict : {"objet": "...", "corps": "..."}`;
             userPresences.find((p) => p.role === 'super_admin')?.uid
           }
           forceOpenSignal={collabChatOpenSignal}
+          hasCoachingInvite={notifications.some((n) => n.kind === 'coaching_invite' && !n.read)}
           onNotify={(msg, type) =>
             notify(msg, type === 'err' ? 'err' : type === 'warn' ? 'warn' : 'ok')
           }

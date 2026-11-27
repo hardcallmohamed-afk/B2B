@@ -13,7 +13,7 @@ import type { FicheEntreprise, StatutCRM } from '../App';
 import { ORANGE_PRO_PRODUCTS, type OrangeProTier } from '../utils/gamification';
 import { getOrangeProRecommendation } from '../App';
 import { generateClientQuotePdf } from '../utils/pdfGenerator';
-import { saveFicheActivite } from '../firebase';
+import { saveFicheActivite, saveFicheAuditLog } from '../firebase';
 
 interface QuoteModalProps {
   isOpen: boolean;
@@ -83,9 +83,16 @@ export const QuoteModal: React.FC<QuoteModalProps> = ({
     e.preventDefault();
     setErrorMessage(null);
 
+    const safeFixe = Math.max(0, Number(quantiteFixe) || 0);
+    const safeMobile = Math.max(0, Number(quantiteMobile) || 0);
+    if (safeFixe + safeMobile < 1) {
+      setErrorMessage('Veuillez renseigner au moins 1 ligne fixe/fibre ou 1 ligne mobile.');
+      return;
+    }
+
     const monthlyPrice = Number(prixMensuelMad);
     if (isNaN(monthlyPrice) || monthlyPrice <= 0) {
-      setErrorMessage('Veuillez saisir un prix mensuel MAD valide (ex: 1450).');
+      setErrorMessage('Veuillez saisir un prix mensuel MAD valide (ex: 649 ou 1450).');
       return;
     }
 
@@ -99,8 +106,8 @@ export const QuoteModal: React.FC<QuoteModalProps> = ({
         fiche,
         produitOrangePro: selectedProduct,
         tier: effectiveTier,
-        quantiteFixe,
-        quantiteMobile,
+        quantiteFixe: safeFixe,
+        quantiteMobile: safeMobile,
         prixMensuelMad: monthlyPrice,
         validityDays,
         commercialName: currentUserName,
@@ -109,7 +116,7 @@ export const QuoteModal: React.FC<QuoteModalProps> = ({
         workspaceLegal,
       });
 
-      // 2. Enregistrer l'activité type 'devis' dans la sous-collection
+      // 2. Enregistrer l'activité type 'devis' et l'audit_log dans la sous-collection
       const activiteId = `act_devis_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
       const nowIso = new Date().toISOString();
       const auteur = currentUserName.trim().slice(0, 120) || 'Commercial';
@@ -121,12 +128,26 @@ export const QuoteModal: React.FC<QuoteModalProps> = ({
         ficheId: fiche.id,
         type: 'devis',
         resultat: 'autre',
-        texte: `Devis client généré : ${selectedProduct} (${monthlyPrice.toLocaleString('fr-FR')} MAD/mois). Validité : ${validityDays} jours.`,
+        texte: `Devis client généré : ${selectedProduct} (${safeFixe} fix. / ${safeMobile} mob. · ${monthlyPrice.toLocaleString('fr-FR')} MAD HT/mois). Validité : ${validityDays} jours.`,
         auteurNom: auteur,
         auteurUid: actorUid || currentUserUid,
         auteurRole: actorRole,
         createdAtIso: nowIso,
       });
+
+      void saveFicheAuditLog(effectiveOwnerUid, fiche.id, {
+        ownerId: effectiveOwnerUid,
+        ficheId: fiche.id,
+        action: 'updated',
+        field: 'devis_pdf',
+        oldValue: fiche.statut,
+        newValue: `${selectedProduct} (${monthlyPrice} MAD HT/mois)`,
+        summary: `Devis PDF généré : ${selectedProduct} (${monthlyPrice} MAD HT/mois)`,
+        actorUid: actorUid || currentUserUid,
+        actorName: auteur,
+        actorRole: actorRole || 'commercial',
+        createdAtIso: nowIso,
+      }).catch(() => {});
 
       // 3. Mettre à jour éventuellement la fiche en 'Devis envoyé' si demandé (sans jamais rétrograder un contrat signé)
       let updatedFiche = { ...fiche };
@@ -197,7 +218,7 @@ export const QuoteModal: React.FC<QuoteModalProps> = ({
           )}
 
           <div className="p-3 bg-amber-50/70 border border-amber-200 rounded-lg text-[11px] text-amber-900">
-            <strong>Règle de conformité :</strong> Le document PDF téléchargé intègre les informations légales de votre workspace et le tarif client saisi. Aucune commission commerciale n’y figure jamais.
+            <strong>Règle de conformité :</strong> Le document PDF téléchargé intègre les informations légales de votre workspace et le tarif client saisi (HT, TVA 20% &amp; TTC). Aucune commission commerciale n’y figure jamais.
           </div>
 
           {/* Choix de l'offre Orange Pro */}
@@ -222,27 +243,27 @@ export const QuoteModal: React.FC<QuoteModalProps> = ({
           <div className="grid grid-cols-2 gap-3">
             <div>
               <label className="block text-xs font-semibold text-stone-800 mb-1">
-                Lignes Fixes / Fibre
+                Lignes Fixes / Fibre (0 si mobile seul)
               </label>
               <input
                 type="number"
-                min={1}
-                max={50}
+                min={0}
+                max={500}
                 value={quantiteFixe}
-                onChange={(e) => setQuantiteFixe(Math.max(1, parseInt(e.target.value) || 1))}
+                onChange={(e) => setQuantiteFixe(Math.max(0, parseInt(e.target.value, 10) || 0))}
                 className="w-full px-3 py-1.5 text-xs bg-white border border-stone-300 rounded-lg focus:outline-hidden focus:ring-1 focus:ring-orange-500"
               />
             </div>
             <div>
-                <label className="block text-xs font-semibold text-stone-800 mb-1">
-                Lignes Mobiles Illimitées
+              <label className="block text-xs font-semibold text-stone-800 mb-1">
+                Lignes Mobiles Illimitées (0 si fibre seule)
               </label>
               <input
                 type="number"
-                min={1}
-                max={500}
+                min={0}
+                max={5000}
                 value={quantiteMobile}
-                onChange={(e) => setQuantiteMobile(Math.max(1, parseInt(e.target.value) || 1))}
+                onChange={(e) => setQuantiteMobile(Math.max(0, parseInt(e.target.value, 10) || 0))}
                 className="w-full px-3 py-1.5 text-xs bg-white border border-stone-300 rounded-lg focus:outline-hidden focus:ring-1 focus:ring-orange-500"
               />
             </div>
@@ -256,17 +277,17 @@ export const QuoteModal: React.FC<QuoteModalProps> = ({
             </label>
             <input
               type="number"
-              min={100}
+              min={1}
               max={1000000}
-              step={50}
+              step={1}
               required
-              placeholder="Ex : 1450"
+              placeholder="Ex : 649 ou 1450"
               value={prixMensuelMad}
               onChange={(e) => setPrixMensuelMad(e.target.value === '' ? '' : Number(e.target.value))}
               className="w-full px-3 py-2 text-sm bg-white border border-stone-300 rounded-lg focus:outline-hidden focus:ring-2 focus:ring-orange-500 font-mono font-bold text-stone-900"
             />
             <p className="text-[10px] text-stone-500 mt-1">
-              Tarif négocié avec le client prospect (aucun tarif inventé).
+              Tarif libre négocié avec le client prospect (TVA 20% et TTC calculés automatiquement sur le PDF).
             </p>
           </div>
 
